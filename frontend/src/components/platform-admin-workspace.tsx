@@ -29,24 +29,39 @@ async function api(path: string, options?: RequestInit) {
 }
 
 const title = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+const emptyCatalog: Catalog = { summary: { universities: 0, active: 0, domains: 0, administrators: 0 }, universities: [] };
+let cachedControlPlane: Catalog | null = null;
+let controlPlaneRequest: Promise<Catalog> | null = null;
+
+function loadControlPlaneCatalog() {
+  if (!controlPlaneRequest) {
+    controlPlaneRequest = api("/api/v1/enterprise/control-plane")
+      .then((body) => {
+        cachedControlPlane = body as Catalog;
+        return cachedControlPlane;
+      })
+      .finally(() => { controlPlaneRequest = null; });
+  }
+  return controlPlaneRequest;
+}
 
 export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenantId: string) => Promise<void> }) {
-  const [catalog, setCatalog] = useState<Catalog>({ summary: { universities: 0, active: 0, domains: 0, administrators: 0 }, universities: [] });
+  const [catalog, setCatalog] = useState<Catalog>(() => cachedControlPlane || emptyCatalog);
   const [selected, setSelected] = useState<University | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [result, setResult] = useState<ProvisioningResult | null>(null);
   const [fieldCatalog, setFieldCatalog] = useState<FormCatalog>({ forms: [], fields: [] });
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!cachedControlPlane);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const load = useCallback(async () => {
-    setLoading(true);
-    try { setCatalog(await api("/api/v1/enterprise/control-plane")); setError(""); }
+  const load = useCallback(async (showLoading = !cachedControlPlane) => {
+    if (showLoading) setLoading(true);
+    try { setCatalog(await loadControlPlaneCatalog()); setError(""); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Control plane could not be loaded"); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => { const timer = window.setTimeout(() => void load(!cachedControlPlane), 0); return () => window.clearTimeout(timer); }, [load]);
 
   async function provision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSaving(true); setError("");
@@ -57,7 +72,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
         admin_email: data.get("admin_email"), admin_first_name: data.get("admin_first_name"), admin_last_name: data.get("admin_last_name"),
         storage_quota_gb: Number(data.get("storage_quota_gb")), data_region: data.get("data_region"), policy: { timezone: data.get("timezone") },
       }) });
-      setResult(created); setModal(null); setNotice(`${created.name} is ready on ${created.hostname}`); await load();
+      cachedControlPlane = null; setResult(created); setModal(null); setNotice(`${created.name} is ready on ${created.hostname}`); await load(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "University could not be provisioned"); }
     finally { setSaving(false); }
   }
@@ -70,7 +85,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
         version: selected.version, status: data.get("status"), plan: data.get("plan"), storage_quota_gb: Number(data.get("storage_quota_gb")),
         data_region: data.get("data_region"), enabled_modules: data.getAll("modules"),
       }) });
-      setModal(null); setNotice(`${selected.name} settings updated`); await load();
+      cachedControlPlane = null; setModal(null); setNotice(`${selected.name} settings updated`); await load(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "University settings could not be updated"); }
     finally { setSaving(false); }
   }
@@ -80,7 +95,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
     const data = new FormData(event.currentTarget);
     try {
       const created = await api(`/api/v1/enterprise/tenants/${selected.id}/domains`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostname: data.get("hostname") }) });
-      setModal(null); setNotice(`Add TXT ${created.verification_record} = ${created.verification_token}`); await load();
+      cachedControlPlane = null; setModal(null); setNotice(`Add TXT ${created.verification_record} = ${created.verification_token}`); await load(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Custom domain could not be added"); }
     finally { setSaving(false); }
   }
