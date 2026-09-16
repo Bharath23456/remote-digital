@@ -494,13 +494,16 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .script-page-wrap.fit-width { width: 100%; }
 .script-page-wrap img { width: 100%; height: auto; }
 .script-page-wrap.annotating { cursor: crosshair; }
-.annotation-mark { position: absolute; z-index: 3; transform: translate(-50%, -50%); color: #cf2929; font-size: 30px; font-weight: 800; line-height: 1; text-shadow: 0 1px white; pointer-events: none; }
+.script-page-wrap.question-jump { animation: questionJump 1.2s ease-out; }
+@keyframes questionJump { 0% { box-shadow: 0 0 0 0 rgba(40,123,89,.55); } 100% { box-shadow: 0 0 0 14px rgba(40,123,89,0); } }
+.annotation-mark { position: absolute; z-index: 3; transform: translate(-50%, -50%); color: #cf2929; font-size: 30px; font-weight: 800; line-height: 1; text-shadow: 0 1px white; cursor: pointer; pointer-events: auto; }
 .annotation-mark.tick { color: #18834e; }
 .annotation-mark.arrow { font-size: 25px; }
-.annotation-shape { position: absolute; z-index: 3; border: 2px solid #cf2929; pointer-events: none; }
+.annotation-shape { position: absolute; z-index: 3; border: 2px solid #cf2929; cursor: pointer; pointer-events: auto; }
 .annotation-shape.circle { border-radius: 50%; }
 .annotation-shape.highlight { border: 0; background: rgba(246,216,95,.48); mix-blend-mode: multiply; }
 .annotation-shape.underline { border: 0; border-bottom: 3px solid #cf2929; }
+.annotation-mark.selected, .annotation-shape.selected { filter: drop-shadow(0 0 4px rgba(40,123,89,.75)); outline: 2px solid rgba(40,123,89,.45); outline-offset: 3px; }
 .marking-panel { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr) auto; border-left: 1px solid #3b423e; background: #f8faf9; color: #18221d; }
 .marking-panel > header { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #dce3df; padding: 9px 13px; }
 .marking-panel > header > div:first-child { display: grid; min-width: 0; gap: 3px; }
@@ -509,13 +512,17 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .mark-total { display: grid; justify-items: end; }
 .mark-total strong { color: #176244; font-size: 22px !important; }
 .question-strip { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid #dce3df; padding: 7px 9px; }
-.question-strip button { display: flex; min-width: 42px; height: 31px; align-items: center; justify-content: center; gap: 3px; border: 1px solid #d2dad5; border-radius: 4px; background: white; color: #3c4a43; cursor: pointer; font-size: 10px; }
+.question-strip button { position: relative; display: flex; min-width: 42px; height: 31px; align-items: center; justify-content: center; gap: 3px; border: 1px solid #d2dad5; border-radius: 4px; background: white; color: #3c4a43; cursor: pointer; font-size: 10px; }
+.question-strip button.pinned::before { position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: #287b59; content: ""; }
 .question-strip button.active { border-color: #287b59; background: #e5f2ec; color: #15583d; }
 .question-strip svg { width: 11px; }
 .marking-scroll { min-height: 0; overflow-y: auto; }
 .marking-section { display: grid; gap: 9px; border-bottom: 1px solid #dce3df; padding: 12px; }
 .marking-section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .marking-section-title strong { font-size: 12px; }
+.question-title { display: flex; align-items: center; gap: 6px; }
+.pin-question { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid #cdd6d1; border-radius: 4px; background: white; color: #287b59; cursor: pointer; }
+.pin-question:disabled { cursor: not-allowed; opacity: .45; }
 .marking-section-title span, .marking-section-title svg { color: #718078; font-size: 9px; }
 .marking-section-title svg { width: 14px; }
 .criterion-note { display: grid; gap: 3px; border-left: 3px solid #378362; background: #eef5f1; padding: 8px 9px; }
