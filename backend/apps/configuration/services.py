@@ -92,7 +92,7 @@ def paper_snapshot(paper):
         "status": paper.status,
         "effective_from": paper.effective_from.isoformat() if paper.effective_from else None,
         "questions": [
-            {"number": question.number, "max_marks": str(question.max_marks), "required": question.required, "position": question.position}
+            {"number": question.number, "sub_question": question.sub_question, "max_marks": str(question.max_marks), "question_type": question.question_type, "required": question.required, "position": question.position}
             for question in paper.questions.all()
         ],
     }
@@ -120,10 +120,21 @@ def paper_detail(paper):
     readiness = paper_readiness(paper)
     return {
         **_row(paper, ("session_id", "subject_id", "code", "title", "max_marks", "pass_marks", "valuation_rounds", "discrepancy_threshold", "moderation_required", "rules", "status", "version", "effective_from", "frozen_at")),
-        "questions": [_row(item, ("number", "max_marks", "required", "position")) for item in paper.questions.all()],
+        "questions": [question_detail(item) for item in paper.questions.all()],
         "approval_count": paper.approvals.filter(decision=ConfigurationApproval.Decision.APPROVED).count(),
         "readiness": readiness,
     }
+
+
+def question_detail(question):
+    return _row(question, ("number", "sub_question", "max_marks", "question_type", "required", "position"))
+
+
+def paper_for_configuration(tenant_id, paper_id):
+    paper = Paper.objects.filter(id=paper_id, tenant_id=tenant_id).select_related("session", "subject").prefetch_related("questions", "approvals").first()
+    if not paper:
+        raise ConfigurationError("Paper was not found")
+    return paper
 
 
 def _related(model, tenant_id, item_id, label):
@@ -258,8 +269,11 @@ def add_question(*, tenant_id, actor_id, paper_id, values):
     paper = Paper.objects.select_for_update().filter(id=paper_id, tenant_id=tenant_id).first()
     if not paper:
         raise ConfigurationError("Paper was not found")
-    if paper.status == Paper.Status.FROZEN:
-        raise ConfigurationConflict("Frozen paper configuration cannot be changed")
+    if paper.status != Paper.Status.DRAFT:
+        raise ConfigurationConflict("Questions can only be changed while a paper is in Draft. Create a governed revision for a paper already under review, approved, or frozen.")
+    values = _question_values(values)
+    if values["position"] is None:
+        values["position"] = max((item.position for item in paper.questions.all()), default=0) + 1
     try:
         question = Question.objects.create(tenant_id=tenant_id, paper=paper, **values)
     except IntegrityError as exc:
@@ -269,6 +283,70 @@ def add_question(*, tenant_id, actor_id, paper_id, values):
     ConfigurationRevision.objects.create(tenant_id=tenant_id, aggregate_type="Paper", aggregate_id=paper.id, version=paper.version, change_type=ConfigurationRevision.ChangeType.UPDATE, snapshot=paper_snapshot(paper), actor_id=actor_id, reason="Question added")
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.question.created", aggregate="Question", aggregate_id=question.id, payload={"paper_id": str(paper.id), "paper_version": paper.version})
     return question, paper
+
+
+def _question_values(values):
+    result = dict(values)
+    result["number"] = str(result["number"]).strip()
+    result["sub_question"] = str(result.get("sub_question") or "").strip()
+    if not result["number"] or len(result["number"]) > 16 or len(result["sub_question"]) > 8:
+        raise ConfigurationError("Question number or sub-question is invalid")
+    if result.get("question_type", Question.Type.DESCRIPTIVE) not in Question.Type.values:
+        raise ConfigurationError("Question type is invalid")
+    if result["max_marks"] < 0:
+        raise ConfigurationError("Question marks cannot be negative")
+    if result.get("position") is not None and not 1 <= result["position"] <= 32767:
+        raise ConfigurationError("Question position is invalid")
+    return result
+
+
+@transaction.atomic
+def update_question(*, tenant_id, actor_id, paper_id, question_id, version, values):
+    paper = Paper.objects.select_for_update().filter(id=paper_id, tenant_id=tenant_id).first()
+    if not paper:
+        raise ConfigurationError("Paper was not found")
+    if paper.version != version:
+        raise ConfigurationConflict("Paper was changed by another user")
+    if paper.status != Paper.Status.DRAFT:
+        raise ConfigurationConflict("Questions can only be changed while a paper is in Draft")
+    question = Question.objects.filter(id=question_id, paper=paper, tenant_id=tenant_id).first()
+    if not question:
+        raise ConfigurationError("Question was not found in this paper")
+    values = _question_values(values)
+    if values["position"] is None:
+        values["position"] = question.position
+    for field, value in values.items():
+        setattr(question, field, value)
+    try:
+        question.save(update_fields=[*values, "updated_at"])
+    except IntegrityError as exc:
+        raise ConfigurationConflict("Question number already exists in this paper") from exc
+    paper.version += 1
+    paper.save(update_fields=["version", "updated_at"])
+    ConfigurationRevision.objects.create(tenant_id=tenant_id, aggregate_type="Paper", aggregate_id=paper.id, version=paper.version, change_type=ConfigurationRevision.ChangeType.UPDATE, snapshot=paper_snapshot(paper), actor_id=actor_id, reason="Question updated")
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.question.updated", aggregate="Question", aggregate_id=question.id, payload={"paper_id": str(paper.id), "paper_version": paper.version})
+    return question, paper
+
+
+@transaction.atomic
+def delete_question(*, tenant_id, actor_id, paper_id, question_id, version):
+    paper = Paper.objects.select_for_update().filter(id=paper_id, tenant_id=tenant_id).first()
+    if not paper:
+        raise ConfigurationError("Paper was not found")
+    if paper.version != version:
+        raise ConfigurationConflict("Paper was changed by another user")
+    if paper.status != Paper.Status.DRAFT:
+        raise ConfigurationConflict("Questions can only be changed while a paper is in Draft")
+    question = Question.objects.filter(id=question_id, paper=paper, tenant_id=tenant_id).first()
+    if not question:
+        raise ConfigurationError("Question was not found in this paper")
+    question_id = question.id
+    question.delete()
+    paper.version += 1
+    paper.save(update_fields=["version", "updated_at"])
+    ConfigurationRevision.objects.create(tenant_id=tenant_id, aggregate_type="Paper", aggregate_id=paper.id, version=paper.version, change_type=ConfigurationRevision.ChangeType.UPDATE, snapshot=paper_snapshot(paper), actor_id=actor_id, reason="Question deleted")
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.question.deleted", aggregate="Question", aggregate_id=question_id, payload={"paper_id": str(paper.id), "paper_version": paper.version})
+    return paper
 
 
 @transaction.atomic
@@ -524,7 +602,9 @@ def _apply_change(request, actor_id):
                     tenant_id=request.tenant_id,
                     paper=paper,
                     number=item["number"],
+                    sub_question=item.get("sub_question", ""),
                     max_marks=Decimal(str(item["max_marks"])),
+                    question_type=item.get("question_type", Question.Type.DESCRIPTIVE),
                     required=item["required"],
                     position=item["position"],
                 )
