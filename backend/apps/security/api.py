@@ -12,7 +12,8 @@ from ninja.errors import HttpError
 
 from apps.core.authz import membership_for, require_roles, require_step_up
 from apps.core.services import record_event
-from apps.identity_auth.models import OidcProvider
+from apps.identity_auth.models import AccessSession, AuthenticationMethod, DeviceAuthorization, OidcProvider
+from apps.identity_auth.services import active_session_for_request, policy_for
 from apps.security.crypto import encrypt_secret
 from apps.tenancy.custom_fields import validate_custom_values
 from apps.tenancy.models import Membership, TenantAccount
@@ -76,11 +77,30 @@ def security_catalog(request):
     grants = EmergencyAccessGrant.objects.filter(tenant_id=tenant_id).select_related("user", "granted_by")[:100]
     dlp_incidents = DlpIncident.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100]
     members = Membership.objects.filter(institution__tenant_id=tenant_id).select_related("user", "institution").order_by("user__first_name")
+    authenticator_users = set(AuthenticationMethod.objects.filter(
+        user_id__in=members.values("user_id"), kind=AuthenticationMethod.Kind.TOTP, is_active=True
+    ).values_list("user_id", flat=True))
+    shared_users = set(Membership.objects.filter(user_id__in=members.values("user_id"), is_active=True).exclude(
+        institution__tenant_id=tenant_id
+    ).values_list("user_id", flat=True))
     account = TenantAccount.objects.filter(root_institution__tenant_id=tenant_id).first()
     providers = OidcProvider.objects.filter(tenant_id=tenant_id).order_by("name")
+    devices = DeviceAuthorization.objects.filter(tenant_id=tenant_id).select_related("device__user", "approved_by").order_by("-created_at")[:100]
     keys = EncryptionKeyMetadata.objects.order_by("purpose")
     return {
         "policy": _policy_data(policy),
+        "devices": [
+            {
+                "id": str(item.device_id),
+                "user": item.device.user.get_full_name() or item.device.user.username,
+                "email": item.device.user.email,
+                "label": item.device.label,
+                "platform": item.device.platform,
+                "last_seen_at": item.device.last_seen_at.isoformat() if item.device.last_seen_at else None,
+                "status": "revoked" if item.revoked_at or item.device.revoked_at else "approved" if item.approved_at else "pending",
+            }
+            for item in devices
+        ],
         "alerts": [
             {
                 "id": str(item.id),
@@ -138,6 +158,13 @@ def security_catalog(request):
                 "user_id": item.user_id,
                 "name": item.user.get_full_name() or item.user.username,
                 "email": item.user.email,
+                "authenticator_enabled": item.user_id in authenticator_users,
+                "can_reset_authenticator": item.is_active and item.user_id in authenticator_users and item.user_id != request.auth.id and (
+                    membership.role == Membership.Role.PLATFORM_ADMIN or (
+                        item.role not in {Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN}
+                        and item.user_id not in shared_users
+                    )
+                ),
                 "institution": item.institution.name,
                 "role": item.role,
                 "permissions": item.permissions,
@@ -275,8 +302,95 @@ def create_membership(request, payload: MembershipCreateIn):
 def save_security_policy(request, payload: SecurityPolicyIn):
     membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
     require_step_up(request)
-    policy = update_policy(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, payload=payload)
+    with transaction.atomic():
+        if payload.require_trusted_device:
+            current = active_session_for_request(request)
+            if not current or not current.device or current.device.revoked_at:
+                raise HttpError(422, "Sign in from a recognized device before requiring device approval")
+            authorization, _ = DeviceAuthorization.objects.get_or_create(tenant_id=membership.institution.tenant_id, device=current.device)
+            if authorization.revoked_at:
+                raise HttpError(403, "Your current device has been revoked")
+            if not authorization.approved_at:
+                authorization.approved_at = timezone.now()
+                authorization.approved_by = request.auth
+                authorization.save(update_fields=["approved_at", "approved_by", "updated_at"])
+        policy = update_policy(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, payload=payload)
     return _policy_data(policy)
+
+
+@router.post("/devices/{device_id}/approve")
+def approve_device(request, device_id: str):
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
+    require_step_up(request)
+    tenant_id = membership.institution.tenant_id
+    with transaction.atomic():
+        authorization = DeviceAuthorization.objects.select_for_update().select_related("device").filter(tenant_id=tenant_id, device_id=device_id).first()
+        if not authorization or authorization.revoked_at or authorization.device.revoked_at:
+            raise HttpError(404, "Pending device not found")
+        if not Membership.objects.filter(user=authorization.device.user, institution__tenant_id=tenant_id, is_active=True).exists():
+            raise HttpError(403, "Device owner is not an active university member")
+        authorization.approved_at = timezone.now()
+        authorization.approved_by = request.auth
+        authorization.save(update_fields=["approved_at", "approved_by", "updated_at"])
+        AccessSession.objects.filter(tenant_id=tenant_id, device_id=device_id, revoked_at__isnull=True).update(trusted_device=True)
+        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="auth.device.approved", aggregate="DeviceAuthorization", aggregate_id=authorization.id)
+    return {"id": device_id, "status": "approved"}
+
+
+@router.post("/devices/{device_id}/revoke")
+def revoke_tenant_device(request, device_id: str):
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
+    require_step_up(request)
+    tenant_id = membership.institution.tenant_id
+    with transaction.atomic():
+        authorization = DeviceAuthorization.objects.select_for_update().filter(tenant_id=tenant_id, device_id=device_id, revoked_at__isnull=True).first()
+        if not authorization:
+            raise HttpError(404, "Device not found")
+        authorization.revoked_at = timezone.now()
+        authorization.save(update_fields=["revoked_at", "updated_at"])
+        AccessSession.objects.filter(tenant_id=tenant_id, device_id=device_id, revoked_at__isnull=True).update(revoked_at=timezone.now(), revoked_reason="admin_device_revoked")
+        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="auth.device.revoked_by_admin", aggregate="DeviceAuthorization", aggregate_id=authorization.id)
+    return {"id": device_id, "status": "revoked"}
+
+
+@router.post("/memberships/{membership_id}/reset-authenticator")
+def reset_member_authenticator(request, membership_id: str):
+    actor = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
+    session = require_step_up(request)
+    tenant_id = actor.institution.tenant_id
+    if policy_for(tenant_id).require_mfa and not session.mfa_verified_at:
+        raise HttpError(403, "Sign in with your authenticator before resetting another user's MFA")
+    with transaction.atomic():
+        target = Membership.objects.select_for_update().select_related("user").filter(
+            id=membership_id, institution__tenant_id=tenant_id, is_active=True
+        ).first()
+        if not target:
+            raise HttpError(404, "Active university user not found")
+        if target.user_id == request.auth.id:
+            raise HttpError(403, "Use your own authenticator replacement flow")
+        if actor.role != Membership.Role.PLATFORM_ADMIN:
+            if target.role in {Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN}:
+                raise HttpError(403, "Only a platform administrator can reset an administrator's authenticator")
+            if Membership.objects.filter(user=target.user, is_active=True).exclude(institution__tenant_id=tenant_id).exists():
+                raise HttpError(403, "A shared account requires platform administrator recovery")
+        methods = AuthenticationMethod.objects.select_for_update().filter(
+            user=target.user, kind=AuthenticationMethod.Kind.TOTP, is_active=True
+        )
+        if not methods.exists():
+            raise HttpError(409, "This user has no active authenticator to reset")
+        methods.update(is_active=False, is_primary=False, secret_ciphertext="")
+        AccessSession.objects.filter(user=target.user, revoked_at__isnull=True).update(
+            revoked_at=timezone.now(), revoked_reason="authenticator_reset"
+        )
+        record_event(
+            tenant_id=tenant_id,
+            actor_id=request.auth.id,
+            action="auth.totp.reset_by_admin",
+            aggregate="Membership",
+            aggregate_id=target.id,
+            payload={"user_id": target.user_id},
+        )
+    return {"ok": True, "email": target.user.email}
 
 
 @router.post("/alerts/{alert_id}/status")

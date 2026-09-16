@@ -32,7 +32,7 @@ button, input { font: inherit; } button { color: inherit; } h1, h2, h3 { font-fa
 .top-actions { display: flex; align-items: center; gap: 8px; }
 .icon-button { display: grid; width: 38px; height: 38px; flex: none; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }
 .icon-button:hover { border-color: var(--line-strong); background: var(--subtle); } .icon-button svg { width: 17px; height: 17px; }
-.avatar { display: grid; width: 36px; height: 36px; margin-left: 6px; place-items: center; border-radius: 50%; background: var(--ink); color: white; font-family: var(--font-display), sans-serif; font-size: 12px; font-weight: 800; }
+.avatar { display: grid; width: 36px; height: 36px; margin-left: 6px; place-items: center; border: 0; border-radius: 50%; background: var(--ink); color: white; cursor: pointer; font-family: var(--font-display), sans-serif; font-size: 12px; font-weight: 800; }
 .mobile-menu { display: none; } .content { width: 100%; max-width: 1510px; margin: 0 auto; padding: 30px 34px 48px; }
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 25px; }
 .eyebrow { margin: 0 0 5px; color: var(--green); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .09em; }
@@ -137,6 +137,10 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; overflow-y: auto; background: rgba(13, 27, 21, .42); padding: 28px; }
 .modal-panel { width: min(760px, 100%); max-height: calc(100vh - 56px); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: white; box-shadow: 0 24px 70px rgba(18, 34, 27, .22); }
 .modal-panel.compact { width: min(560px, 100%); }
+.account-auth-status { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); padding: 15px 20px; }
+.account-auth-status > svg { width: 18px; color: var(--green); }
+.account-auth-status > div { display: grid; gap: 2px; font-size: 13px; }
+.account-auth-status span { color: var(--muted); font-size: 12px; }
 .modal-header { display: flex; min-height: 76px; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line); padding: 14px 20px; }
 .modal-header h2 { margin: 0; font-size: 18px; }
 .modal-header p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
@@ -174,7 +178,8 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .row-menu > div button svg { width: 15px; color: var(--green); }
 .login-passkey { width: 100%; justify-content: center; margin-top: 10px; }
 .login-back { width: 100%; justify-content: center; margin-top: 6px; }
-.security-stack { display: grid; gap: 14px; }
+.security-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.security-stack > * { min-width: 0; }
 .security-status-band { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: center; gap: 1px; overflow: hidden; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--line); }
 .security-status-band > div { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 64px; background: white; padding: 9px 14px; }
 .security-status-band > div > svg { grid-row: 1 / 3; width: 18px; color: var(--green); }

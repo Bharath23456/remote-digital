@@ -1,3 +1,10 @@
+export const SESSION_EXPIRED_EVENT = "admiezo:session-expired";
+
+function sessionExpired(response: Response, url: string) {
+  if (response.status !== 401 || /^\/api\/v1\/auth\/(login|mfa\/|passkeys\/login|sso\/|step-up|password\/change)/.test(url)) return;
+  window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+}
+
 export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const method = (init.method || "GET").toUpperCase();
   const url = typeof input === "string" ? input : input.toString();
@@ -15,7 +22,10 @@ export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}
       : {};
     if (!tokenResponse.ok || !tokenBody.csrf_token) {
       const detail = typeof tokenBody.detail === "string" ? tokenBody.detail : "";
-      if (tokenResponse.status === 401) throw new Error("Your session expired. Sign in again before continuing.");
+      if (tokenResponse.status === 401) {
+        sessionExpired(tokenResponse, url);
+        throw new Error("Your session expired. Sign in again before continuing.");
+      }
       throw new Error(detail || `Security token initialization failed (${tokenResponse.status}). Refresh and try again.`);
     }
     headers.set("X-CSRFToken", tokenBody.csrf_token);
@@ -24,5 +34,7 @@ export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}
       headers.set("Idempotency-Key", crypto.randomUUID());
     }
   }
-  return fetch(input, { ...init, headers, credentials: init.credentials || "same-origin" });
+  const response = await fetch(input, { ...init, headers, credentials: init.credentials || "same-origin" });
+  if (typeof window !== "undefined") sessionExpired(response, url);
+  return response;
 }
