@@ -9,7 +9,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY backend /app
 COPY backend/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && chown -R admiezo:admiezo /app
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh && chown -R admiezo:admiezo /app
 
 USER 10003:10003
 EXPOSE 8000
