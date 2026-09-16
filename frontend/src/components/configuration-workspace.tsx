@@ -1,0 +1,222 @@
+"use client";
+
+import { Check, ChevronRight, FilePlus2, History, LoaderCircle, Pencil, Plus, ShieldAlert, Undo2, X } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { DynamicFields, readDynamicFields, useDynamicFields } from "@/components/dynamic-fields";
+import { csrfFetch } from "@/lib/api";
+
+type Catalog = Record<string, Record<string, unknown>[]>;
+type EntityKey = "academic_years" | "regulations" | "terms" | "sessions" | "events" | "programmes" | "courses" | "subjects" | "centres" | "papers";
+type Field = { name: string; label: string; type?: string; required?: boolean; options?: { value: string; label: string }[] };
+type Readiness = { decision: string; ready: boolean; session: { name: string; status: string } | null; paper_count?: number; issues: string[]; critical_alerts: string[] };
+
+const entityLabels: Record<EntityKey, string> = {
+  academic_years: "Academic years", regulations: "Regulations", terms: "Terms",
+  sessions: "Exam sessions", events: "Evaluation events", programmes: "Programmes", courses: "Courses",
+  subjects: "Subjects", centres: "Evaluation centres", papers: "Papers",
+};
+
+const endpoints: Record<EntityKey, string> = {
+  academic_years: "academic-years", regulations: "regulations", terms: "terms",
+  sessions: "sessions", events: "events", programmes: "programmes", courses: "courses",
+  subjects: "subjects", centres: "centres", papers: "papers",
+};
+
+const titleCase = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+const id = (row: Record<string, unknown>) => String(row.id);
+const localDateTime = (value: unknown) => {
+  if (!value) return undefined;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return undefined;
+  const part = (number: number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}`;
+};
+
+async function apiRequest(path: string, options?: RequestInit) {
+  const response = await csrfFetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || "The operation could not be completed");
+  return body;
+}
+
+export function ConfigurationWorkspace() {
+  const sessionFields = useDynamicFields("exam_session");
+  const paperCustomFields = useDynamicFields("paper");
+  const [catalog, setCatalog] = useState<Catalog>({});
+  const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [active, setActive] = useState<EntityKey>("papers");
+  const [modal, setModal] = useState<"entity" | "question" | "edit" | "change" | "history" | null>(null);
+  const [selectedPaper, setSelectedPaper] = useState<Record<string, unknown> | null>(null);
+  const [selectedImpact, setSelectedImpact] = useState<Record<string, unknown> | null>(null);
+  const [historyRows, setHistoryRows] = useState<Record<string, unknown>[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [eventSessionId, setEventSessionId] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const [nextCatalog, nextReadiness] = await Promise.all([apiRequest("/api/v1/configuration/catalog"), apiRequest("/api/v1/configuration/readiness")]);
+      setCatalog(nextCatalog); setReadiness(nextReadiness); setError("");
+    }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Configuration could not be loaded"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
+
+  const options = useCallback((key: EntityKey, primary: string, secondary?: string) =>
+    (catalog[key] || []).map((row) => ({ value: id(row), label: secondary ? `${row[primary]} · ${row[secondary]}` : String(row[primary]) })), [catalog]);
+
+  const fields = useMemo<Record<EntityKey, Field[]>>(() => ({
+    academic_years: [{ name: "label", label: "Academic year", required: true }, { name: "starts_on", label: "Starts on", type: "date", required: true }, { name: "ends_on", label: "Ends on", type: "date", required: true }],
+    regulations: [{ name: "code", label: "Regulation code", required: true }, { name: "title", label: "Title", required: true }, { name: "effective_from", label: "Effective from", type: "date", required: true }, { name: "effective_to", label: "Effective to", type: "date" }],
+    terms: [{ name: "academic_year_id", label: "Academic year", type: "select", required: true, options: options("academic_years", "label") }, { name: "name", label: "Term name", required: true }, { name: "sequence", label: "Sequence", type: "number", required: true }, { name: "starts_on", label: "Starts on", type: "date", required: true }, { name: "ends_on", label: "Ends on", type: "date", required: true }],
+    sessions: [{ name: "academic_year_id", label: "Academic year", type: "select", required: true, options: options("academic_years", "label") }, { name: "name", label: "Session name", required: true }, { name: "term", label: "Term", required: true }, { name: "evaluation_starts_at", label: "Evaluation starts", type: "datetime-local", required: true }, { name: "evaluation_ends_at", label: "Evaluation ends", type: "datetime-local", required: true }],
+    events: [{ name: "session_id", label: "Exam session", type: "select", required: true, options: options("sessions", "name", "term") }, { name: "name", label: "Event name", required: true }, { name: "starts_at", label: "Starts at", type: "datetime-local", required: true }, { name: "ends_at", label: "Ends at", type: "datetime-local", required: true }, { name: "evaluation_centre_ids", label: "Evaluation centres", type: "multiselect", required: true, options: options("centres", "code", "name") }],
+    programmes: [{ name: "code", label: "Programme code", required: true }, { name: "name", label: "Programme name", required: true }, { name: "regulation", label: "Regulation", required: true }],
+    courses: [{ name: "programme_id", label: "Programme", type: "select", required: true, options: options("programmes", "code", "name") }, { name: "regulation_id", label: "Regulation", type: "select", required: true, options: options("regulations", "code", "title") }, { name: "code", label: "Course code", required: true }, { name: "name", label: "Course name", required: true }, { name: "duration_terms", label: "Duration in terms", type: "number", required: true }],
+    subjects: [{ name: "programme_id", label: "Programme", type: "select", required: true, options: options("programmes", "code", "name") }, { name: "course_id", label: "Course", type: "select", required: true, options: options("courses", "code", "name") }, { name: "session_ids", label: "Available exam sessions", type: "multiselect", required: true, options: options("sessions", "name", "term") }, { name: "related_subject_ids", label: "Related subjects", type: "multiselect", options: options("subjects", "code", "name") }, { name: "code", label: "Subject code", required: true }, { name: "name", label: "Subject name", required: true }, { name: "semester", label: "Semester", type: "number", required: true }],
+    centres: [{ name: "code", label: "Centre code", required: true }, { name: "name", label: "Centre name", required: true }, { name: "address", label: "Address" }, { name: "network_cidrs", label: "Approved networks (comma separated)" }],
+    papers: [{ name: "session_id", label: "Exam session", type: "select", required: true, options: options("sessions", "name", "term") }, { name: "subject_id", label: "Subject", type: "select", required: true, options: options("subjects", "code", "name") }, { name: "code", label: "Paper code", required: true }, { name: "title", label: "Paper title", required: true }, { name: "max_marks", label: "Maximum marks", type: "number", required: true }, { name: "pass_marks", label: "Passing marks", type: "number", required: true }, { name: "valuation_rounds", label: "Valuation rounds", type: "number", required: true }, { name: "discrepancy_threshold", label: "Discrepancy threshold", type: "number", required: true }, { name: "moderation_required", label: "Moderation required", type: "checkbox" }, { name: "critical_change", label: "Require dual approval", type: "checkbox" }],
+  }), [options]);
+
+  async function createEntity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setSaving(true); setError("");
+    const data = new FormData(event.currentTarget);
+    const payload: Record<string, unknown> = {};
+    for (const field of fields[active]) {
+      if (field.type === "checkbox") payload[field.name] = data.get(field.name) === "on";
+      else if (field.type === "multiselect") payload[field.name] = data.getAll(field.name);
+      else if (field.type === "number") payload[field.name] = Number(data.get(field.name));
+      else if (field.type === "datetime-local") payload[field.name] = new Date(String(data.get(field.name))).toISOString();
+      else if (field.name === "network_cidrs") payload[field.name] = String(data.get(field.name) || "").split(",").map((item) => item.trim()).filter(Boolean);
+      else if (data.get(field.name)) payload[field.name] = data.get(field.name);
+    }
+    if (active === "papers") {
+      payload.rules = { critical_change: payload.critical_change, revaluation: true };
+      delete payload.critical_change;
+    }
+    if (active === "sessions") payload.custom_fields = readDynamicFields(data, sessionFields);
+    if (active === "papers") payload.custom_fields = readDynamicFields(data, paperCustomFields);
+    if (active === "events") {
+      const session = (catalog.sessions || []).find((item) => id(item) === String(payload.session_id));
+      const starts = new Date(String(payload.starts_at));
+      const ends = new Date(String(payload.ends_at));
+      if (session && (starts < new Date(String(session.evaluation_starts_at)) || ends > new Date(String(session.evaluation_ends_at)))) {
+        setError(`Event must be within ${new Date(String(session.evaluation_starts_at)).toLocaleString("en-IN")} and ${new Date(String(session.evaluation_ends_at)).toLocaleString("en-IN")}.`);
+        setSaving(false);
+        return;
+      }
+    }
+    try {
+      await apiRequest(`/api/v1/configuration/${endpoints[active]}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      setModal(null); setNotice(`${entityLabels[active]} record created`); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Record could not be created"); }
+    finally { setSaving(false); }
+  }
+
+  async function addQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedPaper) return; setSaving(true); setError("");
+    const data = new FormData(event.currentTarget);
+    try {
+      await apiRequest(`/api/v1/configuration/papers/${selectedPaper.id}/questions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ number: data.get("number"), max_marks: data.get("max_marks"), position: Number(data.get("position")), required: data.get("required") === "on" }) });
+      setModal(null); setNotice("Question added and paper readiness recalculated"); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Question could not be added"); }
+    finally { setSaving(false); }
+  }
+
+  async function paperAction(paper: Record<string, unknown>, action: "submit" | "approve" | "freeze") {
+    setSaving(true); setError("");
+    try {
+      await apiRequest(`/api/v1/configuration/papers/${paper.id}/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: paper.version, note: `${titleCase(action)} from administration console` }) });
+      setNotice(`Paper ${action} completed`); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : `Paper could not be ${action}d`); }
+    finally { setSaving(false); }
+  }
+
+  async function editPaper(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedPaper) return; setSaving(true); setError("");
+    const data = new FormData(event.currentTarget);
+    const payload = {
+      version: selectedPaper.version,
+      title: data.get("title"),
+      max_marks: data.get("max_marks"),
+      pass_marks: data.get("pass_marks"),
+      valuation_rounds: Number(data.get("valuation_rounds")),
+      discrepancy_threshold: data.get("discrepancy_threshold"),
+      moderation_required: data.get("moderation_required") === "on",
+      rules: { ...(selectedPaper.rules as object || {}), critical_change: data.get("critical_change") === "on" },
+    };
+    try {
+      await apiRequest(`/api/v1/configuration/papers/${selectedPaper.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      setModal(null); setNotice("Draft paper configuration updated"); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Paper could not be updated"); }
+    finally { setSaving(false); }
+  }
+
+  async function requestGovernedChange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedPaper) return; setSaving(true); setError("");
+    const data = new FormData(event.currentTarget); const kind = String(data.get("kind"));
+    const changes = kind === "emergency_update" ? {
+      title: data.get("title"), max_marks: data.get("max_marks"), pass_marks: data.get("pass_marks"),
+      valuation_rounds: Number(data.get("valuation_rounds")), discrepancy_threshold: data.get("discrepancy_threshold"),
+      moderation_required: data.get("moderation_required") === "on",
+    } : {};
+    const target = Number(data.get("target_revision_version"));
+    try {
+      await apiRequest(`/api/v1/configuration/papers/${selectedPaper.id}/changes`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: selectedPaper.version, kind, reason: data.get("reason"), changes, target_revision_version: kind === "rollback" && target ? target : null }) });
+      setModal(null); setNotice("Governed change sent for two-person approval"); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Change request could not be created"); }
+    finally { setSaving(false); }
+  }
+
+  async function openHistory(paper: Record<string, unknown>) {
+    setSelectedPaper(paper); setError("");
+    try { setHistoryRows(await apiRequest(`/api/v1/configuration/papers/${paper.id}/history`)); setModal("history"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Configuration history could not be loaded"); }
+  }
+
+  async function openGovernedChange(paper: Record<string, unknown>) {
+    setSelectedPaper(paper); setError("");
+    try { setSelectedImpact(await apiRequest(`/api/v1/configuration/papers/${paper.id}/impact`)); setModal("change"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Change impact could not be loaded"); }
+  }
+
+  async function decideChange(change: Record<string, unknown>, decision: "approved" | "rejected") {
+    setSaving(true); setError("");
+    try {
+      await apiRequest(`/api/v1/configuration/changes/${change.id}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: change.version, decision, note: `${titleCase(decision)} in configuration console` }) });
+      setNotice(`Configuration change ${decision}`); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Change decision could not be recorded"); }
+    finally { setSaving(false); }
+  }
+
+  const rows = catalog[active] || [];
+  const columns = rows.length ? Object.keys(rows[0]).filter((key) => !["id", "questions", "rules", "network_cidrs", "evaluation_centre_ids", "readiness", "session_id", "subject_id", "academic_year_id", "programme_id", "regulation_id", "frozen_at", "effective_from"].includes(key)).slice(0, 6) : [];
+  const pendingChanges = (catalog.change_requests || []).filter((item) => item.status === "pending");
+  const eventSession = (catalog.sessions || []).find((item) => id(item) === eventSessionId);
+
+  return <div className="config-workspace">
+    {readiness && <div className={`config-readiness ${readiness.ready ? "ready" : "attention"}`}><div><strong>{readiness.ready ? "GO-LIVE" : "NOT READY"}</strong><span>{readiness.session?.name || "No examination session"}</span></div><div><span>Papers</span><strong>{readiness.paper_count || 0}</strong></div><div><span>Open issues</span><strong>{readiness.issues.length + readiness.critical_alerts.length}</strong></div></div>}
+    <div className="workspace-toolbar"><div className="entity-tabs" role="tablist">{(Object.keys(entityLabels) as EntityKey[]).map((key) => <button className={active === key ? "active" : ""} onClick={() => { setActive(key); setNotice(""); }} key={key}>{entityLabels[key]}</button>)}</div><button className="primary-button" onClick={() => { setModal("entity"); setError(""); }}><Plus />Add {entityLabels[active].replace(/s$/, "")}</button></div>
+    {notice && <div className="success-banner"><Check />{notice}</div>}
+    {error && !modal && <div className="form-error" role="alert">{error}</div>}
+    <section className="panel">
+      <header className="panel-header"><div><h2 className="panel-title">{entityLabels[active]}</h2><p className="panel-subtitle">{rows.length} configured records</p></div></header>
+      {loading ? <div className="empty-state"><LoaderCircle className="spin" /></div> : rows.length ? <div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{titleCase(column)}</th>)}{active === "papers" && <th>Readiness</th>}{active === "papers" && <th>Actions</th>}</tr></thead><tbody>{rows.map((row) => <tr key={id(row)}>{columns.map((column) => <td key={column}>{column === "status" ? <span className={`status-pill ${row[column]}`}>{titleCase(String(row[column]))}</span> : String(row[column] ?? "—")}</td>)}{active === "papers" && <td><span className={`status-pill ${(row.readiness as { ready: boolean }).ready ? "ready" : "attention"}`}>{(row.readiness as { ready: boolean }).ready ? "Ready" : "Attention"}</span></td>}{active === "papers" && <td><div className="row-actions">{row.status === "draft" && <button title="Add question" onClick={() => { setSelectedPaper(row); setModal("question"); setError(""); }}><FilePlus2 /></button>}{row.status === "draft" && <button title="Edit draft" onClick={() => { setSelectedPaper(row); setModal("edit"); setError(""); }}><Pencil /></button>}<button title="Configuration history" onClick={() => void openHistory(row)}><History /></button>{row.status !== "draft" && <button title="Request governed change" onClick={() => void openGovernedChange(row)}><ShieldAlert /></button>}{row.status === "draft" && <button onClick={() => paperAction(row, "submit")}>Submit</button>}{row.status === "review" && <button onClick={() => paperAction(row, "approve")}>Approve</button>}{row.status === "approved" && <button onClick={() => paperAction(row, "freeze")}>Freeze</button>}{row.status === "frozen" && <span className="locked-label"><Check />Frozen</span>}</div></td>}</tr>)}</tbody></table></div> : <div className="empty-state"><div><FilePlus2 /><strong>No {entityLabels[active].toLowerCase()} yet</strong><p>Create the first record to continue configuration.</p></div></div>}
+    </section>
+    {active === "papers" && pendingChanges.length > 0 && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Governed changes</h2><p className="panel-subtitle">Emergency and rollback requests require two independent approvals</p></div></header><div className="table-wrap"><table><thead><tr><th>Paper</th><th>Change</th><th>Impact</th><th>Approvals</th><th>Decision</th></tr></thead><tbody>{pendingChanges.map((change) => <tr key={String(change.id)}><td><strong>{String(change.paper)}</strong><br /><small>{String(change.reason)}</small></td><td>{titleCase(String(change.kind))}</td><td>{String((change.impact as { scripts?: number }).scripts || 0)} scripts</td><td>{String(change.approval_count)} / {String(change.required_approvals)}</td><td><div className="row-actions"><button disabled={saving} onClick={() => decideChange(change, "approved")}>Approve</button><button disabled={saving} onClick={() => decideChange(change, "rejected")}>Reject</button></div></td></tr>)}</tbody></table></div></section>}
+    {modal === "entity" && <div className="modal-backdrop" role="presentation"><div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="entity-modal-title"><header className="modal-header"><div><h2 id="entity-modal-title">Add {entityLabels[active].replace(/s$/, "")}</h2><p>This record becomes part of the active university configuration.</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={createEntity}><div className="form-grid">{fields[active].map((field) => <label className={`field ${field.type === "checkbox" ? "check-field" : ""}`} key={field.name}>{field.type === "checkbox" ? <><input name={field.name} type="checkbox" /><span>{field.label}</span></> : <><span>{field.label}</span>{field.type === "select" || field.type === "multiselect" ? <select name={field.name} required={field.required} defaultValue={field.type === "multiselect" ? undefined : ""} multiple={field.type === "multiselect"} size={field.type === "multiselect" ? Math.min(6, Math.max(3, field.options?.length || 3)) : undefined} onChange={field.name === "session_id" && active === "events" ? (event) => setEventSessionId(event.target.value) : undefined}><option value="" disabled={field.type !== "multiselect"}>Select {field.label.toLowerCase()}</option>{field.options?.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select> : <input name={field.name} type={field.type || "text"} required={field.required} min={field.type === "number" ? 0 : field.type === "datetime-local" && active === "events" ? localDateTime(eventSession?.evaluation_starts_at) : undefined} max={field.type === "datetime-local" && active === "events" ? localDateTime(eventSession?.evaluation_ends_at) : undefined} step={field.type === "number" ? "0.01" : undefined} />}</>}</label>)}{active === "events" && eventSession && <div className="form-guidance full-field"><strong>Session evaluation window</strong><span>{new Date(String(eventSession.evaluation_starts_at)).toLocaleString("en-IN")} to {new Date(String(eventSession.evaluation_ends_at)).toLocaleString("en-IN")}</span></div>}{active === "sessions" && <DynamicFields fields={sessionFields} />}{active === "papers" && <DynamicFields fields={paperCustomFields} />}</div>{error && <div className="form-error" role="alert">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Create record"}<ChevronRight /></button></footer></form></div></div>}
+    {modal === "question" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel compact" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Add question</h2><p>{String(selectedPaper.code)} · {String(selectedPaper.title)}</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={addQuestion}><div className="form-grid"><label className="field"><span>Question number</span><input name="number" required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0" step="0.01" required /></label><label className="field"><span>Position</span><input name="position" type="number" min="1" required /></label><label className="field check-field"><input name="required" type="checkbox" defaultChecked /><span>Required question</span></label></div>{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Add question"}</button></footer></form></div></div>}
+    {modal === "edit" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Edit draft paper</h2><p>{String(selectedPaper.code)} · version {String(selectedPaper.version)}</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={editPaper}><PaperFields paper={selectedPaper} />{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Save changes"}</button></footer></form></div></div>}
+    {modal === "change" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Request governed change</h2><p>{String(selectedPaper.code)} · two independent approvals required</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={requestGovernedChange}>{selectedImpact && <div className="impact-warning"><ShieldAlert /><div><strong>Active configuration impact</strong><span>{String(selectedImpact.scripts || 0)} scripts · {String(selectedImpact.active_assignments || 0)} active · {String(selectedImpact.submitted_assignments || 0)} submitted</span></div></div>}<div className="form-grid"><label className="field"><span>Change type</span><select name="kind" defaultValue="emergency_update"><option value="emergency_update">Emergency update</option><option value="rollback">Rollback to revision</option></select></label><label className="field"><span>Rollback revision</span><input name="target_revision_version" type="number" min="1" placeholder="Only for rollback" /></label><label className="field full-field"><span>Reason</span><input name="reason" minLength={12} required /></label></div><PaperFields paper={selectedPaper} />{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Submitting…" : "Submit for approval"}<ChevronRight /></button></footer></form></div></div>}
+    {modal === "history" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Configuration history</h2><p>{String(selectedPaper.code)} · immutable revision record</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><div className="history-list">{historyRows.map((item) => <div className="history-item" key={String(item.version)}><div><Undo2 /><strong>Version {String(item.version)}</strong><span>{titleCase(String(item.change_type))}</span></div><p>{String(item.reason || "Configuration revision")}</p><small>{new Date(String(item.created_at)).toLocaleString("en-IN")}</small></div>)}</div></div></div>}
+  </div>;
+}
+
+function PaperFields({ paper }: { paper: Record<string, unknown> }) {
+  const rules = paper.rules as { critical_change?: boolean } | undefined;
+  return <div className="form-grid"><label className="field full-field"><span>Paper title</span><input name="title" defaultValue={String(paper.title)} required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0.01" step="0.01" defaultValue={String(paper.max_marks)} required /></label><label className="field"><span>Passing marks</span><input name="pass_marks" type="number" min="0" step="0.01" defaultValue={String(paper.pass_marks)} required /></label><label className="field"><span>Valuation rounds</span><input name="valuation_rounds" type="number" min="1" max="3" defaultValue={String(paper.valuation_rounds)} required /></label><label className="field"><span>Discrepancy threshold</span><input name="discrepancy_threshold" type="number" min="0" step="0.01" defaultValue={String(paper.discrepancy_threshold)} required /></label><label className="field check-field"><input name="moderation_required" type="checkbox" defaultChecked={Boolean(paper.moderation_required)} /><span>Moderation required</span></label><label className="field check-field"><input name="critical_change" type="checkbox" defaultChecked={Boolean(rules?.critical_change)} /><span>Critical changes need dual approval</span></label></div>;
+}

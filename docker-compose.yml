@@ -1,0 +1,204 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: admiezo
+      POSTGRES_USER: admiezo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admiezo-local}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admiezo -d admiezo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-only-change-before-deploy}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,.localhost}
+      DATABASE_URL: postgresql://admiezo:${POSTGRES_PASSWORD:-admiezo-local}@db:5432/admiezo
+      LOAD_DEMO_DATA: ${LOAD_DEMO_DATA:-true}
+      DEMO_PASSWORD_ONLY_LOGIN: ${DEMO_PASSWORD_ONLY_LOGIN:-true}
+      SEED_DEMO_ASSETS: ${LOAD_DEMO_DATA:-true}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@admiezo.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-ChangeMe123!}
+      APPLICATION_ENCRYPTION_KEY: ${APPLICATION_ENCRYPTION_KEY:-}
+      SCRIPT_STORAGE_INTERNAL_URL: http://storage-gateway:9000
+      SCRIPT_STORAGE_PUBLIC_BASE: /storage
+      SCRIPT_STORAGE_SIGNING_KEY: ${SCRIPT_STORAGE_SIGNING_KEY:-local-storage-signing-key-change-me}
+      IDENTITY_SERVICE_URL: http://identity-service:8100
+      IDENTITY_AUTHORIZATION_KEY: ${IDENTITY_AUTHORIZATION_KEY:-local-identity-authorization-key-change-me}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,https://*.ngrok-free.app}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      TENANT_BASE_DOMAIN: ${TENANT_BASE_DOMAIN:-localhost}
+      PLATFORM_HOSTS: ${PLATFORM_HOSTS:-localhost,127.0.0.1,platform.localhost}
+      ENFORCE_TENANT_DOMAINS: ${ENFORCE_TENANT_DOMAINS:-false}
+      OIDC_ALLOWED_PRIVATE_HOSTS: ${OIDC_ALLOWED_PRIVATE_HOSTS:-}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      KMS_PROVIDER: ${KMS_PROVIDER:-}
+      SECRETS_PROVIDER: ${SECRETS_PROVIDER:-}
+      WAF_PROVIDER: ${WAF_PROVIDER:-}
+      DDOS_PROVIDER: ${DDOS_PROVIDER:-}
+      IDS_PROVIDER: ${IDS_PROVIDER:-}
+      SECURITY_MONITORING_PROVIDER: ${SECURITY_MONITORING_PROVIDER:-}
+      VULNERABILITY_SCANNER: ${VULNERABILITY_SCANNER:-}
+      OUTBOX_MODE: ${OUTBOX_MODE:-log}
+      OUTBOX_WEBHOOK_URL: ${OUTBOX_WEBHOOK_URL:-}
+      OUTBOX_AUTH_TOKEN: ${OUTBOX_AUTH_TOKEN:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      storage-gateway:
+        condition: service_healthy
+      identity-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 4s
+      retries: 10
+    restart: unless-stopped
+
+  outbox-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "manage.py", "publish_outbox", "--forever"]
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-only-change-before-deploy}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DATABASE_URL: postgresql://admiezo:${POSTGRES_PASSWORD:-admiezo-local}@db:5432/admiezo
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      LOAD_DEMO_DATA: "false"
+      OUTBOX_MODE: ${OUTBOX_MODE:-log}
+      OUTBOX_WEBHOOK_URL: ${OUTBOX_WEBHOOK_URL:-}
+      OUTBOX_AUTH_TOKEN: ${OUTBOX_AUTH_TOKEN:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  integrity-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "manage.py", "verify_integrity", "--forever", "--interval", "300"]
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-only-change-before-deploy}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DATABASE_URL: postgresql://admiezo:${POSTGRES_PASSWORD:-admiezo-local}@db:5432/admiezo
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      LOAD_DEMO_DATA: "false"
+      APPLICATION_ENCRYPTION_KEY: ${APPLICATION_ENCRYPTION_KEY:-}
+      SCRIPT_STORAGE_INTERNAL_URL: http://storage-gateway:9000
+      SCRIPT_STORAGE_SIGNING_KEY: ${SCRIPT_STORAGE_SIGNING_KEY:-local-storage-signing-key-change-me}
+    depends_on:
+      backend:
+        condition: service_healthy
+      storage-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+  secure-session-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "manage.py", "monitor_secure_sessions", "--forever", "--interval", "10"]
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-only-change-before-deploy}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DATABASE_URL: postgresql://admiezo:${POSTGRES_PASSWORD:-admiezo-local}@db:5432/admiezo
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      LOAD_DEMO_DATA: "false"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  identity-service:
+    build:
+      context: .
+      dockerfile: identity_service/Dockerfile
+    environment:
+      IDENTITY_DJANGO_SECRET_KEY: ${IDENTITY_DJANGO_SECRET_KEY:-local-identity-django-key-change-me}
+      IDENTITY_DEBUG: ${IDENTITY_DEBUG:-true}
+      IDENTITY_AUTHORIZATION_KEY: ${IDENTITY_AUTHORIZATION_KEY:-local-identity-authorization-key-change-me}
+      IDENTITY_ENCRYPTION_KEY: ${IDENTITY_ENCRYPTION_KEY:-local-identity-encryption-key-change-me}
+      IDENTITY_DATABASE_URL: ${IDENTITY_DATABASE_URL:-}
+      IDENTITY_DB_SSLMODE: ${IDENTITY_DB_SSLMODE:-prefer}
+      IDENTITY_ALLOWED_HOSTS: localhost,127.0.0.1,identity-service
+      IDENTITY_SQLITE_PATH: /data/identity.sqlite3
+    volumes:
+      - identity_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
+      interval: 10s
+      timeout: 4s
+      retries: 10
+    restart: unless-stopped
+
+  storage-gateway:
+    build:
+      context: .
+      dockerfile: storage_gateway/Dockerfile
+    environment:
+      STORAGE_ROOT: /data
+      STORAGE_REPLICA_ROOT: /replica
+      STORAGE_BACKUP_ROOT: /backup
+      STORAGE_ENVIRONMENT: ${STORAGE_ENVIRONMENT:-development}
+      STORAGE_SIGNING_KEY: ${SCRIPT_STORAGE_SIGNING_KEY:-local-storage-signing-key-change-me}
+      STORAGE_ENCRYPTION_KEY: ${SCRIPT_STORAGE_ENCRYPTION_KEY:-local-storage-encryption-key-change-me}
+      STORAGE_ALLOW_DEMO_SEED: ${LOAD_DEMO_DATA:-true}
+    volumes:
+      - script_storage:/data
+      - script_replica:/replica
+      - script_backup:/backup
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 10s
+      timeout: 4s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        DJANGO_API_URL: http://backend:8000
+        STORAGE_GATEWAY_URL: http://storage-gateway:9000
+        IDENTITY_SERVICE_URL: http://identity-service:8100
+    environment:
+      DJANGO_API_URL: http://backend:8000
+      STORAGE_GATEWAY_URL: http://storage-gateway:9000
+      IDENTITY_SERVICE_URL: http://identity-service:8100
+      NGROK_DOMAIN: ${NGROK_DOMAIN:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+      storage-gateway:
+        condition: service_healthy
+      identity-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000"]
+      interval: 10s
+      timeout: 4s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  script_storage:
+  script_replica:
+  script_backup:
+  identity_data:
