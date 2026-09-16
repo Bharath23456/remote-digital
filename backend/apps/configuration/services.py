@@ -258,8 +258,8 @@ def add_question(*, tenant_id, actor_id, paper_id, values):
     paper = Paper.objects.select_for_update().filter(id=paper_id, tenant_id=tenant_id).first()
     if not paper:
         raise ConfigurationError("Paper was not found")
-    if paper.status == Paper.Status.FROZEN:
-        raise ConfigurationConflict("Frozen paper configuration cannot be changed")
+    if paper.status != Paper.Status.DRAFT:
+        raise ConfigurationConflict("Questions can only be changed while a paper is in Draft. Create a governed revision for a paper already under review, approved, or frozen.")
     try:
         question = Question.objects.create(tenant_id=tenant_id, paper=paper, **values)
     except IntegrityError as exc:

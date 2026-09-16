@@ -219,3 +219,26 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertTrue(ConfigurationRevision.objects.filter(aggregate_id=paper.id, change_type=ConfigurationRevision.ChangeType.EMERGENCY).exists())
         self.assertTrue(AuditEvent.objects.filter(action="config.change.applied", aggregate_id=change["id"]).exists())
         self.assertTrue(OutboxEvent.objects.filter(topic="config.change.applied", aggregate_id=change["id"]).exists())
+
+    def test_questions_can_only_be_added_to_draft_papers(self):
+        paper = Paper.objects.filter(status=Paper.Status.REVIEW).first()
+        original_version = paper.version
+        payload = {"number": "Q-LOCKED", "max_marks": "1.00", "required": True, "position": 99}
+
+        in_review = self.post(f"/api/v1/configuration/papers/{paper.id}/questions", payload)
+        self.assertEqual(in_review.status_code, 409)
+        self.assertIn("only be changed while a paper is in Draft", in_review.json()["detail"])
+        self.assertFalse(paper.questions.filter(number="Q-LOCKED").exists())
+
+        paper.status = Paper.Status.APPROVED
+        paper.save(update_fields=["status"])
+        approved = self.post(f"/api/v1/configuration/papers/{paper.id}/questions", payload)
+        self.assertEqual(approved.status_code, 409)
+
+        paper.status = Paper.Status.FROZEN
+        paper.save(update_fields=["status"])
+        frozen = self.post(f"/api/v1/configuration/papers/{paper.id}/questions", payload)
+        self.assertEqual(frozen.status_code, 409)
+        paper.refresh_from_db()
+        self.assertEqual(paper.version, original_version)
+        self.assertFalse(paper.questions.filter(number="Q-LOCKED").exists())
