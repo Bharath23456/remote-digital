@@ -241,6 +241,7 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .manual-upload-list ol { display: grid; gap: 4px; margin: 9px 0 0; padding-left: 26px; color: var(--text); font-size: 12px; }
 .purpose-cell { min-width: 260px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
 .row-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.action-restriction { display: block; max-width: 190px; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.4; white-space: normal; }
 .candidate-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); }
 .candidate-details > div { display: grid; min-height: 76px; align-content: center; gap: 6px; background: white; padding: 14px 20px; }
 .candidate-details span { color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
