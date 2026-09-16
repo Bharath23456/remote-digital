@@ -41,6 +41,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const load = useCallback(async () => {
+    setLoading(true);
     try { setCatalog(await api("/api/v1/enterprise/control-plane")); setError(""); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Control plane could not be loaded"); }
     finally { setLoading(false); }

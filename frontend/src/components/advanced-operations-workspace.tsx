@@ -27,6 +27,7 @@ const sections: Record<AdvancedSection, string[]> = {
   services: ["remuneration", "student"],
   platform: ["audit", "integrations", "languages", "recovery"],
 };
+const advancedTabStorageKey = (section: AdvancedSection) => `admiezo-advanced-tab-${section}`;
 
 const modules: Record<string, { number: string; title: string; detail: string; data: string; icon: typeof Activity; columns: string[] }> = {
   moderation: { number: "24", title: "Moderation", detail: "Deterministic sampling, independent review and approved adjustments.", data: "moderation_policies", icon: ClipboardCheck, columns: ["paper_id", "sample_percentage", "sampling_modes", "mandatory", "version"] },
@@ -92,7 +93,15 @@ export function AdvancedOperationsWorkspace({ section }: { section: AdvancedSect
     update(); window.addEventListener("online", update); window.addEventListener("offline", update);
     return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
   }, []);
-  useEffect(() => { setTab(sections[section][0]); }, [section]);
+  useEffect(() => {
+    const saved = localStorage.getItem(advancedTabStorageKey(section));
+    setTab(saved && sections[section].includes(saved) ? saved : sections[section][0]);
+  }, [section]);
+
+  function selectTab(key: string) {
+    setTab(key); setForm({}); setMessage(""); setError("");
+    localStorage.setItem(advancedTabStorageKey(section), key);
+  }
 
   const refs = catalog.references || { papers: [], evaluators: [], sessions: [], scripts: [], final_marks: [], valuation_results: [], users: [] };
   const meta = modules[tab];
@@ -220,7 +229,7 @@ export function AdvancedOperationsWorkspace({ section }: { section: AdvancedSect
 
   if (loading && !Object.keys(catalog).length) return <div className="advanced-loading"><LoaderCircle /> Loading operational controls</div>;
   return <div className="advanced-workspace">
-    <div className="workspace-toolbar"><div className="entity-tabs advanced-tabs" role="tablist">{sections[section].map((key) => { const item = modules[key]; return <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} onClick={() => { setTab(key); setForm({}); setMessage(""); setError(""); }}><item.icon />{item.title}<small>{item.number}</small></button>; })}</div><button className="icon-button" title="Refresh" onClick={load}><RefreshCw /></button></div>
+    <div className="workspace-toolbar"><div className="entity-tabs advanced-tabs" role="tablist">{sections[section].map((key) => { const item = modules[key]; return <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} onClick={() => selectTab(key)}><item.icon />{item.title}<small>{item.number}</small></button>; })}</div><button className="icon-button" title="Refresh" onClick={load}><RefreshCw /></button></div>
     <section className="advanced-summary"><div><span>Module {meta.number}</span><h2>{meta.title}</h2><p>{meta.detail}</p></div><div className="advanced-kpis"><div><strong>{rows.length}</strong><span>Records</span></div>{tab === "monitoring" && <><div><strong>{String(monitoring?.online_evaluators || 0)}</strong><span>Online</span></div><div><strong>{String(monitoring?.remaining_scripts || 0)}</strong><span>Remaining</span></div></>}{tab === "workload" && <div><strong>{String((productivity?.queues as Record<string, unknown>)?.priority || 0)}</strong><span>Priority queue</span></div>}{tab === "continuity" && <><div><strong>{online ? "Online" : "Offline"}</strong><span>Network</span></div><div><strong>{queued}</strong><span>Queued actions</span></div></>}</div></section>
     {message && <div className="success-banner"><CheckCircle2 />{message}</div>}{error && <div className="form-error" role="alert">{error}</div>}
     {formFields() && <form className="panel advanced-command" onSubmit={submit}><header className="panel-header"><div><h3 className="panel-title">New operation</h3><p className="panel-subtitle">Validated by the module policy and written with audit evidence.</p></div></header><div className="form-grid">{formFields()}{tab === "notifications" && <DynamicFields fields={notificationFields} />}</div><footer className="modal-footer"><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle /> : <Plus />}Run operation</button></footer></form>}

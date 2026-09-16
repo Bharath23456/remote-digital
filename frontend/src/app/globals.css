@@ -116,6 +116,11 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .entity-tabs button.active { color: var(--green); background: var(--green-soft); }
 .success-banner { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; border-left: 3px solid var(--green); background: var(--green-soft); padding: 10px 13px; color: var(--green); font-size: 12px; font-weight: 700; }
 .success-banner svg { width: 15px; height: 15px; }
+.toast-stack { position: fixed; z-index: 90; right: 28px; bottom: 28px; display: grid; gap: 8px; pointer-events: none; }
+.app-toast { display: flex; max-width: min(420px, calc(100vw - 32px)); align-items: center; gap: 9px; border: 1px solid #c8d8d0; border-left: 4px solid var(--green); border-radius: 7px; background: white; box-shadow: 0 18px 46px rgba(18,34,27,.2); padding: 12px 14px; color: var(--green); font-size: 12px; font-weight: 750; }
+.app-toast svg { width: 16px; height: 16px; flex: none; }
+.audit-refresh-notice { margin: 14px 18px 0; }
+.audit-table-footer { display: flex; min-height: 58px; align-items: center; justify-content: flex-end; border-top: 1px solid var(--line); padding: 10px 18px; }
 .row-actions { display: flex; align-items: center; gap: 6px; }
 .row-actions button { display: inline-flex; height: 29px; align-items: center; justify-content: center; border: 1px solid var(--line-strong); border-radius: 5px; background: white; padding: 0 9px; cursor: pointer; color: var(--green); font-size: 11px; font-weight: 750; }
 .row-actions button:hover { background: var(--green-soft); }
