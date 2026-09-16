@@ -54,6 +54,7 @@ class IdentitySessionMiddleware:
             if membership and membership.must_change_password and request.path not in {
                 "/api/v1/auth/me",
                 "/api/v1/auth/logout",
+                "/api/v1/auth/csrf",
                 "/api/v1/auth/password/complete-setup",
             }:
                 return JsonResponse({"detail": "Complete password setup before continuing", "code": "password_setup_required"}, status=428)

@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Count, Max, Q
 from ninja import Router
 from ninja.errors import HttpError
 
@@ -26,7 +26,9 @@ def _asset_data(item):
 
 
 @router.get("/catalog")
-def repository_catalog(request, q: str = "", script_id: str | None = None):
+def repository_catalog(request, q: str = "", script_id: str | None = None, asset_page: int = 1, upload_page: int = 1, page_size: int = 25):
+    if asset_page < 1 or upload_page < 1 or not 1 <= page_size <= 100:
+        raise HttpError(422, "Pages must be positive and page size must be between 1 and 100")
     membership = membership_for(request)
     tenant_id = membership.institution.tenant_id
     assets = ScriptAsset.objects.filter(tenant_id=tenant_id, deleted_at__isnull=True).select_related("script")
@@ -37,16 +39,25 @@ def repository_catalog(request, q: str = "", script_id: str | None = None):
         assets = assets.filter(script_id__in=assigned_scripts, kind__in=[ScriptAsset.Kind.EVALUATION, ScriptAsset.Kind.THUMBNAIL])
         intents = intents.none()
     if q:
-        assets = assets.filter(script__script_code__icontains=q)
+        assets = assets.filter(Q(script__script_code__icontains=q) | Q(sha256__icontains=q))
+        intents = intents.filter(script__script_code__icontains=q)
     if script_id:
         assets = assets.filter(script_id=script_id)
-    intents = intents.order_by("-created_at")[:100]
-    return {"assets": [_asset_data(item) for item in assets.order_by("script__script_code", "page_number", "version")[:1000]], "uploads": [{"id": str(item.id), "script": item.script.script_code, "kind": item.kind, "page_number": item.page_number, "asset_version": item.asset_version, "status": item.status, "expires_at": item.expires_at.isoformat(), "sha256": item.sha256, "byte_size": item.byte_size, "version": item.version} for item in intents]}
+        intents = intents.filter(script_id=script_id)
+    summary = assets.aggregate(total=Count("id"), holds=Count("id", filter=Q(legal_hold=True)), verified=Count("id", filter=Q(integrity_checked_at__isnull=False)))
+    upload_total = intents.count()
+    asset_start = (asset_page - 1) * page_size
+    upload_start = (upload_page - 1) * page_size
+    assets = assets.order_by("script__script_code", "page_number", "kind", "version", "id")[asset_start:asset_start + page_size]
+    intents = intents.order_by("-created_at", "-id")[upload_start:upload_start + page_size]
+    return {"assets": [_asset_data(item) for item in assets], "uploads": [{"id": str(item.id), "script": item.script.script_code, "kind": item.kind, "page_number": item.page_number, "asset_version": item.asset_version, "status": item.status, "expires_at": item.expires_at.isoformat(), "sha256": item.sha256, "byte_size": item.byte_size, "version": item.version} for item in intents], "asset_pagination": {"page": asset_page, "page_size": page_size, "total": summary["total"]}, "upload_pagination": {"page": upload_page, "page_size": page_size, "total": upload_total}, "summary": summary}
 
 
 @router.post("/uploads")
 def issue_upload(request, payload: UploadIntentIn):
     membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    if payload.kind != UploadIntent.Kind.RAW_SCAN:
+        raise HttpError(403, "Master, evaluation and thumbnail copies are generated only by approved masking")
     script = Script.objects.filter(id=payload.script_id, tenant_id=membership.institution.tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
@@ -94,6 +105,8 @@ def issue_manual_scan_upload(request, payload: ManualScanUploadIn):
 @router.post("/uploads/{intent_id}/finalize")
 def complete_upload(request, intent_id: str, payload: FinalizeUploadIn):
     membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    if UploadIntent.objects.filter(id=intent_id, tenant_id=membership.institution.tenant_id).exclude(kind=UploadIntent.Kind.RAW_SCAN).exists():
+        raise HttpError(403, "Derived copies cannot be finalized through a manual upload")
     intent, asset = finalize_upload(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, intent_id=intent_id, expected_version=payload.version, idempotency_key=request.headers.get("Idempotency-Key", ""))
     return {"id": str(intent.id), "status": intent.status, "version": intent.version, "asset_id": str(asset.id) if asset else None, "sha256": intent.sha256, "byte_size": intent.byte_size}
 
@@ -119,6 +132,8 @@ def _can_read_asset(request, membership, asset):
     if membership.role in (Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.AUDITOR):
         return True
     if membership.role == Membership.Role.EVALUATOR:
+        if asset.kind not in (ScriptAsset.Kind.EVALUATION, ScriptAsset.Kind.THUMBNAIL):
+            return False
         evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
         return bool(evaluator and Assignment.objects.filter(tenant_id=membership.institution.tenant_id, evaluator=evaluator, script=asset.script).exists())
     return False

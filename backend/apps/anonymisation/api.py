@@ -1,10 +1,14 @@
 from django.utils import timezone
+from django.http import JsonResponse
 from ninja import Router
 from ninja.errors import HttpError
 
 from apps.core.authz import membership_for, require_roles, require_step_up
+from apps.core.services import record_event
 from apps.custody.models import Script
-from apps.tenancy.models import Membership
+from apps.repository.models import UploadIntent
+from apps.repository.storage import signed_object_url
+from apps.tenancy.models import Institution, Membership
 
 from .models import IdentityLink, IdentityResolutionRequest, MaskingJob
 from .schemas import (
@@ -50,6 +54,7 @@ def _job_data(item):
         "id": str(item.id),
         "script_id": str(item.script_id),
         "script": item.script.script_code,
+        "page_count": item.script.page_count,
         "profile": item.profile,
         "status": item.status,
         "detection_confidence": float(item.detection_confidence),
@@ -88,7 +93,9 @@ def anonymisation_catalog(request):
         "jobs": [_job_data(item) for item in jobs],
         "resolutions": [{"id": str(item.id), "script": item.identity_link.script.script_code, "identity_reference": str(item.identity_link.identity_reference), "purpose": item.purpose, "emergency": item.emergency, "status": item.status, "requested_by_id": item.requested_by_id, "expires_at": item.expires_at.isoformat(), "approvals": [{"approver_id": approval.approver_id, "approved": approval.approved, "note": approval.note} for approval in item.approvals.all()], "version": item.version} for item in resolutions],
         "scripts": [{"id": str(item.id), "script_code": item.script_code, "state": item.state, "page_count": item.page_count, "version": item.version} for item in available_scripts],
+        "institutions": list(Institution.objects.filter(tenant_id=tenant_id, is_active=True, kind__in=[Institution.Kind.UNIVERSITY, Institution.Kind.CAMPUS, Institution.Kind.COLLEGE]).order_by("kind", "name").values("id", "name", "code", "kind", "parent_id")),
         "current_user_id": request.auth.id,
+        "current_role": membership_for(request).role,
         "generated_at": timezone.now().isoformat(),
     }
 
@@ -100,8 +107,34 @@ def authorize_identity_storage(request, script_id: str, payload: IdentityLinkIn)
     script = Script.objects.filter(id=script_id, tenant_id=membership.institution.tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
-    link, token, expires = prepare_identity_link(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, script=script, purpose=payload.purpose, session_id=script.paper.session_id)
+    tenant_id = membership.institution.tenant_id
+    institution = Institution.objects.filter(id=payload.institution_id, tenant_id=tenant_id, is_active=True, kind__in=[Institution.Kind.UNIVERSITY, Institution.Kind.CAMPUS]).first()
+    if not institution:
+        raise HttpError(422, "Select an active institution in this university")
+    college = Institution.objects.filter(id=payload.college_id, tenant_id=tenant_id, is_active=True, kind=Institution.Kind.COLLEGE).first() if payload.college_id else None
+    if payload.college_id and not college:
+        raise HttpError(422, "Select an active college in this university")
+    if college and institution and institution.kind == Institution.Kind.CAMPUS and college.parent_id != institution.id:
+        raise HttpError(422, "The selected college does not belong to this campus")
+    link, token, expires = prepare_identity_link(tenant_id=tenant_id, actor_id=request.auth.id, script=script, purpose=payload.purpose, session_id=script.paper.session_id, institution_name=institution.name, college_name=college.name if college else None)
     return {"link_id": str(link.id), "identity_reference": str(link.identity_reference), "token": token, "endpoint": "/identity-api/v1/candidates", "expires_at": expires, "version": link.version}
+
+
+@router.get("/scripts/{script_id}/identity-page")
+def identity_page(request, script_id: str):
+    membership = require_roles(request, *OPERATIONS_ROLES)
+    require_step_up(request)
+    tenant_id = membership.institution.tenant_id
+    if not Script.objects.filter(id=script_id, tenant_id=tenant_id).exists():
+        raise HttpError(404, "Script not found")
+    page = UploadIntent.objects.filter(tenant_id=tenant_id, script_id=script_id, kind=UploadIntent.Kind.RAW_SCAN, status=UploadIntent.Status.COMPLETED, page_number=1).order_by("-asset_version").first()
+    if not page:
+        raise HttpError(404, "The first scanned page is not available")
+    url, expires = signed_object_url(method="GET", key=page.storage_key, ttl_seconds=120)
+    record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="anonymisation.identity_page.access_issued", aggregate="Script", aggregate_id=script_id, payload={"page_number": 1, "asset_version": page.asset_version})
+    response = JsonResponse({"url": url, "expires_at": expires, "mime_type": page.content_type})
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 @router.post("/identity-links/{link_id}/confirm")

@@ -1,8 +1,11 @@
 from ninja import Schema
+from uuid import UUID
 
 
 class IdentityLinkIn(Schema):
     purpose: str = "Candidate identity registration"
+    institution_id: UUID
+    college_id: UUID | None = None
 
 
 class IdentityReceiptIn(Schema):
@@ -12,7 +15,7 @@ class IdentityReceiptIn(Schema):
 
 class StartMaskingIn(Schema):
     script_version: int
-    profile: str = "university-standard-v1"
+    profile: str = "identity-cover-v1"
 
 
 class MaskRegionIn(Schema):

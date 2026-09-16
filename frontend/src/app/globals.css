@@ -77,6 +77,7 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .event-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 6px; background: var(--subtle); color: var(--green); } .event-icon svg { width: 14px; }
 .event-title { overflow: hidden; text-overflow: ellipsis; color: #405049; font-size: 12px; font-weight: 700; white-space: nowrap; } .event-meta { margin-top: 2px; color: var(--faint); font-size: 11px; }
 .workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; } .module-summary { padding: 20px; }
+.audit-workspace { grid-template-columns: minmax(0, 1fr); }
 .summary-count { font-family: var(--font-display), sans-serif; font-size: 34px; font-weight: 800; } .summary-label { color: var(--muted); font-size: 13px; }
 .control-list { margin: 20px 0 0; padding: 0; list-style: none; } .control-list li { display: flex; gap: 9px; padding: 9px 0; border-top: 1px solid #edf1ef; color: #4f5d57; font-size: 12px; } .control-list svg { width: 15px; flex: none; color: var(--green); }
 .empty-state { display: grid; min-height: 260px; place-items: center; padding: 30px; color: var(--muted); text-align: center; } .empty-state svg { width: 28px; margin: 0 auto 12px; color: var(--faint); }
@@ -282,6 +283,12 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .repository-search { display: flex; height: 42px; align-items: center; gap: 8px; margin-bottom: 12px; border: 1px solid var(--line-strong); border-radius: 6px; background: white; padding: 0 12px; }
 .repository-search svg { width: 16px; color: var(--muted); }
 .repository-search input { width: 100%; border: 0; outline: 0; background: transparent; }
+.repository-pagination { display: flex; min-height: 56px; align-items: center; justify-content: flex-end; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.repository-pagination label { display: inline-flex; align-items: center; gap: 7px; }
+.repository-pagination select { height: 32px; border: 1px solid var(--line-strong); border-radius: 5px; background: white; color: var(--text); padding: 0 6px; }
+.repository-pagination .icon-button { width: 32px; height: 32px; }
+.repository-pagination .icon-button:disabled { opacity: .4; cursor: not-allowed; }
+@media (max-width: 600px) { .repository-pagination { justify-content: space-between; flex-wrap: wrap; gap: 8px; } }
 .upload-progress { height: 4px; overflow: hidden; margin-bottom: 10px; border-radius: 2px; background: var(--line); }
 .upload-progress > div { height: 100%; background: var(--green); transition: width .2s ease; }
 .hash-value { font-size: 11px; color: var(--blue); }
@@ -297,6 +304,37 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .candidate-details > div { display: grid; min-height: 76px; align-content: center; gap: 6px; background: white; padding: 14px 20px; }
 .candidate-details span { color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
 .candidate-details strong { overflow-wrap: anywhere; font-size: 13px; }
+.modal-panel.identity-modal { width: min(780px, 100%); }
+.identity-registration .form-grid { padding-top: 18px; }
+.identity-list-actions { display: flex; gap: 16px; align-items: center; }
+.identity-list-actions .text-button { display: inline-flex; align-items: center; gap: 5px; }
+.identity-list-actions svg { width: 14px; height: 14px; }
+.identity-image-field { min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.identity-image-heading { display: flex; min-height: 27px; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.identity-image-heading .icon-button { width: 28px; height: 28px; }
+.identity-image-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.identity-image-actions .secondary-button { min-height: 34px; padding: 0 10px; font-size: 12px; }
+.identity-file-button { position: relative; overflow: hidden; cursor: pointer; }
+.identity-file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.identity-image-preview { display: block; width: 100%; max-height: 150px; object-fit: contain; margin: 8px 0; border: 1px solid var(--line); background: var(--subtle); }
+.identity-step-up { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
+.identity-add-option { margin: 0 20px 18px; border-top: 1px solid var(--line); padding-top: 15px; }
+.identity-add-option > strong { display: block; margin-bottom: 10px; font-size: 14px; }
+.identity-add-option .form-grid { padding: 0; }
+.identity-add-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.identity-registration > .form-error { margin: 0 20px 12px; }
+.identity-crop-backdrop { position: fixed; z-index: 95; inset: 0; display: grid; place-items: center; background: rgba(13, 27, 21, .72); padding: 20px; }
+.identity-crop-panel { display: flex; width: min(900px, 100%); max-height: calc(100vh - 40px); flex-direction: column; overflow: hidden; border-radius: 8px; background: white; }
+.identity-crop-panel header, .identity-crop-panel footer { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 18px; }
+.identity-crop-panel header { border-bottom: 1px solid var(--line); }
+.identity-crop-panel h3 { margin: 0; font-size: 18px; }
+.identity-crop-panel footer { justify-content: flex-end; border-top: 1px solid var(--line); }
+.identity-crop-scroll { min-height: 0; overflow: auto; padding: 12px; background: var(--subtle); }
+.identity-crop-image { position: relative; width: min(100%, 700px); margin: auto; line-height: 0; }
+.identity-crop-image img { display: block; width: 100%; height: auto; }
+.identity-crop-hitbox { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+.identity-crop-selection { position: absolute; border: 2px solid var(--green); background: rgba(23, 106, 79, .18); pointer-events: none; }
+@media (max-width: 600px) { .identity-step-up { grid-template-columns: 1fr; } .identity-image-actions .secondary-button { flex: 1; } }
 .advanced-workspace { display: grid; gap: 14px; }
 .advanced-tabs { flex: 1; }
 .advanced-tabs button { display: inline-flex; align-items: center; gap: 7px; }

@@ -300,11 +300,11 @@ function ModuleWorkspace({ view, overview }: { view: ViewKey; overview: Overview
     return Object.keys(rows[0]).filter((key) => !hidden.has(key)).slice(0, 7);
   }, [rows, view]);
   const count = meta.countKey ? overview.module_counts[meta.countKey] || 0 : rows.length;
-  return <div className="workspace-grid">
-    <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Current records</h2><p className="panel-subtitle">Tenant-scoped operational data</p></div></header>
+  return <div className={`workspace-grid ${view === "audit" ? "audit-workspace" : ""}`}>
+    <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Current records</h2><p className="panel-subtitle">Tenant-scoped operational data</p></div>{view === "audit" && <span className="status-pill active">{count.toLocaleString("en-IN")} {count === 1 ? "record" : "records"}</span>}</header>
       {loading ? <div className="empty-state"><div className="spinner" /></div> : error ? <div className="empty-state"><div><AlertTriangle /><strong>{error}</strong></div></div> : rows.length ? <div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{titleCase(column)}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id || index)}>{columns.map((column) => <td key={column}>{column === "status" || column === "state" ? <span className={`status-pill ${String(row[column])}`}>{formatValue(row[column])}</span> : formatValue(row[column])}</td>)}</tr>)}</tbody></table></div> : <div className="empty-state"><div><Files /><strong>No records yet</strong><p>This workspace is ready for its first operational record.</p></div></div>}
     </section>
-    <aside className="panel module-summary"><div className="summary-count">{count.toLocaleString("en-IN")}</div><div className="summary-label">Records in this university</div><ul className="control-list">{meta.controls.map((control) => <li key={control}><Check />{control}</li>)}</ul></aside>
+    {view !== "audit" && <aside className="panel module-summary"><div className="summary-count">{count.toLocaleString("en-IN")}</div><div className="summary-label">Records in this university</div><ul className="control-list">{meta.controls.map((control) => <li key={control}><Check />{control}</li>)}</ul></aside>}
   </div>;
 }
 
@@ -312,11 +312,17 @@ function PasswordSetup({ onComplete, onSignOut }: { onComplete: () => Promise<vo
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(""); const data = new FormData(event.currentTarget);
-    if (data.get("password") !== data.get("confirm")) { setError("Passwords do not match"); setBusy(false); return; }
-    const response = await csrfFetch("/api/v1/auth/password/complete-setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ new_password: data.get("password") }) });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) { setError(body.detail || "Password setup failed"); setBusy(false); return; }
-    await onComplete(); setBusy(false);
+    try {
+      if (data.get("password") !== data.get("confirm")) throw new Error("Passwords do not match");
+      const response = await csrfFetch("/api/v1/auth/password/complete-setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ new_password: data.get("password") }) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || "Password setup failed");
+      await onComplete();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Password setup failed");
+    } finally {
+      setBusy(false);
+    }
   }
   return <div className="login-shell"><section className="login-brand"><div className="login-logo"><span className="brand-mark">A</span>ADMIEZO</div><div className="login-statement"><h1>Secure your university account.</h1><p>Replace the one-time credential before entering the isolated workspace.</p></div><div className="login-foot">Password setup is recorded in the tenant audit trail.</div></section><div className="login-form-wrap"><form className="login-form" onSubmit={submit}><h2>Set your password</h2><p>Use at least 12 characters and avoid common passwords.</p><label className="field"><span>New password</span><input name="password" type="password" minLength={12} autoComplete="new-password" required /></label><label className="field"><span>Confirm password</span><input name="confirm" type="password" minLength={12} autoComplete="new-password" required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button login-submit" disabled={busy}><KeyRound />{busy ? "Updating..." : "Set password and continue"}</button><button type="button" className="text-button" onClick={onSignOut}>Sign out</button></form></div></div>;
 }
