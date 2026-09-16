@@ -1,0 +1,2 @@
+backend/entrypoint.sh text eol=lf
+identity_service/entrypoint.sh text eol=lf

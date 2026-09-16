@@ -11,7 +11,7 @@ from apps.core.services import record_event
 from apps.rubrics.models import MarkingScheme
 from apps.rubrics.services import evaluator_has_required_acknowledgements
 
-from .models import Annotation, Evaluation, EvaluationComment, QuestionMark
+from .models import Annotation, Evaluation, EvaluationComment, QuestionMark, QuestionPageAnchor
 
 
 EVALUATION_TRANSITIONS = {
@@ -236,6 +236,27 @@ def add_comment(*, tenant_id, actor_id, evaluation_id, evaluator, expected_versi
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="marking.comment.added", aggregate="EvaluationComment", aggregate_id=item.id, payload={"evaluation_id": str(evaluation.id), "kind": kind})
     return item, evaluation
 
+
+@transaction.atomic
+def pin_question_page(*, tenant_id, actor_id, evaluation_id, evaluator, expected_version, lock_token, question, page_number):
+    evaluation = Evaluation.objects.select_for_update().select_related("assignment__script").filter(id=evaluation_id, tenant_id=tenant_id, assignment__evaluator=evaluator).first()
+    if not evaluation or evaluation.version != expected_version:
+        raise HttpError(409, "Evaluation is missing or stale")
+    verify_assignment_lock(assignment=evaluation.assignment, evaluator=evaluator, token=lock_token)
+    if evaluation.status not in (Evaluation.Status.DRAFT, Evaluation.Status.REVIEW):
+        raise HttpError(409, "Submitted page anchors are immutable")
+    if not 1 <= page_number <= max(evaluation.assignment.script.page_count, 1):
+        raise HttpError(422, "Question page is outside the script")
+    anchor, _ = QuestionPageAnchor.objects.update_or_create(
+        tenant_id=tenant_id,
+        evaluation=evaluation,
+        question=question,
+        defaults={"page_number": page_number, "actor_id": actor_id},
+    )
+    evaluation.version += 1
+    evaluation.save(update_fields=["version", "updated_at"])
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="marking.question_page_anchor.pinned", aggregate="QuestionPageAnchor", aggregate_id=anchor.id, payload={"evaluation_id": str(evaluation.id), "question": question.number, "page": page_number})
+    return anchor, evaluation
 
 def evaluation_checksum(evaluation):
     payload = {
