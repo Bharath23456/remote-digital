@@ -106,6 +106,9 @@ class InstitutionHierarchyTests(TestCase):
         self.assertEqual(login.status_code, 200)
         self.assertTrue(login.json()["must_change_password"])
         self.assertEqual(university.get("/api/v1/operations/overview", HTTP_HOST="domain.localhost").status_code, 428)
+        csrf = university.get("/api/v1/auth/csrf", HTTP_HOST="domain.localhost")
+        self.assertEqual(csrf.status_code, 200)
+        self.assertTrue(csrf.json()["csrf_token"])
         changed = university.post(
             "/api/v1/auth/password/complete-setup",
             data=json.dumps({"new_password": "Unique-Domain-Password-2046!"}),

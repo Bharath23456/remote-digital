@@ -9,7 +9,7 @@ from apps.tenancy.models import Membership
 from apps.workflow.services import start_workflow
 
 from .models import Evaluation
-from .services import add_annotation, add_comment, change_annotation, effective_annotations, latest_marks, open_evaluation, save_question_mark, transition_evaluation
+from .services import add_annotation, add_comment, change_annotation, effective_annotations, latest_marks, open_evaluation, pin_question_page, save_question_mark, transition_evaluation
 
 
 router = Router(tags=["Digital annotation and question-wise evaluation"])
@@ -51,6 +51,11 @@ class CommentIn(Schema):
     page_number: int | None = None
     kind: str
     body: str
+
+
+class QuestionPageAnchorIn(Schema):
+    version: int
+    page_number: int
 
 
 class TransitionIn(Schema):
@@ -111,6 +116,7 @@ def workspace(request, assignment_id: str):
         "marks": [{"id": str(item.id), "question_id": str(item.question_id), "sub_question": item.sub_question, "marks": float(item.marks), "outcome": item.outcome, "adjustment": item.adjustment, "step_marks": item.step_marks, "criterion_id": str(item.rubric_criterion_id) if item.rubric_criterion_id else None, "marked_for_review": item.marked_for_review, "requires_attention": item.requires_attention, "examiner_confirmed": item.examiner_confirmed, "sequence": item.sequence} for item in marks],
         "annotations": [{"id": str(item.id), "page_number": item.page_number, "question_id": str(item.question_id) if item.question_id else None, "kind": item.kind, "geometry": item.geometry, "style": item.style, "symbol": item.symbol} for item in annotations],
         "comments": [{"id": str(item.id), "question_id": str(item.question_id) if item.question_id else None, "page_number": item.page_number, "kind": item.kind, "body": item.body, "created_at": item.created_at.isoformat()} for item in evaluation.comments.all()],
+        "page_anchors": [{"question_id": str(item.question_id), "page_number": item.page_number} for item in evaluation.page_anchors.all()],
     }
 
 
@@ -162,6 +168,15 @@ def record_comment(request, evaluation_id: str, payload: CommentIn):
     return {"id": str(item.id), "version": current.version}
 
 
+@router.post("/evaluations/{evaluation_id}/questions/{question_id}/page-anchor")
+def record_question_page_anchor(request, evaluation_id: str, question_id: str, payload: QuestionPageAnchorIn):
+    tenant_id, evaluator, _ = _evaluator_context(request)
+    evaluation = Evaluation.objects.filter(id=evaluation_id, tenant_id=tenant_id, assignment__evaluator=evaluator).select_related("assignment__script__paper").first()
+    if not evaluation:
+        raise HttpError(404, "Evaluation not found")
+    require_secure_evaluation_session(request, evaluation.assignment)
+    item, current = pin_question_page(tenant_id=tenant_id, actor_id=request.auth.id, evaluation_id=evaluation_id, evaluator=evaluator, expected_version=payload.version, lock_token=_lock_token(request), question=_question(evaluation.assignment, question_id), page_number=payload.page_number)
+    return {"id": str(item.id), "page_number": item.page_number, "version": current.version}
 @router.post("/evaluations/{evaluation_id}/transition")
 def evaluation_transition(request, evaluation_id: str, payload: TransitionIn):
     tenant_id, evaluator, _ = _evaluator_context(request)

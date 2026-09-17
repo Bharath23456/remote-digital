@@ -241,7 +241,7 @@ export function useSecureEvaluationSession() {
     }
 
     const visibility = () => { if (document.hidden) void report("viewer_hidden", "critical", { visibility: document.visibilityState }); };
-    const fullscreen = () => { if (!closingRef.current && current.policy.fullscreen_required && !document.fullscreenElement) void report("fullscreen_exited", "critical"); };
+    const fullscreen = () => { if (!closingRef.current && current.policy.fullscreen_required && !document.fullscreenElement) void report("fullscreen_exited", "critical", { visibility: document.visibilityState }); };
     const trackStopped = () => { if (!closingRef.current) void report("camera_stopped", "critical"); };
     camera.getVideoTracks().forEach((track) => { track.addEventListener("ended", trackStopped); track.addEventListener("mute", trackStopped); });
     const deviceChange = async () => { const inventory = await mediaInventory(); if (inventory.rawDigest !== inventoryRef.current) void report("external_media_device", "critical", { previous_inventory: inventoryRef.current, current_inventory: inventory.public }); };

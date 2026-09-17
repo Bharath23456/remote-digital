@@ -22,7 +22,7 @@ class MaskingJob(TenantModel):
         FAILED = "failed", "Failed"
 
     script = models.ForeignKey(Script, on_delete=models.PROTECT, related_name="masking_jobs")
-    profile = models.CharField(max_length=80, default="university-standard-v1")
+    profile = models.CharField(max_length=80, default="identity-cover-v1")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DETECTED)
     detection_confidence = models.DecimalField(max_digits=5, decimal_places=4, default=0)
     created_by_id = models.PositiveBigIntegerField()
@@ -41,6 +41,7 @@ class MaskingJob(TenantModel):
 
 class MaskRegion(TenantModel):
     class Category(models.TextChoices):
+        IDENTITY_PAGE = "identity_page", "Identity cover page"
         CANDIDATE_NAME = "candidate_name", "Candidate name"
         REGISTER_NUMBER = "register_number", "Register number"
         USN = "usn", "USN"

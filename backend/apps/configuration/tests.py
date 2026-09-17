@@ -219,3 +219,71 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertTrue(ConfigurationRevision.objects.filter(aggregate_id=paper.id, change_type=ConfigurationRevision.ChangeType.EMERGENCY).exists())
         self.assertTrue(AuditEvent.objects.filter(action="config.change.applied", aggregate_id=change["id"]).exists())
         self.assertTrue(OutboxEvent.objects.filter(topic="config.change.applied", aggregate_id=change["id"]).exists())
+
+    def test_questions_can_only_be_added_to_draft_papers(self):
+        paper = Paper.objects.filter(status=Paper.Status.REVIEW).first()
+        original_version = paper.version
+        payload = {"number": "Q-LOCKED", "max_marks": "1.00", "required": True, "position": 99}
+
+        in_review = self.post(f"/api/v1/configuration/papers/{paper.id}/questions", payload)
+        self.assertEqual(in_review.status_code, 409)
+        self.assertIn("only be changed while a paper is in Draft", in_review.json()["detail"])
+        self.assertFalse(paper.questions.filter(number="Q-LOCKED").exists())
+
+        paper.status = Paper.Status.APPROVED
+        paper.save(update_fields=["status"])
+        approved = self.post(f"/api/v1/configuration/papers/{paper.id}/questions", payload)
+        self.assertEqual(approved.status_code, 409)
+
+        paper.status = Paper.Status.FROZEN
+        paper.save(update_fields=["status"])
+        frozen = self.post(f"/api/v1/configuration/papers/{paper.id}/questions", payload)
+        self.assertEqual(frozen.status_code, 409)
+        paper.refresh_from_db()
+        self.assertEqual(paper.version, original_version)
+        self.assertFalse(paper.questions.filter(number="Q-LOCKED").exists())
+
+    def test_question_detail_update_and_delete_are_versioned_and_audited(self):
+        source = Paper.objects.first()
+        created = self.post("/api/v1/configuration/papers", {
+            "session_id": str(source.session_id), "subject_id": str(source.subject_id),
+            "code": f"QUESTION-{uuid.uuid4().hex[:8]}", "title": "Question editing",
+            "max_marks": "20.00", "pass_marks": "8.00",
+        })
+        self.assertEqual(created.status_code, 200)
+        paper_id = created.json()["id"]
+        added = self.post(f"/api/v1/configuration/papers/{paper_id}/questions", {
+            "number": "Q1", "sub_question": "a", "max_marks": "20.00", "question_type": "descriptive",
+        })
+        self.assertEqual(added.status_code, 200)
+        question_id = added.json()["question"]["id"]
+        self.assertEqual(added.json()["question"]["position"], 1)
+        detail = self.client.get(f"/api/v1/configuration/papers/{paper_id}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["questions"][0]["sub_question"], "a")
+
+        update_path = f"/api/v1/configuration/papers/{paper_id}/questions/{question_id}"
+        updated = self.client.patch(update_path, data=json.dumps({
+            "version": added.json()["paper_version"], "number": "Q1", "sub_question": "b",
+            "max_marks": "20.00", "question_type": "objective", "required": True,
+        }), content_type="application/json")
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["question"]["question_type"], "objective")
+        self.assertEqual(updated.json()["question"]["sub_question"], "b")
+        stale = self.client.delete(update_path, data=json.dumps({"version": added.json()["paper_version"]}), content_type="application/json")
+        self.assertEqual(stale.status_code, 409)
+        deleted = self.client.delete(update_path, data=json.dumps({"version": updated.json()["paper_version"]}), content_type="application/json")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(Paper.objects.get(id=paper_id).questions.exists())
+        self.assertTrue(AuditEvent.objects.filter(action="config.question.updated", aggregate_id=question_id).exists())
+        self.assertTrue(AuditEvent.objects.filter(action="config.question.deleted", aggregate_id=question_id).exists())
+
+    def test_question_edit_rejects_non_draft_paper(self):
+        paper = Paper.objects.filter(status=Paper.Status.REVIEW).first()
+        question = paper.questions.first()
+        response = self.client.patch(
+            f"/api/v1/configuration/papers/{paper.id}/questions/{question.id}",
+            data=json.dumps({"version": paper.version, "number": question.number, "max_marks": str(question.max_marks)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
