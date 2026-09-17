@@ -107,3 +107,13 @@ class EvaluationComment(TenantModel):
 
     class Meta:
         ordering = ["created_at"]
+
+
+class QuestionPageAnchor(TenantModel):
+    evaluation = models.ForeignKey(Evaluation, on_delete=models.CASCADE, related_name="page_anchors")
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="page_anchors")
+    page_number = models.PositiveSmallIntegerField()
+    actor_id = models.PositiveBigIntegerField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["evaluation", "question"], name="unique_question_page_anchor")]

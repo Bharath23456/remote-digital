@@ -28,6 +28,7 @@ from .schemas import (
     PasskeyLoginBeginIn,
     PasskeyLoginCompleteIn,
     PasswordChangeIn,
+    PasswordUpdateIn,
     SsoStartIn,
     StepUpIn,
     TotpConfirmIn,
@@ -81,6 +82,8 @@ def sso_start(request, payload: SsoStartIn):
     provider = OidcProvider.objects.filter(id=payload.provider_id, is_active=True).first()
     if not provider:
         raise HttpError(404, "Institutional sign-in provider not found")
+    if policy_for(provider.tenant_id).require_mfa:
+        raise HttpError(403, "This university requires password and authenticator app sign-in")
     context = {
         "raw_device_id": payload.device_id,
         "device_label": payload.device_label,
@@ -103,6 +106,8 @@ def sso_callback(request, state: str = "", code: str = "", error: str = ""):
         return HttpResponseRedirect(f"{base_url}/?sso=failed")
     try:
         user, membership, context, mfa_verified, claims = complete_oidc_login(request, state=state, code=code)
+        if policy_for(membership.institution.tenant_id).require_mfa:
+            return HttpResponseRedirect(f"{base_url}/?sso=authenticator_required")
         risk_score, reasons, _device, hashed_device = assess_login_risk(request, user, context.pop("raw_device_id", ""))
         context.update({"risk_score": risk_score, "risk_reasons": reasons, "device_hash": hashed_device})
         membership, session = finalize_login(request, user, context, mfa_verified=mfa_verified)
@@ -152,6 +157,7 @@ def _user_context(user, membership, session):
         "session": {
             "id": str(session.id),
             "expires_at": session.expires_at.isoformat(),
+            "timeout_minutes": policy_for(membership.institution.tenant_id).session_timeout_minutes,
             "risk_score": session.risk_score,
             "mfa_verified": bool(session.mfa_verified_at),
             "step_up_valid": session.is_step_up_valid,
@@ -327,6 +333,9 @@ def passkey_login_options(request, payload: PasskeyLoginBeginIn):
     resolved_tenant_id = getattr(request, "resolved_tenant_id", None)
     if resolved_tenant_id and not membership_for_user(user, resolved_tenant_id):
         raise HttpError(403, "Your account does not belong to this university")
+    membership = membership_for_user(user, resolved_tenant_id)
+    if membership and policy_for(membership.institution.tenant_id).require_mfa:
+        raise HttpError(403, "This university requires password and authenticator app sign-in")
     risk_score, reasons, _device, hashed_device = assess_login_risk(request, user, payload.device_id, resolved_tenant_id)
     context = {
         "device_hash": hashed_device,
@@ -343,6 +352,9 @@ def passkey_login_options(request, payload: PasskeyLoginBeginIn):
 @router.post("/passkeys/login/verify", auth=None)
 def passkey_login_verify(request, payload: PasskeyLoginCompleteIn):
     user, context = complete_passkey_login(request, payload.credential)
+    membership = membership_for_user(user, context.get("tenant_id"))
+    if membership and policy_for(membership.institution.tenant_id).require_mfa:
+        raise HttpError(403, "This university requires password and authenticator app sign-in")
     membership, session = finalize_login(request, user, context, mfa_verified=True)
     return _user_context(user, membership, session)
 
@@ -380,6 +392,39 @@ def complete_password_setup(request, payload: PasswordChangeIn):
     if current:
         current.session_key_hash = hashlib.sha256(request.session.session_key.encode()).hexdigest()
         current.save(update_fields=["session_key_hash", "updated_at"])
+    return {"ok": True}
+
+
+@router.post("/password/change")
+def change_password(request, payload: PasswordUpdateIn):
+    membership = membership_for(request)
+    if not request.auth.check_password(payload.current_password):
+        raise HttpError(401, "Current password is incorrect")
+    if payload.current_password == payload.new_password:
+        raise HttpError(422, "Choose a different password")
+    try:
+        validate_password(payload.new_password, request.auth)
+    except ValidationError as exc:
+        raise HttpError(422, " ".join(exc.messages)) from exc
+    current = active_session_for_request(request)
+    if not current:
+        raise HttpError(401, "Session is unavailable")
+    with transaction.atomic():
+        request.auth.set_password(payload.new_password)
+        request.auth.save(update_fields=["password"])
+        AccessSession.objects.filter(user=request.auth, revoked_at__isnull=True).exclude(id=current.id).update(
+            revoked_at=timezone.now(), revoked_reason="password_changed"
+        )
+        record_event(
+            tenant_id=membership.institution.tenant_id,
+            actor_id=request.auth.id,
+            action="auth.password.changed",
+            aggregate="AccessSession",
+            aggregate_id=current.id,
+        )
+    update_session_auth_hash(request, request.auth)
+    current.session_key_hash = hashlib.sha256(request.session.session_key.encode()).hexdigest()
+    current.save(update_fields=["session_key_hash", "updated_at"])
     return {"ok": True}
 
 
@@ -442,6 +487,7 @@ def security_context(request):
                 "last_seen_at": item.last_seen_at.isoformat(),
                 "expires_at": item.expires_at.isoformat(),
                 "revoked_at": item.revoked_at.isoformat() if item.revoked_at else None,
+                "status": "revoked" if item.revoked_at else "expired" if item.expires_at <= timezone.now() else "active",
                 "step_up_valid": item.is_step_up_valid,
             }
             for item in sessions

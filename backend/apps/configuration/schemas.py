@@ -91,9 +91,25 @@ class PaperIn(Schema):
 
 class QuestionIn(Schema):
     number: str
+    sub_question: str = ""
     max_marks: Decimal
+    question_type: str = "descriptive"
     required: bool = True
-    position: int
+    position: int | None = None
+
+
+class QuestionUpdateIn(Schema):
+    version: int
+    number: str
+    sub_question: str = ""
+    max_marks: Decimal
+    question_type: str = "descriptive"
+    required: bool = True
+    position: int | None = None
+
+
+class QuestionDeleteIn(Schema):
+    version: int
 
 
 class PaperActionIn(Schema):

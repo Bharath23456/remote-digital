@@ -13,8 +13,10 @@ from apps.configuration.schemas import (
     PaperActionIn,
     PaperIn,
     PaperUpdateIn,
+    QuestionDeleteIn,
     ProgrammeIn,
     QuestionIn,
+    QuestionUpdateIn,
     RegulationIn,
     SubjectIn,
     TermIn,
@@ -138,11 +140,48 @@ def edit_paper(request, paper_id: str, payload: PaperUpdateIn):
     return services.paper_detail(paper)
 
 
+@router.get("/papers/{paper_id}")
+def paper(request, paper_id: str):
+    membership = require_roles(request, *WRITE_ROLES, Membership.Role.AUDITOR)
+    item = _run(services.paper_for_configuration, tenant_id=membership.institution.tenant_id, paper_id=paper_id)
+    return services.paper_detail(item)
+
+
 @router.post("/papers/{paper_id}/questions")
 def create_question(request, paper_id: str, payload: QuestionIn):
     tenant_id, actor_id = _context(request)
     question, paper = _run(services.add_question, tenant_id=tenant_id, actor_id=actor_id, paper_id=paper_id, values=payload.dict())
-    return {"id": str(question.id), "paper_version": paper.version, "readiness": services.paper_readiness(paper)}
+    return {"question": services.question_detail(question), "paper_version": paper.version, "readiness": services.paper_readiness(paper)}
+
+
+@router.patch("/papers/{paper_id}/questions/{question_id}")
+def update_question(request, paper_id: str, question_id: str, payload: QuestionUpdateIn):
+    tenant_id, actor_id = _context(request)
+    values = payload.dict(exclude={"version"})
+    question, paper = _run(
+        services.update_question,
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        paper_id=paper_id,
+        question_id=question_id,
+        version=payload.version,
+        values=values,
+    )
+    return {"question": services.question_detail(question), "paper_version": paper.version, "readiness": services.paper_readiness(paper)}
+
+
+@router.delete("/papers/{paper_id}/questions/{question_id}")
+def delete_question(request, paper_id: str, question_id: str, payload: QuestionDeleteIn):
+    tenant_id, actor_id = _context(request)
+    paper = _run(
+        services.delete_question,
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        paper_id=paper_id,
+        question_id=question_id,
+        version=payload.version,
+    )
+    return {"paper_version": paper.version, "readiness": services.paper_readiness(paper)}
 
 
 @router.post("/papers/{paper_id}/submit")

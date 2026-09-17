@@ -12,6 +12,25 @@ async function navigate(page: import("@playwright/test").Page, label: string) {
   await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: label, exact: true }).click();
 }
 
+test("access governance keeps privileged actions within the viewport", async ({ page }) => {
+  await login(page, "admin@admiezo.local");
+  if ((page.viewportSize()?.width || 0) <= 760) {
+    await page.getByTitle("Open navigation").click();
+    await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Access governance", exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+  } else {
+    await navigate(page, "Access governance");
+  }
+  await page.getByRole("button", { name: "Access", exact: true }).click();
+  await expect(page.getByText("Privileged access", { exact: true })).toBeVisible();
+  const dimensions = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    document: document.documentElement.scrollWidth,
+    toolbarRight: [...document.querySelectorAll(".workspace-toolbar")].at(-1)?.getBoundingClientRect().right || 0,
+  }));
+  expect(dimensions.document).toBeLessThanOrEqual(dimensions.viewport + 1);
+  expect(dimensions.toolbarRight).toBeLessThanOrEqual(dimensions.viewport + 1);
+});
+
 test("university admin creates a module-scoped evaluator login", async ({ page }) => {
   await login(page, "admin@admiezo.local");
   await navigate(page, "Access governance");

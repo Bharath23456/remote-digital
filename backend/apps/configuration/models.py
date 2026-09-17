@@ -124,15 +124,24 @@ class Paper(TenantModel):
 
 
 class Question(TenantModel):
+    class Type(models.TextChoices):
+        DESCRIPTIVE = "descriptive", "Descriptive"
+        OBJECTIVE = "objective", "Objective"
+        PRACTICAL = "practical", "Practical"
+        ORAL = "oral", "Oral"
+        OTHER = "other", "Other"
+
     paper = models.ForeignKey(Paper, on_delete=models.CASCADE, related_name="questions")
     number = models.CharField(max_length=16)
+    sub_question = models.CharField(max_length=8, blank=True)
     max_marks = models.DecimalField(max_digits=7, decimal_places=2)
+    question_type = models.CharField(max_length=16, choices=Type.choices, default=Type.DESCRIPTIVE)
     required = models.BooleanField(default=True)
     position = models.PositiveSmallIntegerField()
 
     class Meta:
         ordering = ["position"]
-        constraints = [models.UniqueConstraint(fields=["paper", "number"], name="unique_paper_question")]
+        constraints = [models.UniqueConstraint(fields=["paper", "number", "sub_question"], name="unique_paper_question_part")]
 
 
 class EvaluationCentre(TenantModel):

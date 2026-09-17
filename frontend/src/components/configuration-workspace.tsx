@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronRight, FilePlus2, History, LoaderCircle, Pencil, Plus, ShieldAlert, Undo2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ClipboardList, FilePlus2, History, LoaderCircle, Pencil, Plus, ShieldAlert, Undo2, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { DynamicFields, readDynamicFields, useDynamicFields } from "@/components/dynamic-fields";
 import { csrfFetch } from "@/lib/api";
@@ -45,7 +45,7 @@ export function ConfigurationWorkspace() {
   const [catalog, setCatalog] = useState<Catalog>({});
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [active, setActive] = useState<EntityKey>("papers");
-  const [modal, setModal] = useState<"entity" | "question" | "edit" | "change" | "history" | null>(null);
+  const [modal, setModal] = useState<"entity" | "question" | "questions" | "edit" | "change" | "history" | null>(null);
   const [selectedPaper, setSelectedPaper] = useState<Record<string, unknown> | null>(null);
   const [selectedImpact, setSelectedImpact] = useState<Record<string, unknown> | null>(null);
   const [historyRows, setHistoryRows] = useState<Record<string, unknown>[]>([]);
@@ -54,6 +54,7 @@ export function ConfigurationWorkspace() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [eventSessionId, setEventSessionId] = useState("");
+  const [expandedPaperId, setExpandedPaperId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -111,7 +112,8 @@ export function ConfigurationWorkspace() {
       }
     }
     try {
-      await apiRequest(`/api/v1/configuration/${endpoints[active]}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const created = await apiRequest(`/api/v1/configuration/${endpoints[active]}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      if (active === "papers" && created.id) setExpandedPaperId(String(created.id));
       setModal(null); setNotice(`${entityLabels[active]} record created`); await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Record could not be created"); }
     finally { setSaving(false); }
@@ -121,7 +123,7 @@ export function ConfigurationWorkspace() {
     event.preventDefault(); if (!selectedPaper) return; setSaving(true); setError("");
     const data = new FormData(event.currentTarget);
     try {
-      await apiRequest(`/api/v1/configuration/papers/${selectedPaper.id}/questions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ number: data.get("number"), max_marks: data.get("max_marks"), position: Number(data.get("position")), required: data.get("required") === "on" }) });
+      await apiRequest(`/api/v1/configuration/papers/${selectedPaper.id}/questions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ number: data.get("number"), sub_question: data.get("sub_question"), max_marks: data.get("max_marks"), question_type: data.get("question_type"), position: Number(data.get("position")), required: data.get("required") === "on" }) });
       setModal(null); setNotice("Question added and paper readiness recalculated"); await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Question could not be added"); }
     finally { setSaving(false); }
@@ -197,6 +199,10 @@ export function ConfigurationWorkspace() {
   const columns = rows.length ? Object.keys(rows[0]).filter((key) => !["id", "questions", "rules", "network_cidrs", "evaluation_centre_ids", "readiness", "session_id", "subject_id", "academic_year_id", "programme_id", "regulation_id", "frozen_at", "effective_from"].includes(key)).slice(0, 6) : [];
   const pendingChanges = (catalog.change_requests || []).filter((item) => item.status === "pending");
   const eventSession = (catalog.sessions || []).find((item) => id(item) === eventSessionId);
+  const subjectLabel = (subjectId: unknown) => {
+    const subject = (catalog.subjects || []).find((item) => id(item) === String(subjectId));
+    return subject ? `${String(subject.code)} · ${String(subject.name)}` : "—";
+  };
 
   return <div className="config-workspace">
     {readiness && <div className={`config-readiness ${readiness.ready ? "ready" : "attention"}`}><div><strong>{readiness.ready ? "GO-LIVE" : "NOT READY"}</strong><span>{readiness.session?.name || "No examination session"}</span></div><div><span>Papers</span><strong>{readiness.paper_count || 0}</strong></div><div><span>Open issues</span><strong>{readiness.issues.length + readiness.critical_alerts.length}</strong></div></div>}
@@ -205,18 +211,112 @@ export function ConfigurationWorkspace() {
     {error && !modal && <div className="form-error" role="alert">{error}</div>}
     <section className="panel">
       <header className="panel-header"><div><h2 className="panel-title">{entityLabels[active]}</h2><p className="panel-subtitle">{rows.length} configured records</p></div></header>
-      {loading ? <div className="empty-state"><LoaderCircle className="spin" /></div> : rows.length ? <div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{titleCase(column)}</th>)}{active === "papers" && <th>Readiness</th>}{active === "papers" && <th>Actions</th>}</tr></thead><tbody>{rows.map((row) => <tr key={id(row)}>{columns.map((column) => <td key={column}>{column === "status" ? <span className={`status-pill ${row[column]}`}>{titleCase(String(row[column]))}</span> : String(row[column] ?? "—")}</td>)}{active === "papers" && <td><span className={`status-pill ${(row.readiness as { ready: boolean }).ready ? "ready" : "attention"}`}>{(row.readiness as { ready: boolean }).ready ? "Ready" : "Attention"}</span></td>}{active === "papers" && <td><div className="row-actions">{row.status === "draft" && <button title="Add question" onClick={() => { setSelectedPaper(row); setModal("question"); setError(""); }}><FilePlus2 /></button>}{row.status === "draft" && <button title="Edit draft" onClick={() => { setSelectedPaper(row); setModal("edit"); setError(""); }}><Pencil /></button>}<button title="Configuration history" onClick={() => void openHistory(row)}><History /></button>{row.status !== "draft" && <button title="Request governed change" onClick={() => void openGovernedChange(row)}><ShieldAlert /></button>}{row.status === "draft" && <button onClick={() => paperAction(row, "submit")}>Submit</button>}{row.status === "review" && <button onClick={() => paperAction(row, "approve")}>Approve</button>}{row.status === "approved" && <button onClick={() => paperAction(row, "freeze")}>Freeze</button>}{row.status === "frozen" && <span className="locked-label"><Check />Frozen</span>}</div></td>}</tr>)}</tbody></table></div> : <div className="empty-state"><div><FilePlus2 /><strong>No {entityLabels[active].toLowerCase()} yet</strong><p>Create the first record to continue configuration.</p></div></div>}
+      {loading ? <div className="empty-state"><LoaderCircle className="spin" /></div> : rows.length ? active === "papers" ? <div className="paper-record-list">{rows.map((row) => <PaperRecord
+        key={id(row)}
+        paper={row}
+        expanded={expandedPaperId === id(row)}
+        saving={saving}
+        onToggle={() => setExpandedPaperId((current) => current === id(row) ? null : id(row))}
+        onAddQuestion={() => { setSelectedPaper(row); setModal("question"); setError(""); }}
+        onViewQuestions={() => { setSelectedPaper(row); setModal("questions"); setError(""); }}
+        onEdit={() => { setSelectedPaper(row); setModal("edit"); setError(""); }}
+        onHistory={() => void openHistory(row)}
+        onGovernedChange={() => void openGovernedChange(row)}
+        onAction={(action) => void paperAction(row, action)}
+      />)}</div> : <div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{titleCase(column)}</th>)}</tr></thead><tbody>{rows.map((row) => <tr key={id(row)}>{columns.map((column) => <td key={column}>{column === "status" ? <span className={`status-pill ${row[column]}`}>{titleCase(String(row[column]))}</span> : String(row[column] ?? "—")}</td>)}</tr>)}</tbody></table></div> : <div className="empty-state"><div><FilePlus2 /><strong>No {entityLabels[active].toLowerCase()} yet</strong><p>Create the first record to continue configuration.</p></div></div>}
     </section>
     {active === "papers" && pendingChanges.length > 0 && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Governed changes</h2><p className="panel-subtitle">Emergency and rollback requests require two independent approvals</p></div></header><div className="table-wrap"><table><thead><tr><th>Paper</th><th>Change</th><th>Impact</th><th>Approvals</th><th>Decision</th></tr></thead><tbody>{pendingChanges.map((change) => <tr key={String(change.id)}><td><strong>{String(change.paper)}</strong><br /><small>{String(change.reason)}</small></td><td>{titleCase(String(change.kind))}</td><td>{String((change.impact as { scripts?: number }).scripts || 0)} scripts</td><td>{String(change.approval_count)} / {String(change.required_approvals)}</td><td><div className="row-actions"><button disabled={saving} onClick={() => decideChange(change, "approved")}>Approve</button><button disabled={saving} onClick={() => decideChange(change, "rejected")}>Reject</button></div></td></tr>)}</tbody></table></div></section>}
     {modal === "entity" && <div className="modal-backdrop" role="presentation"><div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="entity-modal-title"><header className="modal-header"><div><h2 id="entity-modal-title">Add {entityLabels[active].replace(/s$/, "")}</h2><p>This record becomes part of the active university configuration.</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={createEntity}><div className="form-grid">{fields[active].map((field) => <label className={`field ${field.type === "checkbox" ? "check-field" : ""}`} key={field.name}>{field.type === "checkbox" ? <><input name={field.name} type="checkbox" /><span>{field.label}</span></> : <><span>{field.label}</span>{field.type === "select" || field.type === "multiselect" ? <select name={field.name} required={field.required} defaultValue={field.type === "multiselect" ? undefined : ""} multiple={field.type === "multiselect"} size={field.type === "multiselect" ? Math.min(6, Math.max(3, field.options?.length || 3)) : undefined} onChange={field.name === "session_id" && active === "events" ? (event) => setEventSessionId(event.target.value) : undefined}><option value="" disabled={field.type !== "multiselect"}>Select {field.label.toLowerCase()}</option>{field.options?.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select> : <input name={field.name} type={field.type || "text"} required={field.required} min={field.type === "number" ? 0 : field.type === "datetime-local" && active === "events" ? localDateTime(eventSession?.evaluation_starts_at) : undefined} max={field.type === "datetime-local" && active === "events" ? localDateTime(eventSession?.evaluation_ends_at) : undefined} step={field.type === "number" ? "0.01" : undefined} />}</>}</label>)}{active === "events" && eventSession && <div className="form-guidance full-field"><strong>Session evaluation window</strong><span>{new Date(String(eventSession.evaluation_starts_at)).toLocaleString("en-IN")} to {new Date(String(eventSession.evaluation_ends_at)).toLocaleString("en-IN")}</span></div>}{active === "sessions" && <DynamicFields fields={sessionFields} />}{active === "papers" && <DynamicFields fields={paperCustomFields} />}</div>{error && <div className="form-error" role="alert">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Create record"}<ChevronRight /></button></footer></form></div></div>}
-    {modal === "question" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel compact" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Add question</h2><p>{String(selectedPaper.code)} · {String(selectedPaper.title)}</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={addQuestion}><div className="form-grid"><label className="field"><span>Question number</span><input name="number" required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0" step="0.01" required /></label><label className="field"><span>Position</span><input name="position" type="number" min="1" required /></label><label className="field check-field"><input name="required" type="checkbox" defaultChecked /><span>Required question</span></label></div>{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Add question"}</button></footer></form></div></div>}
+    {modal === "question" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel compact" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Add question</h2><p>{String(selectedPaper.code)} · {String(selectedPaper.title)}</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={addQuestion}><div className="form-grid"><label className="field"><span>Question number</span><input name="number" required /></label><label className="field"><span>Sub-question</span><input name="sub_question" maxLength={8} /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0" step="0.01" required /></label><label className="field"><span>Question type</span><select name="question_type" defaultValue="descriptive"><option value="descriptive">Descriptive</option><option value="objective">Objective</option><option value="practical">Practical</option><option value="oral">Oral</option><option value="other">Other</option></select></label><label className="field"><span>Position</span><input name="position" type="number" min="1" required /></label><label className="field check-field"><input name="required" type="checkbox" defaultChecked /><span>Required question</span></label></div>{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Add question"}</button></footer></form></div></div>}
     {modal === "edit" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Edit draft paper</h2><p>{String(selectedPaper.code)} · version {String(selectedPaper.version)}</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={editPaper}><PaperFields paper={selectedPaper} />{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Save changes"}</button></footer></form></div></div>}
     {modal === "change" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Request governed change</h2><p>{String(selectedPaper.code)} · two independent approvals required</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><form onSubmit={requestGovernedChange}>{selectedImpact && <div className="impact-warning"><ShieldAlert /><div><strong>Active configuration impact</strong><span>{String(selectedImpact.scripts || 0)} scripts · {String(selectedImpact.active_assignments || 0)} active · {String(selectedImpact.submitted_assignments || 0)} submitted</span></div></div>}<div className="form-grid"><label className="field"><span>Change type</span><select name="kind" defaultValue="emergency_update"><option value="emergency_update">Emergency update</option><option value="rollback">Rollback to revision</option></select></label><label className="field"><span>Rollback revision</span><input name="target_revision_version" type="number" min="1" placeholder="Only for rollback" /></label><label className="field full-field"><span>Reason</span><input name="reason" minLength={12} required /></label></div><PaperFields paper={selectedPaper} />{error && <div className="form-error">{error}</div>}<footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Submitting…" : "Submit for approval"}<ChevronRight /></button></footer></form></div></div>}
-    {modal === "history" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Configuration history</h2><p>{String(selectedPaper.code)} · immutable revision record</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><div className="history-list">{historyRows.map((item) => <div className="history-item" key={String(item.version)}><div><Undo2 /><strong>Version {String(item.version)}</strong><span>{titleCase(String(item.change_type))}</span></div><p>{String(item.reason || "Configuration revision")}</p><small>{new Date(String(item.created_at)).toLocaleString("en-IN")}</small></div>)}</div></div></div>}
+    {modal === "questions" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel compact" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Questions and marks</h2><p>{String(selectedPaper.code)} · {String(selectedPaper.title)}</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><QuestionMarksRecord paper={selectedPaper} subject={subjectLabel(selectedPaper.subject_id)} /></div></div>}
+    {modal === "history" && selectedPaper && <div className="modal-backdrop"><div className="modal-panel" role="dialog" aria-modal="true"><header className="modal-header"><div><h2>Configuration history</h2><p>{String(selectedPaper.code)} · immutable revision record</p></div><button className="icon-button" title="Close" onClick={() => setModal(null)}><X /></button></header><div className="history-list">{historyRows.map((item) => <div className="history-item" key={String(item.version)}><div className="history-item-heading"><Undo2 /><strong>Version {String(item.version)}</strong><span>{titleCase(String(item.change_type))}</span></div><p>{String(item.reason || "Configuration revision")}</p><small>{new Date(String(item.created_at)).toLocaleString("en-IN")}</small></div>)}</div></div></div>}
   </div>;
 }
 
 function PaperFields({ paper }: { paper: Record<string, unknown> }) {
   const rules = paper.rules as { critical_change?: boolean } | undefined;
   return <div className="form-grid"><label className="field full-field"><span>Paper title</span><input name="title" defaultValue={String(paper.title)} required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0.01" step="0.01" defaultValue={String(paper.max_marks)} required /></label><label className="field"><span>Passing marks</span><input name="pass_marks" type="number" min="0" step="0.01" defaultValue={String(paper.pass_marks)} required /></label><label className="field"><span>Valuation rounds</span><input name="valuation_rounds" type="number" min="1" max="3" defaultValue={String(paper.valuation_rounds)} required /></label><label className="field"><span>Discrepancy threshold</span><input name="discrepancy_threshold" type="number" min="0" step="0.01" defaultValue={String(paper.discrepancy_threshold)} required /></label><label className="field check-field"><input name="moderation_required" type="checkbox" defaultChecked={Boolean(paper.moderation_required)} /><span>Moderation required</span></label><label className="field check-field"><input name="critical_change" type="checkbox" defaultChecked={Boolean(rules?.critical_change)} /><span>Critical changes need dual approval</span></label></div>;
+}
+
+type PaperAction = "submit" | "approve" | "freeze";
+type PaperRecordProps = {
+  paper: Record<string, unknown>;
+  expanded: boolean;
+  saving: boolean;
+  onToggle: () => void;
+  onAddQuestion: () => void;
+  onViewQuestions: () => void;
+  onEdit: () => void;
+  onHistory: () => void;
+  onGovernedChange: () => void;
+  onAction: (action: PaperAction) => void;
+};
+
+function PaperRecord({ paper, expanded, saving, onToggle, onAddQuestion, onViewQuestions, onEdit, onHistory, onGovernedChange, onAction }: PaperRecordProps) {
+  const questions = Array.isArray(paper.questions) ? paper.questions as Record<string, unknown>[] : [];
+  const readiness = paper.readiness as { ready: boolean; issues?: string[] } | undefined;
+  const isDraft = paper.status === "draft";
+  const paperId = id(paper);
+
+  return <article className={`paper-record ${expanded ? "expanded" : ""}`}>
+    <div className="paper-record-main" role="button" tabIndex={0} aria-expanded={expanded} aria-controls={`paper-questions-${paperId}`} onClick={onToggle} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onToggle(); } }}>
+      <header className="paper-record-header">
+        <div className="paper-record-title">
+          <span className="paper-record-code">{String(paper.code)}</span>
+          <h3>{String(paper.title)}</h3>
+          <span>Version {String(paper.version)}</span>
+        </div>
+        <div className="paper-record-status">
+          <span className={`status-pill ${String(paper.status)}`}>{titleCase(String(paper.status))}</span>
+          <span className={`status-pill ${readiness?.ready ? "ready" : "attention"}`}>{readiness?.ready ? "Ready" : "Attention"}</span>
+        </div>
+      </header>
+
+      <div className="paper-record-metrics" aria-label={`${String(paper.code)} paper details`}>
+        <div><span>Maximum marks</span><strong>{String(paper.max_marks)}</strong></div>
+        <div><span>Passing marks</span><strong>{String(paper.pass_marks)}</strong></div>
+        <div><span>Valuation rounds</span><strong>{String(paper.valuation_rounds)}</strong></div>
+        <div><span>Discrepancy threshold</span><strong>{String(paper.discrepancy_threshold)}</strong></div>
+      </div>
+    </div>
+
+    <footer className="paper-record-footer">
+      <button className="question-toggle" onClick={onToggle} aria-expanded={expanded} aria-controls={`paper-questions-${paperId}`}>
+        <span>{questions.length} {questions.length === 1 ? "question" : "questions"} configured</span><ChevronDown />
+      </button>
+      <div className="paper-record-actions">
+        {isDraft && <button onClick={onAddQuestion} disabled={saving}><FilePlus2 />Add question</button>}
+        <button title="View question numbers and assigned marks" onClick={onViewQuestions} disabled={saving}><ClipboardList />Questions &amp; marks</button>
+        {isDraft && <button onClick={onEdit} disabled={saving}><Pencil />Edit paper</button>}
+        <button onClick={onHistory} disabled={saving}><History />History</button>
+        {!isDraft && <button onClick={onGovernedChange} disabled={saving}><ShieldAlert />Request change</button>}
+        {isDraft && <button className="paper-primary-action" onClick={() => onAction("submit")} disabled={saving}>Submit</button>}
+        {paper.status === "review" && <button className="paper-primary-action" onClick={() => onAction("approve")} disabled={saving}>Approve</button>}
+        {paper.status === "approved" && <button className="paper-primary-action" onClick={() => onAction("freeze")} disabled={saving}>Freeze</button>}
+        {paper.status === "frozen" && <span className="locked-label"><Check />Frozen</span>}
+      </div>
+    </footer>
+
+    {expanded && <section className="paper-question-list" id={`paper-questions-${paperId}`} aria-label={`${String(paper.code)} questions`}>
+      <div className="paper-question-list-heading"><strong>Question breakdown</strong><span>Question number and maximum marks</span></div>
+      {questions.length ? questions.map((question) => <div className="paper-question-row" key={id(question)}>
+        <strong>Question {String(question.number)}{question.sub_question ? ` (${String(question.sub_question)})` : ""}</strong>
+        <span>{question.required ? "Required" : "Optional"}</span>
+        <b>{String(question.max_marks)} marks</b>
+      </div>) : <p className="paper-question-empty">No questions have been added to this paper yet. Use “Add question” to create the first one.</p>}
+      {!readiness?.ready && readiness?.issues?.length ? <p className="paper-readiness-note">{readiness.issues.join(" · ")}</p> : null}
+    </section>}
+  </article>;
+}
+
+function QuestionMarksRecord({ paper, subject }: { paper: Record<string, unknown>; subject: string }) {
+  const questions = (Array.isArray(paper.questions) ? paper.questions as Record<string, unknown>[] : []).slice().sort((left, right) => Number(left.position) - Number(right.position));
+
+  return <section className="question-marks-record">
+    <div className="question-marks-paper"><div><span>Paper name</span><strong>{String(paper.title)}</strong></div><div><span>Subject</span><strong>{subject}</strong></div></div>
+    <div className="question-marks-heading"><span>Question number</span><span>Assigned marks</span></div>
+    {questions.length ? questions.map((question) => <div className="question-marks-row" key={id(question)}><strong>Q. {String(question.number)}{question.sub_question ? ` (${String(question.sub_question)})` : ""}</strong><b>{String(question.max_marks)} marks</b></div>) : <p className="question-marks-empty">No questions have been assigned to this paper.</p>}
+  </section>;
 }

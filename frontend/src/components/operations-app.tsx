@@ -3,10 +3,10 @@
 import {
   AlertTriangle, Archive, ArrowUpRight, BookOpenCheck, Boxes, Check,
   ChevronRight, ClipboardCheck, FileCheck2, Files, Fingerprint, Gauge, History,
-  EyeOff, KeyRound, LayoutDashboard, LogOut, Menu, Network, ShieldCheck, SlidersHorizontal,
+  EyeOff, KeyRound, LayoutDashboard, LogOut, Menu, Network, RefreshCw, ShieldCheck, SlidersHorizontal,
   UserRoundCheck, Users, X, ScanLine, ScrollText, GitCompareArrows, Workflow, ServerCog,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { ConfigurationWorkspace } from "@/components/configuration-workspace";
 import { EnterpriseWorkspace } from "@/components/enterprise-workspace";
@@ -26,8 +26,9 @@ import { AdvancedOperationsWorkspace } from "@/components/advanced-operations-wo
 import { PlatformAdminWorkspace } from "@/components/platform-admin-workspace";
 import { PlatformAuditWorkspace } from "@/components/platform-audit-workspace";
 import { NotificationCenter } from "@/components/notification-center";
+import { AccountSettings } from "@/components/account-settings";
 import { deviceContext, getPasskey } from "@/lib/webauthn";
-import { csrfFetch } from "@/lib/api";
+import { csrfFetch, SESSION_EXPIRED_EVENT } from "@/lib/api";
 
 type UserContext = {
   user: { id: number; name: string; email: string };
@@ -37,6 +38,7 @@ type UserContext = {
   must_change_password: boolean;
   enabled_modules: string[];
   tenants: { id: string; name: string; role: string }[];
+  session: { id: string; timeout_minutes: number };
 };
 
 type Overview = {
@@ -88,6 +90,10 @@ const navGroups: { label: string; items: { key: ViewKey; label: string; icon: ty
 ];
 
 const evaluatorViews = new Set<ViewKey>(["evaluation"]);
+const platformViews = new Set<ViewKey>(["platformAdmin", "platformControl", "audit"]);
+const platformHashToView: Record<string, ViewKey> = { universities: "platformAdmin", operations: "platformControl", audit: "audit" };
+const platformViewToHash: Partial<Record<ViewKey, string>> = { platformAdmin: "universities", platformControl: "operations", audit: "audit" };
+const platformStorageKey = "admiezo-platform-view";
 const platformNavigation = [{ label: "Platform", items: [
   { key: "platformAdmin" as ViewKey, label: "Universities", icon: Network },
   { key: "platformControl" as ViewKey, label: "Platform operations", icon: ServerCog },
@@ -149,7 +155,7 @@ function formatValue(value: unknown) {
   return titleCase(text);
 }
 
-function Login({ onSuccess }: { onSuccess: () => void }) {
+function Login({ onSuccess, notice }: { onSuccess: () => void; notice?: string }) {
   const [email, setEmail] = useState("admin@admiezo.local");
   const [password, setPassword] = useState("ChangeMe123!");
   const [busy, setBusy] = useState(false);
@@ -159,18 +165,19 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
   const [code, setCode] = useState("");
   const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([]);
   const [domain, setDomain] = useState<DomainContext | null>(null);
+  const loginEdited = useRef(false);
   useEffect(() => {
     csrfFetch("/api/v1/enterprise/domain-context").then((response) => response.ok ? response.json() : null).then((value: DomainContext | null) => {
       setDomain(value);
-      if (value?.scope === "university") { setEmail(""); setPassword(""); }
+      if (value?.scope === "university" && !loginEdited.current) { setEmail(""); setPassword(""); }
     }).catch(() => setDomain(null));
     csrfFetch("/api/v1/auth/sso/providers")
       .then((response) => response.ok ? response.json() : [])
       .then((providers) => setSsoProviders(Array.isArray(providers) ? providers : []))
       .catch(() => setSsoProviders([]));
     const ssoResult = new URLSearchParams(window.location.search).get("sso");
-    if (ssoResult === "failed") {
-      window.queueMicrotask(() => setError("Institutional sign-in could not be completed. Check the account and try again."));
+    if (ssoResult === "failed" || ssoResult === "authenticator_required") {
+      window.queueMicrotask(() => setError(ssoResult === "authenticator_required" ? "This university requires password and authenticator app sign-in." : "Institutional sign-in could not be completed. Check the account and try again."));
     }
     if (ssoResult) {
       window.history.replaceState({}, "", window.location.pathname);
@@ -240,11 +247,11 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
     </section>
     <section className="login-form-wrap"><form className="login-form" onSubmit={mfaEnrollment ? enrollMfa : mfaRequired ? verifyMfa : submit}>
       <h2>{mfaEnrollment ? "Set up authenticator" : mfaRequired ? "Verify it’s you" : "Welcome back"}</h2><p>{mfaEnrollment ? "Scan this QR code with your authenticator app, then enter its six-digit code." : mfaRequired ? "Enter the six-digit code from your authenticator." : "Sign in to the evaluation control room."}</p>
-      {!mfaRequired && !mfaEnrollment && <><label className="field"><span>Email address</span><input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
-      <label className="field"><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label></>}
+      {!mfaRequired && !mfaEnrollment && <><label className="field"><span>Email address</span><input type="email" autoComplete="username" value={email} onChange={(event) => { loginEdited.current = true; setEmail(event.target.value); }} required /></label>
+        <label className="field"><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => { loginEdited.current = true; setPassword(event.target.value); }} required /></label></>}
       {mfaRequired && <label className="field"><span>Authenticator code</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} minLength={6} maxLength={6} required autoFocus /></label>}
       {mfaEnrollment && <div className="totp-setup login-totp-setup"><QRCodeSVG value={mfaEnrollment.provisioning_uri} size={164} level="M" /><div><span>Manual setup key</span><code>{mfaEnrollment.secret}</code><label className="field"><span>Six-digit code</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} minLength={6} maxLength={6} required autoFocus /></label></div></div>}
-      {error && <div className="form-error" role="alert">{error}</div>}
+      {(error || notice) && <div className="form-error" role="alert">{error || notice}</div>}
       <button className="primary-button login-submit" disabled={busy}>{busy ? "Please wait…" : mfaEnrollment ? "Enable and continue" : mfaRequired ? "Verify and continue" : "Sign in"}<ArrowUpRight /></button>
       {!mfaRequired && !mfaEnrollment && <button className="secondary-button login-passkey" type="button" disabled={busy || !email} onClick={signInWithPasskey}><KeyRound />Use a passkey</button>}
       {!mfaRequired && !mfaEnrollment && ssoProviders.length > 0 && <><div className="form-divider">Institutional SSO</div>{ssoProviders.map((provider) => <button className="secondary-button login-passkey" type="button" disabled={busy} onClick={() => signInWithSso(provider)} key={provider.id}><ShieldCheck />Continue with {provider.name}</button>)}</>}
@@ -293,11 +300,11 @@ function ModuleWorkspace({ view, overview }: { view: ViewKey; overview: Overview
     return Object.keys(rows[0]).filter((key) => !hidden.has(key)).slice(0, 7);
   }, [rows, view]);
   const count = meta.countKey ? overview.module_counts[meta.countKey] || 0 : rows.length;
-  return <div className="workspace-grid">
-    <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Current records</h2><p className="panel-subtitle">Tenant-scoped operational data</p></div></header>
+  return <div className={`workspace-grid ${view === "audit" ? "audit-workspace" : ""}`}>
+    <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Current records</h2><p className="panel-subtitle">Tenant-scoped operational data</p></div>{view === "audit" && <span className="status-pill active">{count.toLocaleString("en-IN")} {count === 1 ? "record" : "records"}</span>}</header>
       {loading ? <div className="empty-state"><div className="spinner" /></div> : error ? <div className="empty-state"><div><AlertTriangle /><strong>{error}</strong></div></div> : rows.length ? <div className="table-wrap"><table><thead><tr>{columns.map((column) => <th key={column}>{titleCase(column)}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id || index)}>{columns.map((column) => <td key={column}>{column === "status" || column === "state" ? <span className={`status-pill ${String(row[column])}`}>{formatValue(row[column])}</span> : formatValue(row[column])}</td>)}</tr>)}</tbody></table></div> : <div className="empty-state"><div><Files /><strong>No records yet</strong><p>This workspace is ready for its first operational record.</p></div></div>}
     </section>
-    <aside className="panel module-summary"><div className="summary-count">{count.toLocaleString("en-IN")}</div><div className="summary-label">Records in this university</div><ul className="control-list">{meta.controls.map((control) => <li key={control}><Check />{control}</li>)}</ul></aside>
+    {view !== "audit" && <aside className="panel module-summary"><div className="summary-count">{count.toLocaleString("en-IN")}</div><div className="summary-label">Records in this university</div><ul className="control-list">{meta.controls.map((control) => <li key={control}><Check />{control}</li>)}</ul></aside>}
   </div>;
 }
 
@@ -305,11 +312,17 @@ function PasswordSetup({ onComplete, onSignOut }: { onComplete: () => Promise<vo
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(""); const data = new FormData(event.currentTarget);
-    if (data.get("password") !== data.get("confirm")) { setError("Passwords do not match"); setBusy(false); return; }
-    const response = await csrfFetch("/api/v1/auth/password/complete-setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ new_password: data.get("password") }) });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) { setError(body.detail || "Password setup failed"); setBusy(false); return; }
-    await onComplete(); setBusy(false);
+    try {
+      if (data.get("password") !== data.get("confirm")) throw new Error("Passwords do not match");
+      const response = await csrfFetch("/api/v1/auth/password/complete-setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ new_password: data.get("password") }) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || "Password setup failed");
+      await onComplete();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Password setup failed");
+    } finally {
+      setBusy(false);
+    }
   }
   return <div className="login-shell"><section className="login-brand"><div className="login-logo"><span className="brand-mark">A</span>ADMIEZO</div><div className="login-statement"><h1>Secure your university account.</h1><p>Replace the one-time credential before entering the isolated workspace.</p></div><div className="login-foot">Password setup is recorded in the tenant audit trail.</div></section><div className="login-form-wrap"><form className="login-form" onSubmit={submit}><h2>Set your password</h2><p>Use at least 12 characters and avoid common passwords.</p><label className="field"><span>New password</span><input name="password" type="password" minLength={12} autoComplete="new-password" required /></label><label className="field"><span>Confirm password</span><input name="confirm" type="password" minLength={12} autoComplete="new-password" required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button login-submit" disabled={busy}><KeyRound />{busy ? "Updating..." : "Set password and continue"}</button><button type="button" className="text-button" onClick={onSignOut}>Sign out</button></form></div></div>;
 }
@@ -320,20 +333,35 @@ export function OperationsApp() {
   const [checking, setChecking] = useState(true);
   const [view, setView] = useState<ViewKey>("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [globalError, setGlobalError] = useState("");
+  const [loginNotice, setLoginNotice] = useState("");
   const [platformMode, setPlatformMode] = useState(true);
+  const [auditRefreshToken, setAuditRefreshToken] = useState(0);
+  const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [toast, setToast] = useState("");
+  const endingSession = useRef(false);
+  const endSession = useCallback((notice = "") => {
+    endingSession.current = true;
+    for (const key of Object.keys(sessionStorage)) if (key.startsWith("admiezo-last-activity-")) sessionStorage.removeItem(key);
+    sessionStorage.removeItem("admiezo-secure-evaluation-id");
+    setAccountOpen(false); setContext(null); setOverview(null); setChecking(false);
+    setView("dashboard"); setPlatformMode(true); setGlobalError(""); setLoginNotice(notice);
+  }, []);
   const load = useCallback(async () => {
     try {
       const meResponse = await csrfFetch("/api/v1/auth/me");
-      if (meResponse.status === 401) { setContext(null); setOverview(null); return; }
+      if (meResponse.status === 401) { endSession(); return; }
       if (!meResponse.ok) throw new Error("The identity service is unavailable");
       const current = await meResponse.json() as UserContext;
+      if (endingSession.current) return;
       if (current.must_change_password) {
         setContext(current); setOverview(emptyOverview()); setGlobalError("");
         return;
       }
       if (current.role === "platform_admin" && platformMode) {
-        setContext(current); setOverview(emptyOverview()); setView("platformAdmin"); setGlobalError("");
+        setContext(current); setOverview(emptyOverview()); setView((currentView) => platformViews.has(currentView) ? currentView : "platformAdmin"); setGlobalError("");
         return;
       }
       if (current.role === "evaluator") {
@@ -342,15 +370,76 @@ export function OperationsApp() {
       }
       const overviewResponse = await csrfFetch("/api/v1/operations/overview");
       if (!overviewResponse.ok) throw new Error("The operations API is unavailable");
+      if (endingSession.current) return;
       setContext(current); setOverview(await overviewResponse.json()); setGlobalError("");
     } catch (reason) { setGlobalError(reason instanceof Error ? reason.message : "Unable to load ADMIEZO"); }
     finally { setChecking(false); }
-  }, [platformMode]);
+  }, [endSession, platformMode]);
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
   }, [load]);
-  async function signOut() { await csrfFetch("/api/v1/auth/logout", { method: "POST" }); sessionStorage.removeItem("admiezo-secure-evaluation-id"); setContext(null); setOverview(null); setView("dashboard"); setPlatformMode(true); setGlobalError(""); }
+  useEffect(() => {
+    const onExpired = () => { if (!endingSession.current) endSession("Your session has ended. Sign in again."); };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+  }, [endSession]);
+  useEffect(() => {
+    if (!context?.session) return;
+    const key = `admiezo-last-activity-${context.session.id}`;
+    const timeout = context.session.timeout_minutes * 60_000;
+    let lastActivity = Number(sessionStorage.getItem(key)) || Date.now();
+    let timer: number;
+    let expired = false;
+    const expire = () => {
+      if (expired) return;
+      expired = true;
+      sessionStorage.removeItem(key);
+      endSession("Your session expired due to inactivity. Sign in again.");
+      void csrfFetch("/api/v1/auth/logout", { method: "POST" }).catch(() => {});
+    };
+    const check = () => {
+      if (Date.now() - lastActivity >= timeout) expire();
+      else timer = window.setTimeout(check, timeout - (Date.now() - lastActivity));
+    };
+    const activity = () => {
+      if (expired) return;
+      if (Date.now() - lastActivity >= timeout) { expire(); return; }
+      if (Date.now() - lastActivity < 1000) return;
+      lastActivity = Date.now();
+      sessionStorage.setItem(key, String(lastActivity));
+      window.clearTimeout(timer);
+      timer = window.setTimeout(check, timeout);
+    };
+    const visibility = () => { if (!document.hidden) { window.clearTimeout(timer); check(); } };
+    if (!sessionStorage.getItem(key)) sessionStorage.setItem(key, String(lastActivity));
+    check();
+    for (const event of ["pointerdown", "pointermove", "keydown", "touchstart", "scroll"]) window.addEventListener(event, activity, { passive: true });
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      window.clearTimeout(timer);
+      for (const event of ["pointerdown", "pointermove", "keydown", "touchstart", "scroll"]) window.removeEventListener(event, activity);
+      document.removeEventListener("visibilitychange", visibility);
+    };
+  }, [context?.session?.id, context?.session?.timeout_minutes, endSession]);
+  async function signOut() { try { await csrfFetch("/api/v1/auth/logout", { method: "POST" }); } finally { endSession(); } }
+  useEffect(() => {
+    if (!context || context.role !== "platform_admin" || !platformMode) return;
+    const restoreStateFromUrlOrStorage = () => {
+      const hashKey = window.location.hash.replace("#", "");
+      const storedKey = localStorage.getItem(platformStorageKey) || "";
+      const next = platformHashToView[hashKey] || platformHashToView[storedKey];
+      if (next) setView(next);
+    };
+    restoreStateFromUrlOrStorage();
+    window.addEventListener("hashchange", restoreStateFromUrlOrStorage);
+    return () => window.removeEventListener("hashchange", restoreStateFromUrlOrStorage);
+  }, [context, platformMode]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(""), 3200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
   async function switchTenant(tenantId: string) {
     const response = await csrfFetch("/api/v1/enterprise/tenants/switch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tenant_id: tenantId }) });
     if (!response.ok) { const body = await response.json().catch(() => ({})); setGlobalError(body.detail || "University could not be selected"); return; }
@@ -358,18 +447,53 @@ export function OperationsApp() {
     if (context?.role === "platform_admin") setPlatformMode(false);
     else await load();
   }
-  function navigate(next: ViewKey) { if (next === "platformAdmin" && context?.role === "platform_admin") { setChecking(true); setPlatformMode(true); } setView(next); setMenuOpen(false); }
+  function rememberPlatformView(next: ViewKey) {
+    const hash = platformViewToHash[next];
+    if (!hash) return;
+    localStorage.setItem(platformStorageKey, hash);
+    if (window.location.hash !== `#${hash}`) window.history.replaceState(null, "", `#${hash}`);
+  }
+  function navigate(next: ViewKey) {
+    if (context?.role === "platform_admin" && platformViews.has(next)) rememberPlatformView(next);
+    if (next === "platformAdmin" && context?.role === "platform_admin" && !platformMode) {
+      setChecking(true); setPlatformMode(true);
+    }
+    setView(next); setMenuOpen(false);
+  }
   if (checking) return <div className="loading-state"><div className="spinner" aria-label="Loading ADMIEZO" /></div>;
-  if (!context || !overview) return <Login onSuccess={load} />;
+  if (!context || !overview) return <Login onSuccess={() => { endingSession.current = false; setLoginNotice(""); void load(); }} notice={loginNotice} />;
   if (context.must_change_password) return <PasswordSetup onComplete={async () => { setChecking(true); await load(); }} onSignOut={signOut} />;
-  const visibleNavigation = navigationFor(context.role, platformMode, context.enabled_modules);
-  const activeView = context.role === "evaluator" && !evaluatorViews.has(view) ? "evaluation" : view;
+  const role = context.role;
+  const visibleNavigation = navigationFor(role, platformMode, context.enabled_modules);
+  const activeView = role === "evaluator" && !evaluatorViews.has(view) ? "evaluation" : view;
+  const isPlatformAdmin = role === "platform_admin";
   const meta = viewMeta[activeView];
   const initials = context.user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+  async function refreshCurrentView(event?: MouseEvent<HTMLButtonElement>) {
+    event?.preventDefault();
+    if (refreshing) return;
+    setRefreshing(true); setToast("");
+    try {
+      if (platformMode && isPlatformAdmin) {
+        rememberPlatformView(activeView);
+        setWorkspaceRefreshToken((value) => value + 1);
+      }
+      if (activeView === "audit" && platformMode && isPlatformAdmin) {
+        setAuditRefreshToken((value) => value + 1);
+        setToast("Audit trail reloaded and updated with the most recent immutable actions.");
+        return;
+      }
+      await load();
+      setToast("Dashboard refreshed with the latest platform operations data.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? "open" : ""}`}><div className="brand"><span className="brand-mark">A</span><div><div className="brand-name">ADMIEZO</div><div className="brand-label">Evaluation cloud</div></div></div><nav className="nav-scroll" aria-label="Primary navigation">{visibleNavigation.map((group) => <div className="nav-group" key={group.label}><div className="nav-label">{group.label}</div>{group.items.map((item) => <button className={`nav-item ${activeView === item.key ? "active" : ""}`} onClick={() => navigate(item.key)} key={item.key}><item.icon /><span>{item.label}</span></button>)}</div>)}</nav><div className="sidebar-footer"><div className="environment"><span className="environment-dot" />Evaluation core healthy</div></div></aside>
-    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? "Close navigation" : "Open navigation"} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <>{context.tenants.length > 1 ? <select aria-label="Active university" value={context.tenant.id} onChange={(event) => switchTenant(event.target.value)}>{context.tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}</select> : <div className="tenant-name">{context.tenant.name}</div>}<div className="session-name">{overview.session?.name || "No active examination session"}</div></>}</div><div className="top-actions">{!(platformMode && context.role === "platform_admin") && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} />}<button className="icon-button" title="Sign out" onClick={signOut}><LogOut /></button><div className="avatar" title={context.user.name}>{initials}</div></div></header>
-      <main className="content"><header className="page-heading"><div><p className="eyebrow">{meta.eyebrow}</p><h1>{meta.title}</h1><p className="heading-note">{meta.description}</p></div><button className="secondary-button" onClick={() => load()}><History />Refresh</button></header>{globalError && <div className="form-error" role="alert">{globalError}</div>}{activeView === "platformAdmin" ? <PlatformAdminWorkspace onOpenTenant={switchTenant} /> : activeView === "audit" && platformMode && context.role === "platform_admin" ? <PlatformAuditWorkspace /> : activeView === "dashboard" ? <Dashboard overview={overview} navigate={navigate} /> : activeView === "configuration" ? <ConfigurationWorkspace /> : activeView === "evaluators" ? <EvaluatorWorkspace /> : activeView === "receiving" ? <ReceivingWorkspace /> : activeView === "custody" ? <CustodyWorkspace /> : activeView === "digitization" ? <DigitizationWorkspace /> : activeView === "anonymisation" ? <AnonymisationWorkspace /> : activeView === "repository" ? <RepositoryWorkspace /> : activeView === "allocation" ? <AllocationWorkspace /> : activeView === "rubrics" ? <RubricWorkspace /> : activeView === "assignmentGovernance" ? <GovernanceWorkspace /> : activeView === "evaluation" ? <EvaluationWorkspace role={context.role} /> : activeView === "valuation" ? <ValuationWorkspace /> : activeView === "assessmentControl" ? <AdvancedOperationsWorkspace section="assessment" /> : activeView === "liveControl" ? <AdvancedOperationsWorkspace section="operations" /> : activeView === "serviceControl" ? <AdvancedOperationsWorkspace section="services" /> : activeView === "platformControl" ? <AdvancedOperationsWorkspace section="platform" /> : activeView === "security" ? <SecurityWorkspace /> : activeView === "tenancy" ? <EnterpriseWorkspace role={context.role} onTenantChange={() => load()} /> : <ModuleWorkspace key={activeView} view={activeView} overview={overview} />}</main>
+    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? "Close navigation" : "Open navigation"} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <>{context.tenants.length > 1 ? <select aria-label="Active university" value={context.tenant.id} onChange={(event) => switchTenant(event.target.value)}>{context.tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}</select> : <div className="tenant-name">{context.tenant.name}</div>}<div className="session-name">{overview.session?.name || "No active examination session"}</div></>}</div><div className="top-actions">{!(platformMode && context.role === "platform_admin") && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} />}<button className="icon-button" title="Sign out" onClick={signOut}><LogOut /></button><button className="avatar" title="Account settings" aria-label="Account settings" onClick={() => setAccountOpen(true)}>{initials}</button></div></header>
+      <main className="content"><header className="page-heading"><div><p className="eyebrow">{meta.eyebrow}</p><h1>{meta.title}</h1><p className="heading-note">{meta.description}</p></div><button className="secondary-button" onClick={refreshCurrentView} disabled={refreshing}>{refreshing ? <RefreshCw className="spin" /> : <History />}{refreshing ? "Refreshing..." : "Refresh"}</button></header>{toast && <div className="toast-stack" aria-live="polite"><div className="app-toast"><Check />{toast}</div></div>}{globalError && <div className="form-error" role="alert">{globalError}</div>}{activeView === "platformAdmin" ? <PlatformAdminWorkspace key={`platform-admin-${workspaceRefreshToken}`} onOpenTenant={switchTenant} /> : activeView === "audit" && platformMode && isPlatformAdmin ? <PlatformAuditWorkspace refreshToken={auditRefreshToken} /> : activeView === "dashboard" ? <Dashboard overview={overview} navigate={navigate} /> : activeView === "configuration" ? <ConfigurationWorkspace /> : activeView === "evaluators" ? <EvaluatorWorkspace /> : activeView === "receiving" ? <ReceivingWorkspace /> : activeView === "custody" ? <CustodyWorkspace /> : activeView === "digitization" ? <DigitizationWorkspace /> : activeView === "anonymisation" ? <AnonymisationWorkspace /> : activeView === "repository" ? <RepositoryWorkspace /> : activeView === "allocation" ? <AllocationWorkspace /> : activeView === "rubrics" ? <RubricWorkspace /> : activeView === "assignmentGovernance" ? <GovernanceWorkspace /> : activeView === "evaluation" ? <EvaluationWorkspace role={role} /> : activeView === "valuation" ? <ValuationWorkspace /> : activeView === "assessmentControl" ? <AdvancedOperationsWorkspace section="assessment" /> : activeView === "liveControl" ? <AdvancedOperationsWorkspace section="operations" /> : activeView === "serviceControl" ? <AdvancedOperationsWorkspace section="services" /> : activeView === "platformControl" ? <AdvancedOperationsWorkspace key={`platform-control-${workspaceRefreshToken}`} section="platform" /> : activeView === "security" ? <SecurityWorkspace /> : activeView === "tenancy" ? <EnterpriseWorkspace role={role} onTenantChange={() => load()} /> : <ModuleWorkspace key={activeView} view={activeView} overview={overview} />}</main>
+      {accountOpen && <AccountSettings email={context.user.email} onClose={() => setAccountOpen(false)} />}
     </div>
   </div>;
 }
