@@ -66,6 +66,34 @@ class AllocationEngineTests(TestCase):
             create_assignment(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, script=self.scripts[0], evaluator=self.evaluators[0], backup_evaluator=None, valuation_round=1, due_at=timezone.now() + timedelta(days=3), source="manual", quality_score=None, score_breakdown=None)
         self.assertFalse(Assignment.objects.filter(script=self.scripts[0]).exists())
 
+    def test_manual_assignment_rejects_round_outside_paper_configuration(self):
+        self.paper.valuation_rounds = 1
+        self.paper.save(update_fields=["valuation_rounds"])
+        client = Client()
+        login = client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "allocation-round-test"}),
+            content_type="application/json",
+        )
+        self.assertEqual(login.status_code, 200)
+        payload = {
+            "script_id": str(self.scripts[0].id),
+            "evaluator_id": str(self.evaluators[0].id),
+            "valuation_round": 2,
+            "due_in_hours": 120,
+            "priority": 3,
+        }
+        response = client.post("/api/v1/allocation/assignments", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("allows valuation rounds 1–1", response.json()["detail"])
+        self.assertFalse(Assignment.objects.filter(script=self.scripts[0]).exists())
+
+        payload["valuation_round"] = 1
+        payload["priority"] = 6
+        response = client.post("/api/v1/allocation/assignments", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"], "Priority must be between 1 and 5")
+
     def test_redistribution_uses_backup_and_preserves_history(self):
         assignment = create_assignment(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, script=self.scripts[0], evaluator=self.evaluators[0], backup_evaluator=self.evaluators[1], valuation_round=1, due_at=timezone.now() + timedelta(days=3), source="manual", quality_score=None, score_breakdown=None)
         updated = redistribute_assignment(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, assignment_id=assignment.id, expected_version=assignment.version, reason="Primary evaluator became unavailable")

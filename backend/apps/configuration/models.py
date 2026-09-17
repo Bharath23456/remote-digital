@@ -8,6 +8,8 @@ class AcademicYear(TenantModel):
     label = models.CharField(max_length=20)
     starts_on = models.DateField()
     ends_on = models.DateField()
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "label"], name="unique_tenant_year")]
@@ -19,6 +21,7 @@ class Regulation(TenantModel):
     effective_from = models.DateField()
     effective_to = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "code"], name="unique_tenant_regulation")]
@@ -30,6 +33,8 @@ class Term(TenantModel):
     sequence = models.PositiveSmallIntegerField()
     starts_on = models.DateField()
     ends_on = models.DateField()
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         ordering = ["academic_year", "sequence"]
@@ -47,10 +52,15 @@ class ExamSession(TenantModel):
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.PROTECT, related_name="sessions")
     name = models.CharField(max_length=120)
     term = models.CharField(max_length=60)
+    term_record = models.ForeignKey(Term, null=True, blank=True, on_delete=models.PROTECT, related_name="sessions")
     evaluation_starts_at = models.DateTimeField()
     evaluation_ends_at = models.DateTimeField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     version = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant_id", "academic_year", "name"], name="unique_year_session_name")]
 
 
 class EvaluationEvent(TenantModel):
@@ -60,12 +70,19 @@ class EvaluationEvent(TenantModel):
     ends_at = models.DateTimeField()
     evaluation_centre_ids = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant_id", "session", "name"], name="unique_session_event_name")]
 
 
 class Programme(TenantModel):
     code = models.CharField(max_length=24)
     name = models.CharField(max_length=160)
     regulation = models.CharField(max_length=80)
+    regulation_record = models.ForeignKey(Regulation, null=True, blank=True, on_delete=models.PROTECT, related_name="programmes")
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "code"], name="unique_tenant_programme")]
@@ -78,6 +95,7 @@ class Course(TenantModel):
     name = models.CharField(max_length=180)
     duration_terms = models.PositiveSmallIntegerField()
     is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "code"], name="unique_tenant_course")]
@@ -91,6 +109,8 @@ class Subject(TenantModel):
     semester = models.PositiveSmallIntegerField()
     session_ids = models.JSONField(default=list, blank=True)
     related_subject_ids = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "code"], name="unique_tenant_subject")]
@@ -116,6 +136,8 @@ class Paper(TenantModel):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     version = models.PositiveIntegerField(default=1)
     approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
+    submitted_by_id = models.PositiveBigIntegerField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
     frozen_at = models.DateTimeField(null=True, blank=True)
     effective_from = models.DateTimeField(null=True, blank=True)
 
@@ -150,6 +172,7 @@ class EvaluationCentre(TenantModel):
     address = models.TextField(blank=True)
     network_cidrs = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "code"], name="unique_tenant_centre")]
@@ -176,6 +199,26 @@ class ConfigurationRevision(TenantModel):
     class Meta:
         ordering = ["-created_at"]
         constraints = [models.UniqueConstraint(fields=["tenant_id", "aggregate_type", "aggregate_id", "version"], name="unique_config_revision")]
+
+
+class CalendarOverlapException(TenantModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        USED = "used", "Used"
+
+    entity = models.CharField(max_length=16, choices=[("academic_year", "Academic year"), ("term", "Term")])
+    academic_year = models.ForeignKey(AcademicYear, null=True, blank=True, on_delete=models.PROTECT)
+    target_id = models.UUIDField(null=True, blank=True)
+    starts_on = models.DateField()
+    ends_on = models.DateField()
+    reason = models.TextField()
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    requested_by_id = models.PositiveBigIntegerField()
+    decided_by_id = models.PositiveBigIntegerField(null=True, blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    used_at = models.DateTimeField(null=True, blank=True)
 
 
 class ConfigurationApproval(TenantModel):

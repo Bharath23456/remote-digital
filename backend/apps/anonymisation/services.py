@@ -14,7 +14,7 @@ from ninja.errors import HttpError
 
 from apps.core.services import record_event
 from apps.custody.models import Script
-from apps.custody.services import transition_script
+from apps.custody.services import return_script_for_remasking, transition_script
 from apps.repository.models import ScriptAsset, UploadIntent
 from apps.repository.storage import mask_object
 from apps.security.models import EmergencyAccessGrant, SecurityAlert
@@ -206,7 +206,7 @@ def apply_masking_job(*, tenant_id, actor_id, job_id, expected_version):
                 raise OSError(f"Raw page {page} is missing")
             base = f"{tenant_id}/{job.script_id}/page-{page}-v{job.version}"
             destinations = [
-                {"key": f"scripts-master/{tenant_id}/{job.script_id}/page-{page}.webp", "mime_type": "image/webp"},
+                {"key": f"scripts-master/{base}.webp", "mime_type": "image/webp"},
                 {"key": f"scripts-evaluation/{base}.webp", "mime_type": "image/webp"},
                 {"key": f"scripts-thumbnails/{base}.webp", "mime_type": "image/webp", "thumbnail": True},
             ]
@@ -243,11 +243,40 @@ def apply_masking_job(*, tenant_id, actor_id, job_id, expected_version):
                 current.failure_reason = str(exc)[:1000]
                 current.version += 1
                 current.save()
+                return_script_for_remasking(tenant_id=tenant_id, actor_id=actor_id, script_id=current.script_id, expected_version=current.script.version, job_id=current.id, reason=current.failure_reason)
                 record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.failed", aggregate="MaskingJob", aggregate_id=current.id, payload={"reason": current.failure_reason})
         raise HttpError(502, "Storage transformation failed; the masking job was stopped") from exc
 
 
+def reject_masking_job(*, tenant_id, actor_id, job_id, expected_version, notes):
+    reason = notes.strip()
+    if len(reason) < 10:
+        raise HttpError(422, "Give a specific reason for remasking (at least 10 characters)")
+    with transaction.atomic():
+        job = MaskingJob.objects.select_for_update().select_related("script").filter(id=job_id, tenant_id=tenant_id).first()
+        if not job:
+            raise HttpError(404, "Masking job not found")
+        if job.version != expected_version or job.status not in (MaskingJob.Status.DETECTED, MaskingJob.Status.REVIEWED, MaskingJob.Status.APPLIED):
+            raise HttpError(409, "Masking job is no longer awaiting a decision")
+        excluded = (job.created_by_id,) if job.status == MaskingJob.Status.DETECTED else (job.created_by_id, job.reviewed_by_id) if job.status == MaskingJob.Status.REVIEWED else (job.created_by_id, job.reviewed_by_id, job.applied_by_id)
+        if actor_id in excluded:
+            raise HttpError(409, "An independent operator must reject this masking stage")
+        stage = job.status
+        if stage == MaskingJob.Status.APPLIED:
+            MaskVerification.objects.create(tenant_id=tenant_id, job=job, verifier_id=actor_id, passed=False, notes=reason)
+            ScriptAsset.objects.filter(tenant_id=tenant_id, script_id=job.script_id, version=job.version - 1, deleted_at__isnull=True).update(deleted_at=timezone.now(), deletion_reason=f"Rejected masking job {job.id}: {reason[:500]}")
+        job.status = MaskingJob.Status.FAILED
+        job.failure_reason = reason[:1000]
+        job.version += 1
+        job.save(update_fields=["status", "failure_reason", "version", "updated_at"])
+        return_script_for_remasking(tenant_id=tenant_id, actor_id=actor_id, script_id=job.script_id, expected_version=job.script.version, job_id=job.id, reason=reason)
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.rejected", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "stage": stage, "notes": reason})
+    return job
+
+
 def verify_masking_job(*, tenant_id, actor_id, job_id, expected_version, passed, notes):
+    if not passed:
+        return reject_masking_job(tenant_id=tenant_id, actor_id=actor_id, job_id=job_id, expected_version=expected_version, notes=notes)
     with transaction.atomic():
         job = MaskingJob.objects.select_for_update().select_related("script").filter(id=job_id, tenant_id=tenant_id).first()
         if not job:
@@ -256,19 +285,14 @@ def verify_masking_job(*, tenant_id, actor_id, job_id, expected_version, passed,
             raise HttpError(409, "Only the current applied job can be verified")
         if actor_id in (job.created_by_id, job.reviewed_by_id, job.applied_by_id):
             raise HttpError(409, "Final mask verification requires an independent operator")
-        MaskVerification.objects.create(tenant_id=tenant_id, job=job, verifier_id=actor_id, passed=passed, notes=notes)
-        if not passed:
-            job.status = MaskingJob.Status.FAILED
-            job.failure_reason = notes or "Mask verification failed"
-        else:
-            job.status = MaskingJob.Status.VERIFIED
-            job.verified_by_id = actor_id
-            job.verified_at = timezone.now()
+        MaskVerification.objects.create(tenant_id=tenant_id, job=job, verifier_id=actor_id, passed=True, notes=notes)
+        job.status = MaskingJob.Status.VERIFIED
+        job.verified_by_id = actor_id
+        job.verified_at = timezone.now()
         job.version += 1
         job.save()
-        if passed:
-            transition_script(tenant_id=tenant_id, actor_id=actor_id, script_id=job.script_id, expected_version=job.script.version, to_state=Script.State.STORED, location="Encrypted digital repository", metadata={"masking_job_id": str(job.id), "verified": True})
-        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.verified" if passed else "anonymisation.masking.rejected", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "notes": notes})
+        transition_script(tenant_id=tenant_id, actor_id=actor_id, script_id=job.script_id, expected_version=job.script.version, to_state=Script.State.STORED, location="Encrypted digital repository", metadata={"masking_job_id": str(job.id), "verified": True})
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.verified", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "notes": notes})
     return job
 
 
