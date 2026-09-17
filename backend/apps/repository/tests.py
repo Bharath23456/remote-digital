@@ -5,7 +5,9 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from django.core.management import call_command
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
+from django.utils import timezone
+from datetime import timedelta
 
 from apps.configuration.models import Paper
 from apps.core.models import AuditEvent, OutboxEvent
@@ -90,6 +92,17 @@ class ScriptRepositoryTests(TestCase):
         self.assertEqual(len(body["uploads"]), 6)
         self.assertEqual(self.client.get("/api/v1/repository/catalog?page_size=101").status_code, 422)
 
+    def test_manual_scan_catalog_groups_completed_pages_by_script(self):
+        for page, version, status in [(1, 1, "completed"), (1, 2, "completed"), (2, 1, "completed"), (3, 1, "issued")]:
+            UploadIntent.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=UploadIntent.Kind.RAW_SCAN, page_number=page, asset_version=version, storage_key=f"scripts-raw/{self.script.id}/page-{page}-v{version}", content_type="image/png", maximum_bytes=1000, status=status, expires_at=timezone.now() + timedelta(minutes=5))
+        response = self.client.get(f"/api/v1/repository/manual-scan/catalog?q={self.script.script_code}&page_size=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["items"][0]["pages"], [1, 2])
+        self.assertEqual(response.json()["items"][0]["page_count"], 2)
+        self.assertNotIn("storage_key", response.json()["items"][0])
+        self.assertEqual(self.client.get("/api/v1/repository/manual-scan/catalog?page_size=101").status_code, 422)
+
     def test_raw_identity_page_needs_step_up_and_stays_out_of_repository_assets(self):
         from django.utils import timezone
         from datetime import timedelta
@@ -147,3 +160,22 @@ class ScriptRepositoryTests(TestCase):
         self.assertEqual(asset.backup_status, "completed")
         self.assertEqual(asset.replication_status, "completed")
         self.assertIsNotNone(asset.integrity_checked_at)
+
+
+class IdentityPageTransactionTests(TransactionTestCase):
+    def test_identity_page_audit_is_atomic_in_a_real_request(self):
+        call_command("bootstrap_demo", verbosity=0)
+        client = Client()
+        login = client.post("/api/v1/auth/login", data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "identity-page-transaction-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200)
+        paper = Paper.objects.first()
+        dispatch = Dispatch.objects.create(tenant_id=paper.tenant_id, reference="IDENTITY-PAGE-ATOMIC", paper=paper, source_centre="Test", expected_packets=1, expected_scripts=1)
+        packet = Packet.objects.create(tenant_id=paper.tenant_id, dispatch=dispatch, barcode="PKT-IDENTITY-PAGE-ATOMIC", expected_scripts=1)
+        script = Script.objects.create(tenant_id=paper.tenant_id, script_code="AS-IDENTITY-PAGE-ATOMIC", primary_barcode="BC-IDENTITY-PAGE-ATOMIC", packet=packet, paper=paper, state=Script.State.SCANNED, page_count=1)
+        UploadIntent.objects.create(tenant_id=paper.tenant_id, script=script, kind=UploadIntent.Kind.RAW_SCAN, page_number=1, storage_key=f"scripts-raw/{script.id}/page-1.png", content_type="image/png", maximum_bytes=1000, status=UploadIntent.Status.COMPLETED, expires_at=timezone.now() + timedelta(minutes=5))
+        step_up = client.post("/api/v1/auth/step-up", data=json.dumps({"password": "ChangeMe123!"}), content_type="application/json")
+        self.assertEqual(step_up.status_code, 200)
+        response = client.get(f"/api/v1/anonymisation/scripts/{script.id}/identity-page")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(AuditEvent.objects.filter(action="anonymisation.identity_page.access_issued", aggregate_id=str(script.id)).exists())
+        self.assertTrue(OutboxEvent.objects.filter(topic="anonymisation.identity_page.access_issued", aggregate_id=str(script.id)).exists())

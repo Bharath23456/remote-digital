@@ -1,5 +1,6 @@
 from django.utils import timezone
 from django.http import JsonResponse
+from django.db import transaction
 from ninja import Router
 from ninja.errors import HttpError
 
@@ -131,7 +132,8 @@ def identity_page(request, script_id: str):
     if not page:
         raise HttpError(404, "The first scanned page is not available")
     url, expires = signed_object_url(method="GET", key=page.storage_key, ttl_seconds=120)
-    record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="anonymisation.identity_page.access_issued", aggregate="Script", aggregate_id=script_id, payload={"page_number": 1, "asset_version": page.asset_version})
+    with transaction.atomic():
+        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="anonymisation.identity_page.access_issued", aggregate="Script", aggregate_id=script_id, payload={"page_number": 1, "asset_version": page.asset_version})
     response = JsonResponse({"url": url, "expires_at": expires, "mime_type": page.content_type})
     response["Cache-Control"] = "private, no-store"
     return response

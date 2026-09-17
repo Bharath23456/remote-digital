@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.db import transaction
 from django.db.models import Count, Max, Q
 from ninja import Router
@@ -99,6 +101,34 @@ def issue_manual_scan_upload(request, payload: ManualScanUploadIn):
         "headers": {"Content-Type": intent.content_type},
         "version": intent.version,
         "asset_version": intent.asset_version,
+    }
+
+
+@router.get("/manual-scan/catalog")
+def manual_scan_catalog(request, page: int = 1, page_size: int = 20, q: str = "", state: str = "", date_from: date | None = None, date_to: date | None = None):
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    if page < 1 or not 1 <= page_size <= 100:
+        raise HttpError(422, "Page must be positive and page size must be between 1 and 100")
+    uploads = UploadIntent.objects.filter(tenant_id=membership.institution.tenant_id, kind=UploadIntent.Kind.RAW_SCAN, status=UploadIntent.Status.COMPLETED)
+    if q.strip():
+        uploads = uploads.filter(Q(script__script_code__icontains=q.strip()) | Q(script__primary_barcode__icontains=q.strip()) | Q(script__paper__code__icontains=q.strip()))
+    if state:
+        uploads = uploads.filter(script__state=state)
+    if date_from:
+        uploads = uploads.filter(updated_at__date__gte=date_from)
+    if date_to:
+        uploads = uploads.filter(updated_at__date__lte=date_to)
+    grouped = uploads.values("script_id", "script__script_code", "script__paper__code", "script__state", "script__page_count").annotate(page_count=Count("page_number", distinct=True), uploaded_at=Max("updated_at")).order_by("-uploaded_at", "-script_id")
+    total = grouped.count()
+    records = list(grouped[(page - 1) * page_size:page * page_size])
+    page_numbers = {}
+    for script_id, number in uploads.filter(script_id__in=[item["script_id"] for item in records]).values_list("script_id", "page_number").distinct():
+        page_numbers.setdefault(script_id, []).append(number)
+    return {
+        "items": [{"script_id": str(item["script_id"]), "script": item["script__script_code"], "paper": item["script__paper__code"], "state": item["script__state"], "page_count": item["page_count"], "declared_pages": item["script__page_count"], "pages": sorted(page_numbers.get(item["script_id"], [])), "uploaded_at": item["uploaded_at"].isoformat()} for item in records],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
     }
 
 

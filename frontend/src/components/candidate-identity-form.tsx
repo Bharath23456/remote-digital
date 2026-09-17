@@ -12,7 +12,7 @@ type Rect = { x: number; y: number; w: number; h: number };
 async function api(path: string, options?: RequestInit) {
   const response = await csrfFetch(path, options);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || "Identity operation failed");
+  if (!response.ok) throw new Error(body.detail || `Identity operation failed (${response.status})`);
   return body;
 }
 
