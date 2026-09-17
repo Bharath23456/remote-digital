@@ -5,6 +5,7 @@
 
 import { ArrowRight, Check, ChevronLeft, ChevronRight, Circle, Columns2, Expand, Eye, Flag, Highlighter, ImageUp, ListFilter, MapPin, Maximize2, MessageSquareText, Minus, MousePointer2, Move, Plus, RectangleHorizontal, RefreshCw, RotateCw, Rows3, Save, ShieldAlert, SquareCheckBig, Strikethrough, Undo2, Wifi, WifiOff, X } from "lucide-react";
 import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { csrfFetch } from "@/lib/api";
 import { getSafeAnnotationPosition } from "@/lib/annotation-layout";
 import { CameraPreview, SecurePreflightDialog, SecurityPauseOverlay, useSecureEvaluationSession } from "@/components/secure-evaluation-session";
@@ -27,7 +28,7 @@ async function api(path: string, options?: RequestInit) { const response = await
 
 type SecurityReport = (category: string, severity: "low" | "medium" | "high" | "critical", details?: Record<string, unknown>) => Promise<void>;
 
-function useCopyProtection({ active, containerRef, sessionId, assignmentId, pageNumber, report, onSoftAlert }: { active: boolean; containerRef: { current: HTMLElement | null }; sessionId: string | null; assignmentId: string | null; pageNumber: number; report: SecurityReport; onSoftAlert: (message: string) => void }) {
+function useCopyProtection({ active, containerRef, sessionId, assignmentId, pageNumber, report, onSecurityPause, onSoftAlert }: { active: boolean; containerRef: { current: HTMLElement | null }; sessionId: string | null; assignmentId: string | null; pageNumber: number; report: SecurityReport; onSecurityPause: (category: string) => void; onSoftAlert: (message: string, durationMs?: number) => void }) {
   useEffect(() => {
     if (!active) return;
     const elementContext = (target: EventTarget | null) => {
@@ -44,8 +45,8 @@ function useCopyProtection({ active, containerRef, sessionId, assignmentId, page
         return Boolean(container && (withinViewer(target) || (activeElement instanceof Node && container.contains(activeElement)) || document.fullscreenElement === container));
       } catch { return false; }
     };
-    const showWarning = (message: string) => { try { onSoftAlert(message); } catch { /* Soft alerts must never block marking actions. */ } };
-    const log = (category: string, severity: "low" | "medium" | "high", eventType: string, target: EventTarget | null, details: Record<string, unknown> = {}) => {
+    const showWarning = (message: string, durationMs?: number) => { try { onSoftAlert(message, durationMs); } catch { /* Soft alerts must never block marking actions. */ } };
+    const log = (category: string, severity: "low" | "medium" | "high" | "critical", eventType: string, target: EventTarget | null, details: Record<string, unknown> = {}) => {
       try { void report(category, severity, { timestamp: new Date().toISOString(), session_id: sessionId, user_id: null, assignment_id: assignmentId, event_type: eventType, page_number: pageNumber, element_context: elementContext(target), ...details }).catch(() => undefined); } catch { /* Security logging must never block marking actions. */ }
     };
     const blockClipboard = (event: ClipboardEvent) => {
@@ -60,19 +61,16 @@ function useCopyProtection({ active, containerRef, sessionId, assignmentId, page
     const blockContextMenu = (event: PointerEvent) => {
       try { if (!protectEvent(event.target)) return; event.preventDefault(); showWarning("Right-click is disabled during secure evaluation and has been logged."); log("context_menu_blocked", "medium", event.type, event.target); } catch { /* Context-menu protection must fail open. */ }
     };
+    const isPrintScreen = (event: KeyboardEvent) => event.key === "PrintScreen" || event.code === "PrintScreen" || event.keyCode === 44;
+    const lockForPrintScreen = (event: KeyboardEvent, eventType: "keydown" | "keyup") => { try { event.preventDefault(); containerRef.current?.classList.add("security-printscreen-lock"); void containerRef.current?.offsetHeight; const details = { timestamp: new Date().toISOString(), session_id: sessionId, user_id: null, assignment_id: assignmentId, event_type: eventType, page_number: pageNumber, element_context: elementContext(event.target), trigger: "printscreen", key: event.key, code: event.code, keyCode: event.keyCode }; flushSync(() => onSecurityPause("viewer_hidden")); void report("viewer_hidden", "critical", details).catch(() => undefined); showWarning("Screenshot shortcut detected. The script is locked and this attempt has been logged.", 10000); } catch { /* Screenshot shortcut protection must fail open. */ } };
     const keydown = (event: KeyboardEvent) => {
       try {
         const key = event.key.toLowerCase();
-        if (event.key === "PrintScreen") {
-          event.preventDefault();
-          // Browsers cannot fully prevent screenshots; this is best-effort shortcut detection and audit logging only.
-          showWarning("Screenshot shortcut detected. Browser screenshots cannot be fully prevented, but this attempt has been logged.");
-          log("screenshot_shortcut_attempt", "medium", "keydown", event.target, { key: event.key });
-          return;
-        }
+        if (isPrintScreen(event)) { lockForPrintScreen(event, "keydown"); return; }
         if ((event.ctrlKey || event.metaKey) && ["p", "s", "c", "x", "v"].includes(key)) { event.preventDefault(); showWarning(key === "p" ? "Printing is disabled during secure evaluation and has been logged." : key === "s" ? "Saving evaluation content with the browser shortcut is blocked and has been logged." : key === "x" ? "Cutting protected evaluation content is blocked and has been logged." : key === "v" ? "Pasting into the secure evaluation viewer is blocked and has been logged." : "Copying protected evaluation content is blocked and has been logged."); log("shortcut_" + key + "_blocked", key === "p" ? "high" : "medium", "keydown", event.target, { key: event.key }); }
       } catch { /* Shortcut protection must fail open. */ }
     };
+    const printScreenKeyup = (event: KeyboardEvent) => { if (isPrintScreen(event)) lockForPrintScreen(event, "keyup"); };
     const visibility = () => { try { if (document.hidden) { showWarning("Leaving the evaluation tab has been logged. Return to the secure viewer to continue."); log("evaluation_visibility_hidden", "medium", "visibilitychange", document.activeElement, { visibility: document.visibilityState }); } } catch { /* Visibility logging must not affect evaluation flow. */ } };
     const blur = () => { try { showWarning("Leaving the evaluation window has been logged. Return to the secure viewer to continue."); log("evaluation_window_blur", "medium", "blur", document.activeElement); } catch { /* Blur logging must not affect evaluation flow. */ } };
     const fullscreen = () => { try { if (!document.fullscreenElement) showWarning("Fullscreen exited during secure evaluation. The event has been logged."); } catch { /* Fullscreen warning must not affect evaluation flow. */ } };
@@ -80,7 +78,10 @@ function useCopyProtection({ active, containerRef, sessionId, assignmentId, page
     document.addEventListener("cut", blockClipboard, true);
     document.addEventListener("paste", blockClipboard, true);
     document.addEventListener("contextmenu", blockContextMenu, true);
-    window.addEventListener("keydown", keydown);
+    window.addEventListener("keydown", keydown, true);
+    document.addEventListener("keydown", keydown, true);
+    window.addEventListener("keyup", printScreenKeyup, true);
+    document.addEventListener("keyup", printScreenKeyup, true);
     document.addEventListener("visibilitychange", visibility);
     document.addEventListener("fullscreenchange", fullscreen);
     window.addEventListener("blur", blur);
@@ -89,12 +90,15 @@ function useCopyProtection({ active, containerRef, sessionId, assignmentId, page
       document.removeEventListener("cut", blockClipboard, true);
       document.removeEventListener("paste", blockClipboard, true);
       document.removeEventListener("contextmenu", blockContextMenu, true);
-      window.removeEventListener("keydown", keydown);
+      window.removeEventListener("keydown", keydown, true);
+      document.removeEventListener("keydown", keydown, true);
+      window.removeEventListener("keyup", printScreenKeyup, true);
+      document.removeEventListener("keyup", printScreenKeyup, true);
       document.removeEventListener("visibilitychange", visibility);
       document.removeEventListener("fullscreenchange", fullscreen);
       window.removeEventListener("blur", blur);
     };
-  }, [active, assignmentId, containerRef, onSoftAlert, pageNumber, report, sessionId]);
+  }, [active, assignmentId, containerRef, onSecurityPause, onSoftAlert, pageNumber, report, sessionId]);
 }
 
 export function EvaluationWorkspace({ role }: { role: string }) {
@@ -152,7 +156,8 @@ export function EvaluationWorkspace({ role }: { role: string }) {
     update(); window.addEventListener("online", update); window.addEventListener("offline", update);
     return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
   }, []);
-  const showSecurityNotice = useCallback((message: string) => { setSecurityNotice(message); if (securityNoticeTimer.current) window.clearTimeout(securityNoticeTimer.current); securityNoticeTimer.current = window.setTimeout(() => setSecurityNotice(""), 3500); }, []);
+  const showSecurityNotice = useCallback((message: string, durationMs = 3500) => { setSecurityNotice(message); if (securityNoticeTimer.current) window.clearTimeout(securityNoticeTimer.current); securityNoticeTimer.current = window.setTimeout(() => setSecurityNotice(""), durationMs); }, []);
+  useEffect(() => { if (!security.paused) viewerRef.current?.classList.remove("security-printscreen-lock"); }, [security.paused]);
   useEffect(() => () => { if (securityNoticeTimer.current) window.clearTimeout(securityNoticeTimer.current); }, []);
   useEffect(() => {
     if (!manifest || !online) return;
@@ -169,11 +174,22 @@ export function EvaluationWorkspace({ role }: { role: string }) {
     setSecurityCode((security.session?.id || "SECURE").slice(0, 8).toUpperCase());
     void security.report("viewer_opened", "low");
   }, [manifest?.assignment.id, evaluatorMode, security.session?.id]);
-  useCopyProtection({ active: Boolean(manifest && evaluatorMode), containerRef: viewerRef, sessionId: security.session?.id || null, assignmentId: manifest?.assignment.id || null, pageNumber: currentPage, report: security.report, onSoftAlert: showSecurityNotice });
+  useCopyProtection({ active: Boolean(manifest && evaluatorMode), containerRef: viewerRef, sessionId: security.session?.id || null, assignmentId: manifest?.assignment.id || null, pageNumber: currentPage, report: security.report, onSecurityPause: security.pause, onSoftAlert: showSecurityNotice });
   async function addAnnotation(event: MouseEvent<HTMLDivElement>) { if (!annotationTool || !marking || !manifest || !lockToken || security.paused) return; const rect = event.currentTarget.getBoundingClientRect(); const rawX = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)); const rawY = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)); let geometry: Record<string, number | { x: number; y: number }[]>; if (annotationTool === "arrow") { geometry = { points: [{ x: Math.max(0, rawX - .08), y: rawY }, { x: rawX, y: rawY }] }; } else { const isSymbol = ["tick", "cross"].includes(annotationTool); const boxX = isSymbol ? rawX : Math.max(0, rawX - .06); const boxY = isSymbol ? rawY : Math.max(0, rawY - .025); const width = isSymbol ? .04 : Math.min(.12, 1 - Math.max(0, rawX - .06)); const height = isSymbol ? .04 : Math.min(.05, 1 - Math.max(0, rawY - .025)); const safe = getSafeAnnotationPosition({ x: boxX, y: boxY, width, height }, pageAnnotations.filter((item) => item.kind !== "arrow").map((item) => ({ x: Number(item.geometry.x || 0), y: Number(item.geometry.y || 0), width: Number(item.geometry.width || .04), height: Number(item.geometry.height || .04) })), 15 / rect.height); geometry = isSymbol ? { x: safe.x, y: safe.y } : { x: safe.x, y: safe.y, width, height }; } setSaving(true); try { await api(`/api/v1/marking/evaluations/${marking.evaluation.id}/annotations`, { method: "POST", headers: { "Content-Type": "application/json", "X-Assignment-Lock": lockToken }, body: JSON.stringify({ version: marking.evaluation.version, page_number: currentPage, question_id: currentQuestion || null, kind: annotationTool, geometry, style: { color: annotationTool === "highlight" ? "#f6d85f" : "#c83232", width: "2" } }) }); await refreshMarking(manifest.assignment.id); } catch (reason) { setError(reason instanceof Error ? reason.message : "Annotation could not be saved"); } finally { setSaving(false); } }
   async function undoAnnotation() { const target = marking?.annotations.filter((item) => item.page_number === currentPage).at(-1); if (!target || !marking || !manifest) return; setSaving(true); try { await api(`/api/v1/marking/evaluations/${marking.evaluation.id}/annotations/${target.id}/action`, { method: "POST", headers: { "Content-Type": "application/json", "X-Assignment-Lock": lockToken }, body: JSON.stringify({ version: marking.evaluation.version, action: "delete" }) }); await refreshMarking(manifest.assignment.id); } catch (reason) { setError(reason instanceof Error ? reason.message : "Annotation could not be removed"); } finally { setSaving(false); } }
   async function submitEvaluation() { if (!marking || !manifest || security.paused) return; setSaving(true); setError(""); try { const submitted = await api(`/api/v1/workflow/evaluations/${marking.evaluation.id}/submit`, { method: "POST", headers: { "Content-Type": "application/json", "X-Assignment-Lock": lockToken }, body: JSON.stringify({ evaluation_version: marking.evaluation.version, workflow_version: marking.workflow.version }) }); setNotice(`Evaluation submitted at ${submitted.total_marks} marks and valuation result locked`); setLockToken(""); setManifest(null); setMarking(null); setAnnotationTool(null); await security.finish(true); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Evaluation could not be submitted"); } finally { setSaving(false); } }
   const page = manifest?.pages.find((item) => item.page_number === currentPage); const pageAnnotations = marking?.annotations.filter((item) => item.page_number === currentPage) || [];
+  useEffect(() => {
+    const diag = (e: KeyboardEvent) => {
+      console.log("[DIAG]", e.type, "key=" + e.key, "code=" + e.code, "keyCode=" + e.keyCode);
+    };
+    window.addEventListener("keydown", diag, true);
+    window.addEventListener("keyup", diag, true);
+    return () => {
+      window.removeEventListener("keydown", diag, true);
+      window.removeEventListener("keyup", diag, true);
+    };
+  }, []);
   if (manifest) return <div className="evaluation-viewer" ref={viewerRef} onContextMenu={(event) => evaluatorMode && event.preventDefault()}>{security.paused && <SecurityPauseOverlay controller={security} onClose={closeViewer}/>}<div className="security-watermark" aria-hidden="true">ADMIEZO · {manifest.assignment.script} · {securityCode || "SECURE"}</div><header className="viewer-header"><div className="viewer-title"><button className="icon-button" title="Close viewer" onClick={closeViewer}><X /></button><div><strong>{manifest.assignment.script}</strong><span>{manifest.assignment.paper} · Round {manifest.assignment.valuation_round} · Anonymous evaluation</span></div></div><div className="viewer-progress"><div><span style={{ width: `${manifest.assignment.progress_percent}%` }} /></div><small>{manifest.assignment.progress_percent}% reviewed {saving && "· Saving"}</small></div><div className="viewer-header-actions">{evaluatorMode && <CameraPreview stream={security.stream} compact/>}<span className={`viewer-network ${online ? "online" : "offline"}`}>{online ? <Wifi /> : <WifiOff />}{online ? "Connected" : "Continuity"}</span>{evaluatorMode && <span className="viewer-secure" title="Restricted secure session"><ShieldAlert />{securityCode || "Secure"}</span>}<button className="icon-button" title="Previous assigned script" disabled={activeIndex <= 0} onClick={() => void closeViewer().then(() => openAssignment(visible[activeIndex - 1]))}><ChevronLeft /></button><button className="icon-button" title="Next assigned script" disabled={activeIndex < 0 || activeIndex >= visible.length - 1} onClick={() => void closeViewer().then(() => openAssignment(visible[activeIndex + 1]))}><ChevronRight /></button><button className="icon-button" title="Full screen" onClick={() => viewerRef.current?.requestFullscreen()}><Expand /></button></div></header>
     <div className="viewer-toolbar" role="toolbar" aria-label="Document viewer controls"><div className="tool-group"><button title="Single page" className={!multiPage ? "active" : ""} onClick={() => setMultiPage(false)}><Columns2 /></button><button title="Multi-page" className={multiPage ? "active" : ""} onClick={() => setMultiPage(true)}><Rows3 /></button></div><div className="tool-group"><button title="Previous page" onClick={() => goTo(currentPage - 1)} disabled={currentPage <= 1}><ChevronLeft /></button><label><input type="number" min="1" max={manifest.page_count} value={currentPage} onChange={(event) => goTo(Number(event.target.value))} /> / {manifest.page_count}</label><button title="Next page" onClick={() => goTo(currentPage + 1)} disabled={currentPage >= manifest.page_count}><ChevronRight /></button></div><div className="tool-group"><button title="Zoom out" onClick={() => { setFit("custom"); setZoom((value) => Math.max(value - 10, 40)); }}><Minus /></button><span>{zoom}%</span><button title="Zoom in" onClick={() => { setFit("custom"); setZoom((value) => Math.min(value + 10, 250)); }}><Plus /></button></div><div className="tool-group"><button title="Fit to screen" className={fit === "screen" ? "active" : ""} onClick={() => setFit("screen")}><Eye /></button><button title="Fit to width" className={fit === "width" ? "active" : ""} onClick={() => setFit("width")}><Maximize2 /></button><button title="Rotate clockwise" onClick={() => setRotation((value) => (value + 90) % 360)}><RotateCw /></button><button title="Pan document"><Move /></button></div><div className="tool-group"><button title="Low bandwidth mode" className={lowBandwidth ? "active" : ""} onClick={() => void reloadViewerPages(!lowBandwidth)}><ImageUp /></button><button title="Enhance contrast" className={enhance ? "active" : ""} onClick={() => setEnhance((value) => !value)}><Eye /></button></div></div>
     {securityNotice && <div role="alert" aria-live="assertive" style={{ position: "fixed", top: "96px", left: "50%", transform: "translateX(-50%)", zIndex: 10000, maxWidth: "min(720px, calc(100vw - 32px))", padding: "14px 18px", borderRadius: "12px", background: "#7f1d1d", color: "white", boxShadow: "0 18px 50px rgba(0,0,0,.35)", fontWeight: 700 }}>{securityNotice}</div>}{error && <div className="viewer-error">{error}</div>}<div className={`viewer-body ${marking ? "has-marking" : ""}`}><aside className="thumbnail-rail">{manifest.pages.map((item) => <button className={item.page_number === currentPage ? "active" : ""} key={item.page_number} onClick={() => goTo(item.page_number)}><img src={item.url} alt={`Page ${item.page_number} thumbnail`} loading="lazy" /><span>{item.page_number}</span></button>)}</aside><main className={`document-stage ${multiPage ? "multi" : "single"}`}>{viewerLoading ? <div className="viewer-empty"><RefreshCw className="spin" />Loading protected pages</div> : !manifest.pages.length ? <div className="viewer-empty"><Eye /><strong>No evaluation copy is available</strong><span>Complete anonymization and repository verification first.</span></div> : multiPage ? manifest.pages.map((item) => <img className={enhance ? "enhanced" : ""} key={item.page_number} src={item.url} alt={`Anonymous script page ${item.page_number}`} loading={item.page_number <= 2 ? "eager" : "lazy"} style={{ width: `${zoom}%`, transform: `rotate(${rotation}deg)` }} />) : page ? <div className={`script-page-wrap fit-${fit} ${annotationTool ? "annotating" : ""} ${highlightQuestion ? "question-jump" : ""}`} style={{ width: fit === "custom" ? `${zoom}%` : undefined, transform: `rotate(${rotation}deg)` }} onClick={addAnnotation}><img className={enhance ? "enhanced" : ""} src={page.url} alt={`Anonymous script page ${page.page_number}`} draggable={false}/>{pageAnnotations.map((item) => <AnnotationLayer item={item} selected={item.id === selectedAnnotation} onSelect={setSelectedAnnotation} key={item.id} />)}</div> : <div className="viewer-empty">Page {currentPage} is unavailable.</div>}</main>{marking && <MarkingPanel marking={marking} currentQuestion={currentQuestion} setCurrentQuestion={selectQuestion} lockToken={lockToken} currentPage={currentPage} onPinPage={pinQuestionPage} busy={saving || security.paused} annotationTool={annotationTool} setAnnotationTool={setAnnotationTool} onReload={() => refreshMarking(manifest.assignment.id)} onUndo={undoAnnotation} onSubmit={submitEvaluation} setError={setError}/>}</div>
