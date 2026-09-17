@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from .services import (
     decide_identity_resolution,
     issue_resolution_authorization,
     request_identity_resolution,
+    reject_masking_job,
     review_masking_job,
     start_masking_job,
     verify_masking_job,
@@ -61,6 +63,53 @@ class AnonymisationWorkflowTests(TestCase):
         self.assertEqual(self.script.state, Script.State.STORED)
         self.assertTrue(AuditEvent.objects.filter(action="anonymisation.masking.verified", aggregate_id=str(job.id)).exists())
         self.assertTrue(OutboxEvent.objects.filter(topic="anonymisation.masking.verified", aggregate_id=str(job.id)).exists())
+
+    def test_review_rejection_returns_script_for_remasking(self):
+        job = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=2, profile="identity-cover-v1")
+        rejected = reject_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[1].id, job_id=job.id, expected_version=job.version, notes="Cover mask needs correction")
+        self.script.refresh_from_db()
+        self.assertEqual(rejected.status, MaskingJob.Status.FAILED)
+        self.assertEqual(self.script.state, Script.State.SCANNED)
+        self.assertTrue(AuditEvent.objects.filter(action="anonymisation.masking.rejected", aggregate_id=str(job.id)).exists())
+        retry = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=self.script.version, profile="identity-cover-v1")
+        self.assertGreater(retry.version, rejected.version)
+
+    @patch("apps.anonymisation.services.mask_object")
+    def test_verification_rejection_retires_assets_and_new_master_has_a_new_key(self, mocked_mask):
+        mocked_mask.side_effect = lambda source_key, destinations, regions: {
+            "objects": [{"key": item["key"], "sha256": hashlib.sha256(item["key"].encode()).hexdigest(), "byte_size": 400, "mime_type": item["mime_type"]} for item in destinations]
+        }
+        job = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=2, profile="identity-cover-v1")
+        job = review_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[1].id, job_id=job.id, expected_version=job.version)
+        job = apply_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[2].id, job_id=job.id, expected_version=job.version)
+        first_master = ScriptAsset.objects.get(script=self.script, kind=ScriptAsset.Kind.MASTER, page_number=1).storage_key
+        rejected = verify_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[3].id, job_id=job.id, expected_version=job.version, passed=False, notes="Candidate identifier remains visible")
+        self.script.refresh_from_db()
+        self.assertEqual(rejected.status, MaskingJob.Status.FAILED)
+        self.assertEqual(self.script.state, Script.State.SCANNED)
+        self.assertEqual(ScriptAsset.objects.filter(script=self.script, deleted_at__isnull=True).count(), 0)
+        retry = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=self.script.version, profile="identity-cover-v1")
+        retry = review_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[1].id, job_id=retry.id, expected_version=retry.version)
+        retry = apply_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[2].id, job_id=retry.id, expected_version=retry.version)
+        second_master = ScriptAsset.objects.get(script=self.script, kind=ScriptAsset.Kind.MASTER, page_number=1, deleted_at__isnull=True).storage_key
+        self.assertNotEqual(first_master, second_master)
+        self.assertEqual(ScriptAsset.objects.filter(script=self.script, deleted_at__isnull=True).count(), 30)
+
+    @patch("apps.anonymisation.api.preview_mask_object", return_value=b"masked-preview")
+    def test_preview_returns_masked_bytes_and_audits_access(self, preview):
+        from django.test import Client
+
+        job = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=2, profile="identity-cover-v1")
+        client = Client()
+        login = client.post("/api/v1/auth/login", data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "mask-preview-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200)
+        response = client.get(f"/api/v1/anonymisation/masking-jobs/{job.id}/preview/1?version={job.version}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"masked-preview")
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.assertEqual(preview.call_args.kwargs["regions"], [{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}])
+        self.assertTrue(AuditEvent.objects.filter(action="anonymisation.masking.previewed", aggregate_id=str(job.id)).exists())
+        self.assertEqual(client.get(f"/api/v1/anonymisation/masking-jobs/{job.id}/preview/1?version=0").status_code, 409)
 
     def test_identity_resolution_requires_two_distinct_approvers_and_is_one_use(self):
         link = IdentityLink.objects.create(tenant_id=self.script.tenant_id, script=self.script, identity_reference="10000000-0000-0000-0000-000000000101", linked_by_id=self.actors[0].id, stored_at=timezone.now())

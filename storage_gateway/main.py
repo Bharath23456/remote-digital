@@ -169,7 +169,18 @@ def ensure_copy(root, key, encrypted, metadata, immutable):
     _write_copy(root, key, encrypted, metadata, immutable)
 
 
-async def mask_image(receive, scope):
+def apply_mask_regions(image, regions):
+    draw = ImageDraw.Draw(image)
+    for region in regions:
+        x = max(0, min(image.width, round(float(region["x"]) * image.width)))
+        y = max(0, min(image.height, round(float(region["y"]) * image.height)))
+        right = max(x, min(image.width, round((float(region["x"]) + float(region["width"])) * image.width)))
+        bottom = max(y, min(image.height, round((float(region["y"]) + float(region["height"])) * image.height)))
+        draw.rectangle((x, y, right, bottom), fill=(18, 24, 21))
+    return image
+
+
+async def mask_image(receive, scope, preview=False):
     raw = await read_body(receive, 2_000_000)
     supplied = next((value.decode() for name, value in scope.get("headers", []) if name.lower() == b"x-storage-signature"), "")
     expected = hmac.new(SIGNING_KEY, raw, hashlib.sha256).hexdigest()
@@ -181,13 +192,11 @@ async def mask_image(receive, scope):
         source_meta = json.loads(source_meta_path.read_text(encoding="utf-8"))
         source = decrypt(source_path.read_bytes())
         image = Image.open(BytesIO(source)).convert("RGB")
-        draw = ImageDraw.Draw(image)
-        for region in request.get("regions", []):
-            x = max(0, min(image.width, round(float(region["x"]) * image.width)))
-            y = max(0, min(image.height, round(float(region["y"]) * image.height)))
-            right = max(x, min(image.width, round((float(region["x"]) + float(region["width"])) * image.width)))
-            bottom = max(y, min(image.height, round((float(region["y"]) + float(region["height"])) * image.height)))
-            draw.rectangle((x, y, right, bottom), fill=(18, 24, 21))
+        apply_mask_regions(image, request.get("regions", []))
+        if preview:
+            stream = BytesIO()
+            image.save(stream, format="WEBP", quality=88, method=4)
+            return response(200, stream.getvalue(), [(b"content-type", b"image/webp"), (b"cache-control", b"no-store")])
         results = []
         for destination in request["destinations"]:
             output = image.copy()
@@ -331,6 +340,8 @@ async def app(scope, receive, send):
         status, headers, body = response(200, b'{"status":"ok","service":"storage-gateway"}', [(b"content-type", b"application/json")])
     elif path == "/internal/mask" and method == "POST":
         status, headers, body = await mask_image(receive, scope)
+    elif path == "/internal/mask-preview" and method == "POST":
+        status, headers, body = await mask_image(receive, scope, preview=True)
     elif path == "/internal/process-scan" and method == "POST":
         status, headers, body = await process_scan(receive, scope)
     elif path == "/internal/demo-pages" and method == "POST":

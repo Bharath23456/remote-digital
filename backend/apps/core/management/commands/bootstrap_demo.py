@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from apps.allocation.models import Assignment
 from apps.assignment.models import AssignmentGovernancePolicy
-from apps.configuration.models import AcademicYear, ExamSession, Paper, Programme, Question, Subject
+from apps.configuration.models import AcademicYear, ExamSession, Paper, Programme, Question, Subject, Term, Regulation
 from apps.custody.models import CustodyEvent, Script
 from apps.evaluators.models import Evaluator, Expertise
 from apps.eligibility.models import EligibilityRecord, VerificationApproval, VerificationCase
@@ -80,13 +80,21 @@ class Command(BaseCommand):
             Membership.objects.get_or_create(user=operator, institution=institution, defaults={"role": role})
             operators[account_email] = operator
         year, _ = AcademicYear.objects.get_or_create(tenant_id=tenant_id, label="2026-27", defaults={"starts_on": date(2026, 7, 1), "ends_on": date(2027, 6, 30)})
+        term, _ = Term.objects.get_or_create(tenant_id=tenant_id, academic_year=year, name="Odd semester", defaults={"sequence": 1, "starts_on": year.starts_on, "ends_on": year.ends_on})
         session, _ = ExamSession.objects.get_or_create(
             tenant_id=tenant_id,
             academic_year=year,
             name="November 2026 End Semester",
-            defaults={"term": "Odd semester", "evaluation_starts_at": timezone.now() - timedelta(days=2), "evaluation_ends_at": timezone.now() + timedelta(days=18), "status": ExamSession.Status.ACTIVE},
+            defaults={"term": "Odd semester", "term_record": term, "evaluation_starts_at": timezone.now() - timedelta(days=2), "evaluation_ends_at": timezone.now() + timedelta(days=18), "status": ExamSession.Status.ACTIVE},
         )
-        programme, _ = Programme.objects.get_or_create(tenant_id=tenant_id, code="BTECH-CSE", defaults={"name": "B.Tech Computer Science", "regulation": "R-2025"})
+        if session.term_record_id != term.id:
+            session.term_record = term
+            session.save(update_fields=["term_record", "updated_at"])
+        regulation, _ = Regulation.objects.get_or_create(tenant_id=tenant_id, code="R-2025", defaults={"title": "Regulation 2025", "effective_from": date(2025, 1, 1)})
+        programme, _ = Programme.objects.get_or_create(tenant_id=tenant_id, code="BTECH-CSE", defaults={"name": "B.Tech Computer Science", "regulation": "R-2025", "regulation_record": regulation})
+        if programme.regulation_record_id != regulation.id:
+            programme.regulation_record = regulation
+            programme.save(update_fields=["regulation_record", "updated_at"])
         subjects = [
             ("CS401", "Distributed Systems", 7),
             ("CS402", "Applied Machine Learning", 7),
@@ -96,6 +104,9 @@ class Command(BaseCommand):
         papers = []
         for index, (code, name, semester) in enumerate(subjects):
             subject, _ = Subject.objects.get_or_create(tenant_id=tenant_id, programme=programme, code=code, defaults={"name": name, "semester": semester})
+            if str(session.id) not in subject.session_ids:
+                subject.session_ids = [*subject.session_ids, str(session.id)]
+                subject.save(update_fields=["session_ids", "updated_at"])
             paper, _ = Paper.objects.get_or_create(
                 tenant_id=tenant_id,
                 session=session,

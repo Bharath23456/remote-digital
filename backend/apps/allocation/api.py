@@ -101,8 +101,10 @@ def manual_assignment(request, payload: ManualAssignmentIn):
     backup = Evaluator.objects.filter(id=payload.backup_evaluator_id, tenant_id=tenant_id).first() if payload.backup_evaluator_id else None
     if not script or not evaluator:
         raise HttpError(404, "Script or evaluator not found")
-    if not 1 <= payload.valuation_round <= script.paper.valuation_rounds or not 1 <= payload.priority <= 5:
-        raise HttpError(422, "Valuation round or priority is invalid")
+    if not 1 <= payload.valuation_round <= script.paper.valuation_rounds:
+        raise HttpError(422, f"{script.paper.code} allows valuation rounds 1–{script.paper.valuation_rounds}")
+    if not 1 <= payload.priority <= 5:
+        raise HttpError(422, "Priority must be between 1 and 5")
     assignment = create_assignment(tenant_id=tenant_id, actor_id=request.auth.id, script=script, evaluator=evaluator, backup_evaluator=backup, valuation_round=payload.valuation_round, due_at=timezone.now() + timedelta(hours=payload.due_in_hours), source="manual", quality_score=None, score_breakdown=None, priority=payload.priority)
     persist_custom_values(tenant_id=tenant_id, actor_id=request.auth.id, form_key="allocation", record_id=assignment.id, values=custom_fields)
     return assignment_data(Assignment.objects.select_related("script__paper", "evaluator", "backup_evaluator").get(id=assignment.id))
