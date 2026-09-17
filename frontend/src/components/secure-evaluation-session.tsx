@@ -115,14 +115,13 @@ export function useSecureEvaluationSession() {
     }
   }, []);
 
+  const pause = useCallback((category: string) => { setPaused(true); setPauseReason(category); setChecking(true); evidenceReasonRef.current ||= category; }, []);
+
   const report = useCallback(async (category: string, severity: "low" | "medium" | "high" | "critical", details: Record<string, unknown> = {}) => {
     const current = sessionRef.current;
     if (!current || closingRef.current || eventInFlightRef.current.has(category)) return;
     const shouldPause = severity === "critical" || ["viewer_hidden", "fullscreen_exited", "camera_stopped", "external_media_device", "multiple_screens", "multiple_faces", "camera_obstructed"].includes(category);
-    if (shouldPause) {
-      setPaused(true); setPauseReason(category); setChecking(true);
-      evidenceReasonRef.current ||= category;
-    }
+    if (shouldPause) pause(category);
     eventInFlightRef.current.add(category);
     try {
       const result = await request("/api/v1/phase4/remote-security/events", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: current.assignment_id, secure_session_id: current.id, category, severity, device_fingerprint: preflightRef.current?.inventory_digest || "0".repeat(64), session_fingerprint: sessionStorage.getItem("admiezo-secure-session-fingerprint") || "0".repeat(64), details }) });
@@ -134,7 +133,7 @@ export function useSecureEvaluationSession() {
       if (shouldPause) setChecking(false);
       window.setTimeout(() => eventInFlightRef.current.delete(category), 3000);
     }
-  }, [updateSession]);
+  }, [pause, updateSession]);
 
   const prepare = useCallback(async () => {
     setChecking(true); setError(""); setPreflight(null);
@@ -241,7 +240,7 @@ export function useSecureEvaluationSession() {
     }
 
     const visibility = () => { if (document.hidden) void report("viewer_hidden", "critical", { visibility: document.visibilityState }); };
-    const fullscreen = () => { if (!closingRef.current && current.policy.fullscreen_required && !document.fullscreenElement) void report("fullscreen_exited", "critical"); };
+    const fullscreen = () => { if (!closingRef.current && current.policy.fullscreen_required && !document.fullscreenElement) void report("fullscreen_exited", "critical", { visibility: document.visibilityState }); };
     const trackStopped = () => { if (!closingRef.current) void report("camera_stopped", "critical"); };
     camera.getVideoTracks().forEach((track) => { track.addEventListener("ended", trackStopped); track.addEventListener("mute", trackStopped); });
     const deviceChange = async () => { const inventory = await mediaInventory(); if (inventory.rawDigest !== inventoryRef.current) void report("external_media_device", "critical", { previous_inventory: inventoryRef.current, current_inventory: inventory.public }); };
@@ -297,7 +296,7 @@ export function useSecureEvaluationSession() {
     };
   }, [paused, posture, report, session?.id, stream, updateSession, uploadEvidence]);
 
-  return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, prepare, start, resume, finish, report };
+  return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, prepare, start, resume, finish, report, pause };
 }
 
 export function CameraPreview({ stream, compact = false }: { stream: MediaStream | null; compact?: boolean }) {
