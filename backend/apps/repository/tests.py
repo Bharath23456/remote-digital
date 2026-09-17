@@ -5,7 +5,9 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from django.core.management import call_command
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
+from django.utils import timezone
+from datetime import timedelta
 
 from apps.configuration.models import Paper
 from apps.core.models import AuditEvent, OutboxEvent
@@ -58,17 +60,81 @@ class ScriptRepositoryTests(TestCase):
         self.script.state = Script.State.MASKED
         self.script.save(update_fields=["state"])
         issued = self.post("/api/v1/repository/uploads", {"script_id": str(self.script.id), "kind": "master", "page_number": 1, "asset_version": 1, "content_type": "image/webp"})
-        self.assertEqual(issued.status_code, 200)
-        with patch("apps.repository.services.read_object_metadata", return_value=ObjectMetadata("b" * 64, 2048, "image/webp")):
-            finalized = self.post(f"/api/v1/repository/uploads/{issued.json()['id']}/finalize", {"version": 1})
-        self.assertEqual(finalized.status_code, 200)
-        asset = ScriptAsset.objects.get(id=finalized.json()["asset_id"])
+        self.assertEqual(issued.status_code, 403)
+        asset = ScriptAsset.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=ScriptAsset.Kind.MASTER, page_number=1, storage_key=f"scripts-master/{self.script.id}/page.webp", sha256="b" * 64, byte_size=2048, mime_type="image/webp")
         self.assertTrue(asset.storage_key.startswith("scripts-master/"))
-        duplicate = self.post("/api/v1/repository/uploads", {"script_id": str(self.script.id), "kind": "master", "page_number": 1, "asset_version": 1, "content_type": "image/webp"})
-        self.assertEqual(duplicate.status_code, 409)
         url_response = self.client.get(f"/api/v1/repository/assets/{asset.id}/url")
         self.assertEqual(url_response.status_code, 200)
         self.assertEqual(url_response.json()["ttl_seconds"], 300)
+
+    def test_existing_derived_upload_intent_cannot_be_finalized(self):
+        from django.utils import timezone
+        from datetime import timedelta
+
+        intent = UploadIntent.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=UploadIntent.Kind.EVALUATION, page_number=1, storage_key=f"scripts-evaluation/{self.script.id}/unmasked.webp", content_type="image/webp", maximum_bytes=1000, expires_at=timezone.now() + timedelta(minutes=5))
+        response = self.post(f"/api/v1/repository/uploads/{intent.id}/finalize", {"version": 1})
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(ScriptAsset.objects.filter(storage_key=intent.storage_key).exists())
+
+    def test_catalog_paginates_assets_and_history(self):
+        from django.utils import timezone
+        from datetime import timedelta
+
+        for page in range(1, 32):
+            ScriptAsset.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=ScriptAsset.Kind.EVALUATION, page_number=page, storage_key=f"scripts-evaluation/{self.script.id}/page-{page}.webp", sha256=f"{page:064x}", byte_size=100, mime_type="image/webp")
+            UploadIntent.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=UploadIntent.Kind.RAW_SCAN, page_number=page, storage_key=f"scripts-raw/{self.script.id}/page-{page}.png", content_type="image/png", maximum_bytes=1000, expires_at=timezone.now() + timedelta(minutes=5))
+        response = self.client.get(f"/api/v1/repository/catalog?asset_page=2&upload_page=2&page_size=25&script_id={self.script.id}")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["asset_pagination"]["total"], 31)
+        self.assertEqual(body["upload_pagination"]["total"], 31)
+        self.assertEqual(len(body["assets"]), 6)
+        self.assertEqual(len(body["uploads"]), 6)
+        self.assertEqual(self.client.get("/api/v1/repository/catalog?page_size=101").status_code, 422)
+
+    def test_manual_scan_catalog_groups_completed_pages_by_script(self):
+        for page, version, status in [(1, 1, "completed"), (1, 2, "completed"), (2, 1, "completed"), (3, 1, "issued")]:
+            UploadIntent.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=UploadIntent.Kind.RAW_SCAN, page_number=page, asset_version=version, storage_key=f"scripts-raw/{self.script.id}/page-{page}-v{version}", content_type="image/png", maximum_bytes=1000, status=status, expires_at=timezone.now() + timedelta(minutes=5))
+        response = self.client.get(f"/api/v1/repository/manual-scan/catalog?q={self.script.script_code}&page_size=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["items"][0]["pages"], [1, 2])
+        self.assertEqual(response.json()["items"][0]["page_count"], 2)
+        self.assertNotIn("storage_key", response.json()["items"][0])
+        self.assertEqual(self.client.get("/api/v1/repository/manual-scan/catalog?page_size=101").status_code, 422)
+
+    def test_raw_identity_page_needs_step_up_and_stays_out_of_repository_assets(self):
+        from django.utils import timezone
+        from datetime import timedelta
+
+        UploadIntent.objects.create(tenant_id=self.script.tenant_id, script=self.script, kind=UploadIntent.Kind.RAW_SCAN, page_number=1, storage_key=f"scripts-raw/{self.script.id}/page-1.png", content_type="image/png", maximum_bytes=1000, status=UploadIntent.Status.COMPLETED, expires_at=timezone.now() + timedelta(minutes=5))
+        path = f"/api/v1/anonymisation/scripts/{self.script.id}/identity-page"
+        self.assertEqual(self.client.get(path).status_code, 428)
+        self.assertEqual(self.post("/api/v1/auth/step-up", {"password": "ChangeMe123!"}).status_code, 200)
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mime_type"], "image/png")
+        self.assertIn("/storage/objects/scripts-raw/", response.json()["url"])
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.assertTrue(AuditEvent.objects.filter(action="anonymisation.identity_page.access_issued", aggregate_id=str(self.script.id)).exists())
+        self.assertEqual(ScriptAsset.objects.filter(script=self.script).count(), 0)
+
+    def test_identity_authorization_uses_tenant_institution_options(self):
+        import base64
+        from apps.tenancy.models import Institution
+
+        root = Institution.objects.filter(tenant_id=self.script.tenant_id, kind=Institution.Kind.UNIVERSITY).first()
+        college = Institution.objects.create(tenant_id=self.script.tenant_id, parent=root, name="Engineering College", code=f"college-{self.script.id.hex[:8]}", kind=Institution.Kind.COLLEGE)
+        path = f"/api/v1/anonymisation/scripts/{self.script.id}/identity/authorize"
+        self.assertEqual(self.post("/api/v1/auth/step-up", {"password": "ChangeMe123!"}).status_code, 200)
+        invalid = self.post(path, {"institution_id": str(uuid.uuid4()), "college_id": str(college.id)})
+        self.assertEqual(invalid.status_code, 422)
+        valid = self.post(path, {"institution_id": str(root.id), "college_id": str(college.id)})
+        self.assertEqual(valid.status_code, 200)
+        encoded = valid.json()["token"].split(".", 1)[0]
+        claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        self.assertEqual(claims["institution_name"], root.name)
+        self.assertEqual(claims["college_name"], college.name)
 
     def test_signed_url_never_exceeds_five_minutes(self):
         url, expires = signed_object_url(method="GET", key="scripts-evaluation/test/page.webp", ttl_seconds=3600)
@@ -94,3 +160,22 @@ class ScriptRepositoryTests(TestCase):
         self.assertEqual(asset.backup_status, "completed")
         self.assertEqual(asset.replication_status, "completed")
         self.assertIsNotNone(asset.integrity_checked_at)
+
+
+class IdentityPageTransactionTests(TransactionTestCase):
+    def test_identity_page_audit_is_atomic_in_a_real_request(self):
+        call_command("bootstrap_demo", verbosity=0)
+        client = Client()
+        login = client.post("/api/v1/auth/login", data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "identity-page-transaction-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200)
+        paper = Paper.objects.first()
+        dispatch = Dispatch.objects.create(tenant_id=paper.tenant_id, reference="IDENTITY-PAGE-ATOMIC", paper=paper, source_centre="Test", expected_packets=1, expected_scripts=1)
+        packet = Packet.objects.create(tenant_id=paper.tenant_id, dispatch=dispatch, barcode="PKT-IDENTITY-PAGE-ATOMIC", expected_scripts=1)
+        script = Script.objects.create(tenant_id=paper.tenant_id, script_code="AS-IDENTITY-PAGE-ATOMIC", primary_barcode="BC-IDENTITY-PAGE-ATOMIC", packet=packet, paper=paper, state=Script.State.SCANNED, page_count=1)
+        UploadIntent.objects.create(tenant_id=paper.tenant_id, script=script, kind=UploadIntent.Kind.RAW_SCAN, page_number=1, storage_key=f"scripts-raw/{script.id}/page-1.png", content_type="image/png", maximum_bytes=1000, status=UploadIntent.Status.COMPLETED, expires_at=timezone.now() + timedelta(minutes=5))
+        step_up = client.post("/api/v1/auth/step-up", data=json.dumps({"password": "ChangeMe123!"}), content_type="application/json")
+        self.assertEqual(step_up.status_code, 200)
+        response = client.get(f"/api/v1/anonymisation/scripts/{script.id}/identity-page")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(AuditEvent.objects.filter(action="anonymisation.identity_page.access_issued", aggregate_id=str(script.id)).exists())
+        self.assertTrue(OutboxEvent.objects.filter(topic="anonymisation.identity_page.access_issued", aggregate_id=str(script.id)).exists())

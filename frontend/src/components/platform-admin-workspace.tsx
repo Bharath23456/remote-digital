@@ -29,9 +29,10 @@ async function api(path: string, options?: RequestInit) {
 }
 
 const title = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+const emptyCatalog: Catalog = { summary: { universities: 0, active: 0, domains: 0, administrators: 0 }, universities: [] };
 
 export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenantId: string) => Promise<void> }) {
-  const [catalog, setCatalog] = useState<Catalog>({ summary: { universities: 0, active: 0, domains: 0, administrators: 0 }, universities: [] });
+  const [catalog, setCatalog] = useState<Catalog>(emptyCatalog);
   const [selected, setSelected] = useState<University | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [result, setResult] = useState<ProvisioningResult | null>(null);
@@ -40,7 +41,8 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const load = useCallback(async () => {
+  const load = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
     try { setCatalog(await api("/api/v1/enterprise/control-plane")); setError(""); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Control plane could not be loaded"); }
     finally { setLoading(false); }
@@ -56,7 +58,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
         admin_email: data.get("admin_email"), admin_first_name: data.get("admin_first_name"), admin_last_name: data.get("admin_last_name"),
         storage_quota_gb: Number(data.get("storage_quota_gb")), data_region: data.get("data_region"), policy: { timezone: data.get("timezone") },
       }) });
-      setResult(created); setModal(null); setNotice(`${created.name} is ready on ${created.hostname}`); await load();
+      setResult(created); setModal(null); setNotice(`${created.name} is ready on ${created.hostname}`); await load(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "University could not be provisioned"); }
     finally { setSaving(false); }
   }
@@ -69,7 +71,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
         version: selected.version, status: data.get("status"), plan: data.get("plan"), storage_quota_gb: Number(data.get("storage_quota_gb")),
         data_region: data.get("data_region"), enabled_modules: data.getAll("modules"),
       }) });
-      setModal(null); setNotice(`${selected.name} settings updated`); await load();
+      setModal(null); setNotice(`${selected.name} settings updated`); await load(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "University settings could not be updated"); }
     finally { setSaving(false); }
   }
@@ -79,7 +81,7 @@ export function PlatformAdminWorkspace({ onOpenTenant }: { onOpenTenant: (tenant
     const data = new FormData(event.currentTarget);
     try {
       const created = await api(`/api/v1/enterprise/tenants/${selected.id}/domains`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostname: data.get("hostname") }) });
-      setModal(null); setNotice(`Add TXT ${created.verification_record} = ${created.verification_token}`); await load();
+      setModal(null); setNotice(`Add TXT ${created.verification_record} = ${created.verification_token}`); await load(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Custom domain could not be added"); }
     finally { setSaving(false); }
   }

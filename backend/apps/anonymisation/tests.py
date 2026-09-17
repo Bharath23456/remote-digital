@@ -36,8 +36,8 @@ class AnonymisationWorkflowTests(TestCase):
         case_id = hashlib.sha256(self._testMethodName.encode()).hexdigest()[:12]
         dispatch = Dispatch.objects.create(tenant_id=paper.tenant_id, reference=f"MASK-{case_id}", paper=paper, source_centre="Test", expected_packets=1, expected_scripts=1)
         packet = Packet.objects.create(tenant_id=paper.tenant_id, dispatch=dispatch, barcode=f"PKT-MASK-{case_id}", expected_scripts=1)
-        self.script = Script.objects.create(tenant_id=paper.tenant_id, script_code=f"AS-MASK-{case_id}", primary_barcode=f"BC-MASK-{case_id}", packet=packet, paper=paper, state=Script.State.SCANNED, page_count=2, version=2)
-        for page in (1, 2):
+        self.script = Script.objects.create(tenant_id=paper.tenant_id, script_code=f"AS-MASK-{case_id}", primary_barcode=f"BC-MASK-{case_id}", packet=packet, paper=paper, state=Script.State.SCANNED, page_count=10, version=2)
+        for page in range(1, 11):
             UploadIntent.objects.create(tenant_id=paper.tenant_id, script=self.script, kind=UploadIntent.Kind.RAW_SCAN, page_number=page, storage_key=f"scripts-raw/{self.script.id}/page-{page}.png", content_type="image/png", maximum_bytes=1000, status=UploadIntent.Status.COMPLETED, expires_at=timezone.now() + timedelta(minutes=5), sha256="a" * 64, byte_size=100)
 
     @patch("apps.anonymisation.services.mask_object")
@@ -45,12 +45,16 @@ class AnonymisationWorkflowTests(TestCase):
         mocked_mask.side_effect = lambda source_key, destinations, regions: {
             "objects": [{"key": item["key"], "sha256": hashlib.sha256(item["key"].encode()).hexdigest(), "byte_size": 400, "mime_type": item["mime_type"]} for item in destinations]
         }
-        job = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=2, profile="university-standard-v1")
+        job = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=2, profile="identity-cover-v1")
         self.script.refresh_from_db()
         self.assertEqual(self.script.state, Script.State.VALIDATED)
         job = review_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[1].id, job_id=job.id, expected_version=job.version)
         job = apply_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[2].id, job_id=job.id, expected_version=job.version)
-        self.assertEqual(ScriptAsset.objects.filter(script=self.script).count(), 6)
+        self.assertEqual(ScriptAsset.objects.filter(script=self.script).count(), 30)
+        self.assertEqual(mocked_mask.call_count, 10)
+        self.assertEqual(mocked_mask.call_args_list[0].kwargs["regions"], [{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}])
+        for call in mocked_mask.call_args_list[1:]:
+            self.assertEqual(call.kwargs["regions"], [])
         job = verify_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[3].id, job_id=job.id, expected_version=job.version, passed=True, notes="All identity zones are opaque")
         self.script.refresh_from_db()
         self.assertEqual(job.status, MaskingJob.Status.VERIFIED)

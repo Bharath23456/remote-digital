@@ -30,16 +30,6 @@ from .models import (
 from .tokens import issue_identity_token
 
 
-DEFAULT_REGIONS = (
-    (MaskRegion.Category.CANDIDATE_NAME, Decimal("0.08"), Decimal("0.05"), Decimal("0.42"), Decimal("0.045")),
-    (MaskRegion.Category.REGISTER_NUMBER, Decimal("0.52"), Decimal("0.05"), Decimal("0.40"), Decimal("0.045")),
-    (MaskRegion.Category.USN, Decimal("0.08"), Decimal("0.105"), Decimal("0.42"), Decimal("0.045")),
-    (MaskRegion.Category.COLLEGE, Decimal("0.08"), Decimal("0.16"), Decimal("0.60"), Decimal("0.045")),
-    (MaskRegion.Category.INSTITUTION, Decimal("0.08"), Decimal("0.215"), Decimal("0.60"), Decimal("0.045")),
-    (MaskRegion.Category.PHOTOGRAPH, Decimal("0.78"), Decimal("0.11"), Decimal("0.14"), Decimal("0.18")),
-)
-
-
 def _decode_receipt(value):
     try:
         encoded, supplied = value.split(".", 1)
@@ -59,7 +49,7 @@ def _decode_receipt(value):
         raise HttpError(401, "Identity storage receipt is invalid or expired") from exc
 
 
-def prepare_identity_link(*, tenant_id, actor_id, script, purpose, session_id=""):
+def prepare_identity_link(*, tenant_id, actor_id, script, purpose, session_id="", institution_name=None, college_name=None):
     with transaction.atomic():
         link, created = IdentityLink.objects.select_for_update().get_or_create(
             tenant_id=tenant_id,
@@ -76,6 +66,8 @@ def prepare_identity_link(*, tenant_id, actor_id, script, purpose, session_id=""
             actor_id=actor_id,
             purpose=purpose.strip() or "Candidate identity registration",
             session_id=session_id,
+            institution_name=institution_name,
+            college_name=college_name,
         )
         record_event(
             tenant_id=tenant_id,
@@ -113,6 +105,8 @@ def confirm_identity_storage(*, tenant_id, actor_id, link_id, version, receipt):
 
 
 def start_masking_job(*, tenant_id, actor_id, script, script_version, profile):
+    if profile != "identity-cover-v1":
+        raise HttpError(422, "Only the first-page identity cover profile is supported")
     if script.state != Script.State.SCANNED or script.version != script_version:
         raise HttpError(409, "Only the current scanned script version can enter masking")
     uploaded_pages = set(
@@ -138,14 +132,9 @@ def start_masking_job(*, tenant_id, actor_id, script, script_version, profile):
             created_by_id=actor_id,
             version=next_version,
         )
-        regions = [
-            MaskRegion(tenant_id=tenant_id, job=job, page_number=1, category=category, x=x, y=y, width=width, height=height, source=MaskRegion.Source.AUTOMATIC, confidence=Decimal("0.9800"))
-            for category, x, y, width, height in DEFAULT_REGIONS
-        ]
-        regions.append(MaskRegion(tenant_id=tenant_id, job=job, page_number=current.page_count, category=MaskRegion.Category.SIGNATURE, x=Decimal("0.08"), y=Decimal("0.86"), width=Decimal("0.42"), height=Decimal("0.08"), source=MaskRegion.Source.AUTOMATIC, confidence=Decimal("0.9400")))
-        MaskRegion.objects.bulk_create(regions)
+        MaskRegion.objects.create(tenant_id=tenant_id, job=job, page_number=1, category=MaskRegion.Category.IDENTITY_PAGE, x=Decimal("0"), y=Decimal("0"), width=Decimal("1"), height=Decimal("1"), source=MaskRegion.Source.AUTOMATIC, confidence=Decimal("1"))
         transition_script(tenant_id=tenant_id, actor_id=actor_id, script_id=current.id, expected_version=current.version, to_state=Script.State.VALIDATED, location="Anonymisation review", metadata={"masking_job_id": str(job.id), "profile": job.profile})
-        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.detected", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(script.id), "regions": len(regions)})
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.detected", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(script.id), "regions": 1, "identity_cover_page": 1})
     return job
 
 
@@ -181,6 +170,8 @@ def review_masking_job(*, tenant_id, actor_id, job_id, expected_version):
             raise HttpError(409, "The masking operator cannot approve their own detection")
         if not job.regions.filter(is_active=True).exists():
             raise HttpError(409, "At least one active mask region is required")
+        if not job.regions.filter(is_active=True, page_number=1, category=MaskRegion.Category.IDENTITY_PAGE, x=0, y=0, width=1, height=1).exists():
+            raise HttpError(409, "The first identity page must be fully masked")
         job.status = MaskingJob.Status.REVIEWED
         job.reviewed_by_id = actor_id
         job.reviewed_at = timezone.now()
@@ -199,6 +190,8 @@ def apply_masking_job(*, tenant_id, actor_id, job_id, expected_version):
             raise HttpError(409, "Only the current reviewed job can be applied")
         if actor_id in (job.created_by_id, job.reviewed_by_id):
             raise HttpError(409, "Mask application requires a third independent operator")
+        if not job.regions.filter(is_active=True, page_number=1, category=MaskRegion.Category.IDENTITY_PAGE, x=0, y=0, width=1, height=1).exists():
+            raise HttpError(409, "The first identity page must be fully masked")
         job.status = MaskingJob.Status.PROCESSING
         job.applied_by_id = actor_id
         job.version += 1

@@ -5,7 +5,7 @@ from django.contrib.auth import logout
 from django.http import JsonResponse
 from django.utils import timezone
 
-from .models import AccessSession
+from .models import AccessSession, DeviceAuthorization
 from .services import client_ip, policy_for
 
 
@@ -37,6 +37,13 @@ class IdentitySessionMiddleware:
             if not session or session.revoked_at or session.expires_at <= now:
                 logout(request)
                 return JsonResponse({"detail": "Session expired or revoked"}, status=401)
+            if session.device and session.device.revoked_at:
+                logout(request)
+                return JsonResponse({"detail": "This device has been revoked"}, status=401)
+            authorization = DeviceAuthorization.objects.filter(tenant_id=session.tenant_id, device=session.device).first() if session.device else None
+            if authorization and authorization.revoked_at:
+                logout(request)
+                return JsonResponse({"detail": "This device has been revoked"}, status=401)
             memberships = request.user.admiezo_memberships.filter(is_active=True, institution__is_active=True).select_related("institution")
             active_tenant_id = request.session.get("active_tenant_id")
             membership = memberships.filter(institution__tenant_id=active_tenant_id).first() if active_tenant_id else None
@@ -47,12 +54,14 @@ class IdentitySessionMiddleware:
             if membership and membership.must_change_password and request.path not in {
                 "/api/v1/auth/me",
                 "/api/v1/auth/logout",
+                "/api/v1/auth/csrf",
                 "/api/v1/auth/password/complete-setup",
             }:
                 return JsonResponse({"detail": "Complete password setup before continuing", "code": "password_setup_required"}, status=428)
             policy = policy_for(membership.institution.tenant_id) if membership else policy_for(None)
-            if policy.require_trusted_device and not session.trusted_device:
-                return JsonResponse({"detail": "A trusted device is required", "code": "trusted_device_required"}, status=403)
+            if policy.require_trusted_device and (not authorization or not authorization.approved_at):
+                logout(request)
+                return JsonResponse({"detail": "Administrator device approval is required", "code": "device_approval_required"}, status=401)
             if policy.approved_networks:
                 from .services import _ip_in_approved_network
 
@@ -65,5 +74,6 @@ class IdentitySessionMiddleware:
             session.expires_at = now + timedelta(minutes=policy.session_timeout_minutes)
             session.ip_address = client_ip(request)
             session.save(update_fields=["expires_at", "ip_address", "last_seen_at", "updated_at"])
+            request.session.set_expiry(policy.session_timeout_minutes * 60)
             request.access_session = session
         return self.get_response(request)

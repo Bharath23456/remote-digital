@@ -47,6 +47,11 @@ class PasswordChangeIn(Schema):
     new_password: str
 
 
+class PasswordUpdateIn(Schema):
+    current_password: str
+    new_password: str
+
+
 class DeviceTrustIn(Schema):
     trusted_days: int = 30
 

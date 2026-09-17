@@ -10,6 +10,8 @@ class CandidateIdentity(models.Model):
     script_id = models.UUIDField(unique=True, db_index=True)
     session_id = models.UUIDField(null=True, blank=True, db_index=True)
     pii_ciphertext = models.TextField()
+    signature_image_ciphertext = models.TextField(blank=True)
+    photo_image_ciphertext = models.TextField(blank=True)
     register_number_hash = models.CharField(max_length=64, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

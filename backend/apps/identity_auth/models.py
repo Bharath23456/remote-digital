@@ -64,6 +64,17 @@ class TrustedDevice(TimeStampedModel):
         constraints = [models.UniqueConstraint(fields=["user", "device_hash"], name="unique_user_device")]
 
 
+class DeviceAuthorization(TimeStampedModel):
+    tenant_id = models.UUIDField(db_index=True)
+    device = models.ForeignKey(TrustedDevice, on_delete=models.CASCADE, related_name="authorizations")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="device_approvals")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant_id", "device"], name="unique_tenant_device_authorization")]
+
+
 class PasskeyCredential(TimeStampedModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="passkey_credentials")
     credential_id = models.BinaryField(unique=True)

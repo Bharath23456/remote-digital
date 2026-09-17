@@ -35,6 +35,7 @@ from .models import (
     AccessSession,
     AuthenticationHistory,
     AuthenticationMethod,
+    DeviceAuthorization,
     OidcProvider,
     PasskeyCredential,
     TrustedDevice,
@@ -303,17 +304,27 @@ def finalize_login(request, user, context: dict, *, mfa_verified=False):
     risk_reasons = list(context.get("risk_reasons", []))
     hashed_device = context.get("device_hash", "")
     device = None
+    if policy.require_trusted_device and not hashed_device:
+        raise HttpError(403, "This university requires an approved device")
+    if hashed_device:
+        device, _ = TrustedDevice.objects.get_or_create(
+            user=user,
+            device_hash=hashed_device,
+            defaults={
+                "label": context.get("device_label", "Current device")[:100],
+                "platform": context.get("platform", "")[:80],
+                "browser": context.get("browser", "")[:80],
+            },
+        )
+        DeviceAuthorization.objects.get_or_create(tenant_id=membership.institution.tenant_id, device=device)
     with transaction.atomic():
-        if hashed_device:
-            device, _ = TrustedDevice.objects.get_or_create(
-                user=user,
-                device_hash=hashed_device,
-                defaults={
-                    "label": context.get("device_label", "Current device")[:100],
-                    "platform": context.get("platform", "")[:80],
-                    "browser": context.get("browser", "")[:80],
-                },
-            )
+        if device:
+            device = TrustedDevice.objects.select_for_update().get(pk=device.pk)
+            authorization = DeviceAuthorization.objects.select_for_update().get(tenant_id=membership.institution.tenant_id, device=device)
+            if device.revoked_at or authorization.revoked_at:
+                raise HttpError(403, "This device has been revoked. Contact your university administrator")
+            if policy.require_trusted_device and not authorization.approved_at:
+                raise HttpError(403, "Device approval is pending. Ask your university administrator to approve this device")
             device.last_ip = client_ip(request)
             device.last_seen_at = timezone.now()
             device.save(update_fields=["last_ip", "last_seen_at", "updated_at"])
@@ -340,7 +351,7 @@ def finalize_login(request, user, context: dict, *, mfa_verified=False):
             ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent", "")[:255],
             location=context.get("location", "")[:120],
-            trusted_device=bool(device and device.trusted_until and device.trusted_until > timezone.now()),
+            trusted_device=bool(device and authorization.approved_at and not authorization.revoked_at),
             risk_score=risk_score,
             risk_reasons=risk_reasons,
             mfa_verified_at=timezone.now() if mfa_verified else None,
