@@ -138,6 +138,7 @@ class Paper(TenantModel):
     approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
     submitted_by_id = models.PositiveBigIntegerField(null=True, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
+    frozen_by_id = models.PositiveBigIntegerField(null=True, blank=True)
     frozen_at = models.DateTimeField(null=True, blank=True)
     effective_from = models.DateTimeField(null=True, blank=True)
 
