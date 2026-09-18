@@ -115,7 +115,7 @@ export function useSecureEvaluationSession() {
     }
   }, []);
 
-  const pause = useCallback((category: string) => { setPaused(true); setPauseReason(category); setChecking(true); evidenceReasonRef.current ||= category; }, []);
+  const pause = useCallback((category: string) => { setPaused(true); setPauseReason(category); setNeedsReauthentication(true); setChecking(true); evidenceReasonRef.current ||= category; }, []);
 
   const report = useCallback(async (category: string, severity: "low" | "medium" | "high" | "critical", details: Record<string, unknown> = {}) => {
     const current = sessionRef.current;
@@ -195,7 +195,7 @@ export function useSecureEvaluationSession() {
       if (reason instanceof ApiError && reason.status === 428) setNeedsReauthentication(true);
       setError(reason instanceof Error ? reason.message : "Secure session could not resume"); return false;
     } finally { setChecking(false); }
-  }, [posture, updateSession]);
+  }, [needsReauthentication, posture, updateSession]);
 
   const finish = useCallback(async (completed: boolean) => {
     const current = sessionRef.current;
@@ -314,5 +314,5 @@ export function SecurePreflightDialog({ script, controller, onStart, onCancel }:
 export function SecurityPauseOverlay({ controller, onClose }: { controller: ReturnType<typeof useSecureEvaluationSession>; onClose: () => void }) {
   const [password, setPassword] = useState("");
   const reason = controller.pauseReason.replaceAll("_", " ");
-  return <div className="security-pause" role="alertdialog" aria-modal="true"><div><ShieldAlert /><h2>Evaluation paused</h2><p>{reason.charAt(0).toUpperCase() + reason.slice(1)} was detected. The script and marking controls remain locked until security checks pass.</p><CameraPreview stream={controller.stream} compact/>{controller.needsReauthentication && <label><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>}{controller.error && <div className="viewer-error-inline">{controller.error}</div>}<div className="pause-actions"><button className="secondary-button" onClick={onClose}>Close script</button><button className="primary-button" disabled={controller.checking || (controller.needsReauthentication && !password)} onClick={() => controller.resume(password)}><LockKeyhole />Run checks and resume</button></div></div></div>;
+  return <div className="security-pause" role="alertdialog" aria-modal="true"><div><ShieldAlert /><h2>Evaluation paused</h2><p>{reason.charAt(0).toUpperCase() + reason.slice(1)} was detected. The script and marking controls remain locked until security checks pass.</p><CameraPreview stream={controller.stream} compact/><label><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{controller.error && <div className="viewer-error-inline">{controller.error}</div>}<div className="pause-actions"><button className="secondary-button" onClick={onClose}>Close script</button><button className="primary-button" disabled={controller.checking || !password} onClick={() => controller.resume(password)}><LockKeyhole />Run checks and resume</button></div></div></div>;
 }
