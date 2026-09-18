@@ -21,6 +21,7 @@ async function mockDesk(page: Page, role: DeskRole) {
     generated_at: new Date().toISOString(), session: null, metrics: {}, pipeline: [], attention: [], module_counts: {}, papers: [], recent_events: [],
   } }));
   await page.route("**/api/v1/auth/notifications", (route) => route.fulfill({ json: { items: [], unread_count: 0 } }));
+  await page.route("**/api/v1/auth/csrf", (route) => route.fulfill({ json: { csrf_token: "test-csrf" } }));
   await page.route("**/api/v1/receiving/guided/papers", (route) => route.fulfill({ json: { papers: [{ id: "paper-1", code: "CS402-A", title: "Cryptography" }] } }));
   await page.route("**/api/v1/receiving/guided/catalog", (route) => route.fulfill({ json: { enabled: true, bundles: [{
     id: "bundle-1", barcode: "BND-2026-001", source_centre: "Central College", mode: "transfer", status: "received",
@@ -46,6 +47,7 @@ async function navigate(page: Page, label: string) {
 test("admin sees separate preparation, receipt, and digitization tasks", async ({ page }) => {
   await mockDesk(page, "university_admin");
   await navigate(page, "Script receiving");
+  await expect(page.locator(".page-heading .eyebrow")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Prepare bundle" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Recent bundles" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Receive bundle" })).toHaveCount(0);
@@ -57,6 +59,7 @@ test("admin sees separate preparation, receipt, and digitization tasks", async (
   await expect(page.getByRole("heading", { name: "BND-2026-001" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "PKT-2026-001" })).toBeVisible();
   await navigate(page, "Digitization");
+  await expect(page.locator(".page-heading .eyebrow")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Open packet" })).toBeVisible();
   await page.getByPlaceholder("Scan or type packet barcode").fill("PKT-2026-001");
   await page.getByRole("button", { name: "Open packet" }).click();
