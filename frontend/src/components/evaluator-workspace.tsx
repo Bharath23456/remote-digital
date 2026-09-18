@@ -96,9 +96,15 @@ export function EvaluatorWorkspace() {
           face_model_version: "",
           last_identity_verified_at: null,
         } as Evaluator;
-        setNotice("Evaluator profile created. Complete face enrollment before evaluation access.");
-        if (result.login_enabled) setPendingCredential(result);
-        setModal({ type: "face", evaluator: createdEvaluator });
+        if (result.face_enrollment_required !== false) {
+          setNotice("Evaluator profile created. Complete face enrollment before evaluation access.");
+          if (result.login_enabled) setPendingCredential(result);
+          setModal({ type: "face", evaluator: createdEvaluator });
+        } else {
+          setNotice("Evaluator profile created.");
+          setModal(null);
+          if (result.login_enabled) setCredential(result);
+        }
         await load();
       } catch (reason) { setError(reason instanceof Error ? reason.message : "Evaluator could not be created"); }
       finally { setSaving(false); }

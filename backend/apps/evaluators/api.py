@@ -1,3 +1,4 @@
+from django.conf import settings
 from ninja import Router
 from ninja.errors import HttpError
 
@@ -51,7 +52,7 @@ def create(request, payload: EvaluatorCreateIn):
         "status": evaluator.status,
         "face_enrolled": False,
         "face_status": "not_enrolled",
-        "face_enrollment_required": True,
+        "face_enrollment_required": not settings.DEMO_SKIP_EVALUATOR_FACE_VERIFICATION,
         "login_enabled": bool(evaluator.user_id),
         "username": evaluator.email if evaluator.user_id else "",
         "temporary_password": temporary_password,

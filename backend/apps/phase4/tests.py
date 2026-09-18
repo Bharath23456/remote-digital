@@ -6,7 +6,7 @@ from django.core.management import call_command
 import json
 from unittest.mock import patch
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -87,6 +87,31 @@ class RemainingModulesTests(TestCase):
         enroll_face_template(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator_id=evaluator.id, capture=self.face_capture())
         access_session = AccessSession.objects.filter(user_id=evaluator.user_id, tenant_id=self.tenant_id, revoked_at__isnull=True).latest("created_at")
         verify_evaluator_access(tenant_id=self.tenant_id, actor_id=evaluator.user_id, evaluator=evaluator, assignment=assignment, access_session=access_session, capture=self.face_capture())
+
+    def test_demo_face_bypass_requires_explicit_setting_and_keeps_secure_session(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        login = client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "face-bypass-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200)
+        payload = {
+            "assignment_id": str(assignment.id),
+            "session_fingerprint": "a" * 64,
+            "device_fingerprint": "b" * 64,
+            "consent": True,
+            "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
+            "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
+        }
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=False):
+            self.assertTrue(client.get("/api/v1/phase4/remote-security/policy").json()["identity_verification_required"])
+            blocked = client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(blocked.status_code, 428)
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            self.assertFalse(client.get("/api/v1/phase4/remote-security/policy").json()["identity_verification_required"])
+            started = client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(started.status_code, 200)
+            self.assertEqual(started.json()["policy"]["identity_verification_required"], False)
+            self.assertEqual(SecureEvaluationSession.objects.get(id=started.json()["id"]).evaluator_id, evaluator.id)
 
     def test_workload_actions_require_independent_approval(self):
         item = create_workload_action(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator=self.evaluator, action="rebalance", reason="Deadline capacity requires redistribution.", metrics={"remaining": 28})

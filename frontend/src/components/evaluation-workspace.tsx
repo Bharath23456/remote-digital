@@ -114,7 +114,15 @@ export function EvaluationWorkspace({ role }: { role: string }) {
   const visible = useMemo(() => assignments.filter((item) => filter === "all" || (filter === "pending" && ["assigned", "accepted", "reassigned"].includes(item.status)) || (filter === "in_progress" && item.status === "in_progress") || (filter === "draft" && Boolean(item.draft_saved_at) && item.status !== "submitted") || (filter === "completed" && item.status === "submitted") || (filter === "flagged" && item.is_flagged) || (filter === "priority" && item.priority >= 4)), [assignments, filter]);
   const activeIndex = manifest ? visible.findIndex((item) => item.id === manifest.assignment.id) : -1;
   async function openAssignment(item: Assignment, bandwidth = lowBandwidth, securityReady = false) {
-    if (evaluatorMode && !securityReady) { setPendingAssignment(item); setIdentityReadyAssignmentId(""); setError(""); return; }
+    if (evaluatorMode && !securityReady) {
+      setError("");
+      try {
+        const policy = await api("/api/v1/phase4/remote-security/policy");
+        setIdentityReadyAssignmentId(policy.identity_verification_required === false ? item.id : "");
+        setPendingAssignment(item);
+      } catch (reason) { setError(reason instanceof Error ? reason.message : "Security policy could not be loaded"); }
+      return;
+    }
     setViewerLoading(true); setError("");
     let acquiredToken = "";
     try {

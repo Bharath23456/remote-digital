@@ -225,10 +225,13 @@ This module guides an assignment from first open to an idempotent, auditable sub
 This module coordinates independent first, second, and third valuations without examiner leakage.
 
 - Locks an immutable valuation result from each submitted evaluation using an idempotent finalize operation.
+- Paper configuration sets one, two, or three required independent rounds. One-round papers propose the first score as the final mark unless an optional score trigger is configured; scores strictly above that trigger require an independent second round.
 - Keeps previous-round examiner identity, marks, totals, and comparison data hidden from later evaluators.
 - Compares question and total differences only after the required rounds are finalized.
 - Applies the paper's configured tolerance to accept aligned valuations or open a discrepancy case.
-- Requests a third valuation through the allocation engine when the configured reconciliation rule requires it.
+- Allows the next round to be allocated only after the prior result is locked. Three-round papers require all three rounds; aligned scores follow the configured final-mark rule, while threshold breaches enter reconciliation.
+- The optional score trigger is separate from the difference threshold: configure it under **Exam configuration → Papers → Round 2 if score exceeds** for a one-round paper. Frozen-paper changes use the existing governed change workflow.
+- For existing one-round submissions made before this policy, preview missing final-mark proposals with `docker compose exec backend python manage.py reconcile_single_round_marks`; add them with `docker compose exec backend python manage.py reconcile_single_round_marks --apply`. The command is idempotent and does not approve or lock marks.
 
 ### Module 25: Discrepancy and Reconciliation Management
 
@@ -447,6 +450,8 @@ Create wildcard DNS and TLS for `*.abc.com`; a university provisioned with slug 
 University administrators manage access from **Access governance > User access**. **Add user** creates or reuses an identity, assigns a tenant role, limits the account to selected modules, and displays a temporary password once. An evaluator account is restricted to the Evaluation module. Existing memberships can be edited or suspended from the same screen, and module grants are enforced by both frontend navigation and backend middleware.
 
 **Evaluator master > Register evaluator** can create the evaluator profile and linked login together. The issued username and one-time temporary password are shown after the transaction succeeds. New assignment and redistribution events create durable in-app notifications for the linked evaluator; the header notification centre opens the assigned Evaluation desk and records read or acknowledgement state.
+
+For local development only, Docker sets `DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=true`. Evaluators can enter a secure evaluation session without face enrollment or a face-match prompt; webcam preflight, proctoring, session authorization, and assignment locks remain enabled. Set this variable to `false` to restore face verification. The bypass is disabled whenever `DJANGO_DEBUG=false`, regardless of the variable.
 
 Platform administrators configure university-specific fields from **University management > Configure custom form fields**. Field definitions are tenant-scoped, ordered, versioned, audited, and support text, long text, number, date, select, and checkbox inputs. The configured fields are validated and persisted end to end for User Access, Evaluator Profile, Institution, Exam Session, Paper, Dispatch, Answer Script, Evaluator Allocation, Marking Scheme, and Notification creation forms.
 

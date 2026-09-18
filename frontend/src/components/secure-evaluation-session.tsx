@@ -4,7 +4,7 @@ import { Camera, Check, LockKeyhole, Monitor, RefreshCw, ShieldAlert, Video, X }
 import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
-type Policy = { camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
+type Policy = { identity_verification_required?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
 type Preflight = { camera_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
 type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; digest: string };
@@ -240,13 +240,14 @@ export function useSecureEvaluationSession() {
   }, [policy, updateSession]);
 
   const verifyLiveIdentity = useCallback(async (assignmentId: string, trigger: string) => {
+    if (policy?.identity_verification_required === false) return { access_granted: true };
     const camera = streamRef.current;
     if (!camera || !cameraIsActive(camera)) throw new Error("Camera is required for evaluator identity verification");
     const payload = await captureIdentityPayload(camera, preflightRef.current?.inventory_digest || "", trigger);
     const body = await request("/api/v1/evaluator-management/face/verify-access", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, ...payload }) });
     if (!body.access_granted) throw new Error(body.failure_reason || "Evaluator face does not match the enrolled template");
     return body;
-  }, []);
+  }, [policy?.identity_verification_required]);
 
   const resume = useCallback(async (password = "") => {
     const current = sessionRef.current;
@@ -258,7 +259,7 @@ export function useSecureEvaluationSession() {
         streamRef.current = replacement; setStream(replacement);
       }
       if (current.policy.fullscreen_required && !document.fullscreenElement) await document.documentElement.requestFullscreen();
-      if (identityPauseReasons.has(current.pause_reason)) {
+      if (current.policy.identity_verification_required !== false && identityPauseReasons.has(current.pause_reason)) {
         try { await verifyLiveIdentity(current.assignment_id, "resume"); }
         catch (reason) {
           const message = reason instanceof Error ? reason.message : "Evaluator identity could not be verified";
@@ -379,7 +380,7 @@ export function useSecureEvaluationSession() {
         } catch { /* Native face detection is a progressive signal; camera continuity still applies. */ }
       }
       const now = Date.now();
-      if (now - lastIdentityCheckAt >= identityCheckIntervalMs) {
+      if (current.policy.identity_verification_required !== false && now - lastIdentityCheckAt >= identityCheckIntervalMs) {
         lastIdentityCheckAt = now;
         void verifySessionIdentity("periodic");
       }

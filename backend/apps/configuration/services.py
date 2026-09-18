@@ -122,6 +122,10 @@ def paper_readiness(paper):
         issues.append("Valuation rounds must be one, two or three")
     if paper.discrepancy_threshold < 0 or paper.discrepancy_threshold > paper.max_marks:
         issues.append("Discrepancy threshold is outside the valid range")
+    try:
+        _validate_second_valuation_threshold(paper.valuation_rounds, paper.max_marks, paper.rules)
+    except ConfigurationError as exc:
+        issues.append(str(exc))
     if paper.session.evaluation_starts_at >= paper.session.evaluation_ends_at:
         issues.append("Evaluation window must end after it starts")
     return {"ready": not issues, "issues": issues}
@@ -793,9 +797,22 @@ def _validate_snapshot(snapshot):
         raise ConfigurationError("Valuation rounds must be one, two or three")
     if discrepancy < 0 or discrepancy > maximum:
         raise ConfigurationError("Discrepancy threshold is outside the valid range")
+    _validate_second_valuation_threshold(int(snapshot["valuation_rounds"]), maximum, snapshot.get("rules") or {})
     questions = snapshot.get("questions", [])
     if questions and sum((Decimal(str(item["max_marks"])) for item in questions), Decimal("0")) != maximum:
         raise ConfigurationError("Question marks must equal the paper maximum")
+
+
+def _validate_second_valuation_threshold(rounds, maximum, rules):
+    value = rules.get("second_valuation_mark_threshold")
+    if value is None or value == "":
+        return
+    try:
+        threshold = Decimal(str(value))
+    except (ValueError, ArithmeticError) as exc:
+        raise ConfigurationError("Round 2 score threshold must be a valid mark") from exc
+    if rounds != 1 or not threshold.is_finite() or threshold < 0 or threshold >= maximum:
+        raise ConfigurationError("Round 2 score threshold is only valid for one-round papers and must be below maximum marks")
 
 
 def _paper_field_value(field, value):

@@ -13,6 +13,7 @@ DEMO_PASSWORD_ONLY_LOGIN = (
     and os.getenv("LOAD_DEMO_DATA", "false").lower() == "true"
     and os.getenv("DEMO_PASSWORD_ONLY_LOGIN", "false").lower() == "true"
 )
+DEMO_SKIP_EVALUATOR_FACE_VERIFICATION = DEBUG and os.getenv("DEMO_SKIP_EVALUATOR_FACE_VERIFICATION", "false").lower() == "true"
 ALLOWED_HOSTS = [item.strip() for item in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")]
 
 INSTALLED_APPS = [

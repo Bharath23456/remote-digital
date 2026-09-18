@@ -36,6 +36,23 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         return client
 
+    def test_one_round_score_trigger_is_validated_separately_from_difference_threshold(self):
+        session = ExamSession.objects.first()
+        subject = Subject.objects.first()
+        payload = {
+            "session_id": str(session.id), "subject_id": str(subject.id), "code": "SCORE-TRIGGER-101",
+            "title": "Conditional second valuation", "max_marks": "100.00", "pass_marks": "40.00",
+            "valuation_rounds": 1, "discrepancy_threshold": "10.00",
+            "rules": {"second_valuation_mark_threshold": "75.00"},
+        }
+        created = self.post("/api/v1/configuration/papers", payload)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["rules"]["second_valuation_mark_threshold"], "75.00")
+        invalid_rounds = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-102", "valuation_rounds": 2})
+        self.assertEqual(invalid_rounds.status_code, 422)
+        invalid_score = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-103", "rules": {"second_valuation_mark_threshold": "100.00"}})
+        self.assertEqual(invalid_score.status_code, 422)
+
     def test_complete_paper_configuration_lifecycle(self):
         session = ExamSession.objects.first()
         subject = Subject.objects.first()

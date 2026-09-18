@@ -85,7 +85,7 @@ class AllocationEngineTests(TestCase):
         }
         response = client.post("/api/v1/allocation/assignments", data=json.dumps(payload), content_type="application/json")
         self.assertEqual(response.status_code, 422)
-        self.assertIn("allows valuation rounds 1–1", response.json()["detail"])
+        self.assertIn("not required", response.json()["detail"])
         self.assertFalse(Assignment.objects.filter(script=self.scripts[0]).exists())
 
         payload["valuation_round"] = 1
