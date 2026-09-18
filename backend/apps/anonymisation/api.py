@@ -1,5 +1,5 @@
 from django.utils import timezone
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.db import transaction
 from ninja import Router
 from ninja.errors import HttpError
@@ -7,8 +7,8 @@ from ninja.errors import HttpError
 from apps.core.authz import membership_for, require_roles, require_step_up
 from apps.core.services import record_event
 from apps.custody.models import Script
-from apps.repository.models import UploadIntent
-from apps.repository.storage import signed_object_url
+from apps.repository.models import ScriptAsset, UploadIntent
+from apps.repository.storage import preview_mask_object, read_object, signed_object_url
 from apps.tenancy.models import Institution, Membership
 
 from .models import IdentityLink, IdentityResolutionRequest, MaskingJob
@@ -28,6 +28,7 @@ from .services import (
     decide_identity_resolution,
     issue_resolution_authorization,
     prepare_identity_link,
+    reject_masking_job,
     request_identity_resolution,
     review_masking_job,
     start_masking_job,
@@ -163,6 +164,50 @@ def create_region(request, job_id: str, payload: MaskRegionIn):
     return {"id": str(region.id), "job_version": job.version}
 
 
+@router.get("/masking-jobs/{job_id}/preview/{page_number}")
+def masking_preview(request, job_id: str, page_number: int, version: int):
+    membership = require_roles(request, *set(OPERATIONS_ROLES + APPROVER_ROLES))
+    tenant_id = membership.institution.tenant_id
+    job = MaskingJob.objects.select_related("script").filter(id=job_id, tenant_id=tenant_id).first()
+    if not job:
+        raise HttpError(404, "Masking job not found")
+    if version != job.version:
+        raise HttpError(409, "Masking job changed; refresh the review")
+    if page_number < 1 or page_number > job.script.page_count:
+        raise HttpError(404, "Page not found")
+    if job.status in (MaskingJob.Status.DETECTED, MaskingJob.Status.REVIEWED):
+        require_roles(request, *OPERATIONS_ROLES)
+        upload = UploadIntent.objects.filter(tenant_id=tenant_id, script_id=job.script_id, kind=UploadIntent.Kind.RAW_SCAN, status=UploadIntent.Status.COMPLETED, page_number=page_number).order_by("-asset_version").first()
+        if not upload:
+            raise HttpError(404, "Scanned page not found")
+        regions = [{key: float(value) for key, value in region.items()} for region in job.regions.filter(is_active=True, page_number=page_number).values("x", "y", "width", "height")]
+        source = "proposed"
+        try:
+            image = preview_mask_object(source_key=upload.storage_key, regions=regions)
+        except OSError as exc:
+            raise HttpError(502, "Masked preview is temporarily unavailable") from exc
+    elif job.status in (MaskingJob.Status.APPLIED, MaskingJob.Status.VERIFIED):
+        asset_version = job.version - 1 if job.status == MaskingJob.Status.APPLIED else job.version - 2
+        asset = ScriptAsset.objects.filter(tenant_id=tenant_id, script_id=job.script_id, kind=ScriptAsset.Kind.EVALUATION, page_number=page_number, version=asset_version, deleted_at__isnull=True).first()
+        if not asset:
+            raise HttpError(404, "Masked page not found")
+        source = "generated"
+        try:
+            image = read_object(asset.storage_key)
+        except OSError as exc:
+            raise HttpError(502, "Masked page is temporarily unavailable") from exc
+    else:
+        raise HttpError(409, "This masking job has no reviewable preview")
+    if len(image) > 20_000_000:
+        raise HttpError(413, "Masked page exceeds the preview size limit")
+    with transaction.atomic():
+        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="anonymisation.masking.previewed", aggregate="MaskingJob", aggregate_id=job.id, payload={"page_number": page_number, "source": source})
+    response = HttpResponse(image, content_type="image/webp")
+    response["Cache-Control"] = "private, no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 @router.post("/masking-jobs/{job_id}/review")
 def review_job(request, job_id: str, payload: MaskingDecisionIn):
     membership = require_roles(request, *OPERATIONS_ROLES)
@@ -180,7 +225,18 @@ def apply_job(request, job_id: str, payload: MaskingDecisionIn):
 @router.post("/masking-jobs/{job_id}/verify")
 def verify_job(request, job_id: str, payload: MaskingDecisionIn):
     membership = require_roles(request, *APPROVER_ROLES)
-    job = verify_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, passed=True, notes=payload.notes)
+    job = verify_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, passed=payload.passed, notes=payload.notes)
+    return {"id": str(job.id), "status": job.status, "version": job.version}
+
+
+@router.post("/masking-jobs/{job_id}/reject")
+def reject_job(request, job_id: str, payload: MaskingDecisionIn):
+    membership = require_roles(request, *set(OPERATIONS_ROLES + APPROVER_ROLES))
+    job = MaskingJob.objects.filter(id=job_id, tenant_id=membership.institution.tenant_id).first()
+    if not job:
+        raise HttpError(404, "Masking job not found")
+    require_roles(request, *(APPROVER_ROLES if job.status == MaskingJob.Status.APPLIED else OPERATIONS_ROLES))
+    job = reject_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, notes=payload.notes)
     return {"id": str(job.id), "status": job.status, "version": job.version}
 
 

@@ -64,6 +64,21 @@ def transition_script(*, tenant_id, actor_id, script_id, expected_version, to_st
     return script
 
 
+def return_script_for_remasking(*, tenant_id, actor_id, script_id, expected_version, job_id, reason):
+    with transaction.atomic():
+        script = Script.objects.select_for_update().filter(id=script_id, tenant_id=tenant_id).first()
+        if not script or script.version != expected_version or script.state not in (Script.State.VALIDATED, Script.State.MASKED):
+            raise HttpError(409, "Script is no longer in a masking review state")
+        previous = script.state
+        script.state = Script.State.SCANNED
+        script.last_location = "Anonymisation remasking queue"
+        script.version += 1
+        script.save(update_fields=["state", "last_location", "version", "updated_at"])
+        CustodyEvent.objects.create(tenant_id=tenant_id, script=script, from_state=previous, to_state=script.state, location=script.last_location, actor_id=str(actor_id), metadata={"masking_job_id": str(job_id), "reason": reason})
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="custody.script.returned_for_remasking", aggregate="Script", aggregate_id=script.id, payload={"from": previous, "to": script.state, "masking_job_id": str(job_id)})
+    return script
+
+
 def register_script(*, tenant_id, actor_id, packet, primary_barcode, supplements, bundle_barcode, centre_barcode, location):
     normalized = [primary_barcode.strip(), *[item.strip() for item in supplements]]
     if any(not item for item in normalized) or len(set(normalized)) != len(normalized):

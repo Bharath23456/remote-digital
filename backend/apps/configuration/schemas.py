@@ -29,7 +29,7 @@ class TermIn(Schema):
 class ExamSessionIn(Schema):
     academic_year_id: str
     name: str
-    term: str
+    term_id: str
     evaluation_starts_at: datetime
     evaluation_ends_at: datetime
     custom_fields: dict[str, Any] = Field(default_factory=dict)
@@ -46,7 +46,7 @@ class EvaluationEventIn(Schema):
 class ProgrammeIn(Schema):
     code: str
     name: str
-    regulation: str
+    regulation_id: str
 
 
 class CourseIn(Schema):
@@ -148,3 +148,28 @@ class ConfigurationChangeDecisionIn(Schema):
     version: int
     decision: str
     note: str = ""
+
+
+class MasterUpdateIn(Schema):
+    version: int
+    changes: dict[str, Any]
+    reason: str
+
+
+class SessionTransitionIn(Schema):
+    version: int
+    target: str
+    reason: str = ""
+
+
+class CalendarExceptionIn(Schema):
+    entity: str
+    academic_year_id: str | None = None
+    target_id: str | None = None
+    starts_on: date
+    ends_on: date
+    reason: str
+
+
+class CalendarDecisionIn(Schema):
+    approve: bool

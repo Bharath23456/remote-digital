@@ -20,6 +20,10 @@ from apps.configuration.schemas import (
     RegulationIn,
     SubjectIn,
     TermIn,
+    MasterUpdateIn,
+    SessionTransitionIn,
+    CalendarExceptionIn,
+    CalendarDecisionIn,
 )
 from apps.core.authz import require_roles
 from apps.tenancy.custom_fields import persist_custom_values, validate_custom_values
@@ -76,7 +80,7 @@ def add_session(request, payload: ExamSessionIn):
     tenant_id, actor_id = _context(request)
     values = payload.dict()
     custom_fields = validate_custom_values(tenant_id=tenant_id, form_key="exam_session", values=values.pop("custom_fields"))
-    item = _run(services.create_session, tenant_id=tenant_id, actor_id=actor_id, **values)
+    item = _run(services.create_session, tenant_id=tenant_id, actor_id=actor_id, idempotency_key=request.headers.get("Idempotency-Key", ""), **values)
     persist_custom_values(tenant_id=tenant_id, actor_id=actor_id, form_key="exam_session", record_id=item.id, values=custom_fields)
     return {"id": str(item.id), "version": item.version}
 
@@ -84,7 +88,7 @@ def add_session(request, payload: ExamSessionIn):
 @router.post("/events")
 def add_event(request, payload: EvaluationEventIn):
     tenant_id, actor_id = _context(request)
-    item = _run(services.create_event, tenant_id=tenant_id, actor_id=actor_id, **payload.dict())
+    item = _run(services.create_event, tenant_id=tenant_id, actor_id=actor_id, idempotency_key=request.headers.get("Idempotency-Key", ""), **payload.dict())
     return {"id": str(item.id)}
 
 
@@ -251,3 +255,43 @@ def decide_change(request, request_id: str, payload: ConfigurationChangeDecision
 def readiness(request):
     membership = require_roles(request, *WRITE_ROLES, Membership.Role.AUDITOR)
     return services.configuration_readiness(membership.institution.tenant_id)
+
+
+@router.patch("/masters/{entity}/{item_id}")
+def edit_master(request, entity: str, item_id: str, payload: MasterUpdateIn):
+    tenant_id, actor_id = _context(request)
+    item = _run(services.update_master, tenant_id=tenant_id, actor_id=actor_id, entity=entity, item_id=item_id, **payload.dict())
+    return services._row(item, [field.attname for field in item._meta.concrete_fields if field.name not in {"tenant_id", "created_at", "updated_at"}])
+
+
+@router.get("/masters/{entity}/{item_id}/history")
+def master_history(request, entity: str, item_id: str):
+    membership = require_roles(request, *WRITE_ROLES, Membership.Role.AUDITOR)
+    if entity not in services.MASTER_MODELS:
+        raise HttpError(404, "Unknown master record")
+    model = services.MASTER_MODELS[entity][0]
+    record_id = _run(services._uuid, value=item_id, label="Master record")
+    if not model.objects.filter(tenant_id=membership.institution.tenant_id, id=record_id).exists():
+        raise HttpError(404, "Master record was not found")
+    return list(services.ConfigurationRevision.objects.filter(tenant_id=membership.institution.tenant_id, aggregate_type=model.__name__, aggregate_id=record_id).values("version", "change_type", "snapshot", "reason", "actor_id", "created_at"))
+
+
+@router.post("/sessions/{session_id}/transition")
+def session_transition(request, session_id: str, payload: SessionTransitionIn):
+    tenant_id, actor_id = _context(request)
+    item = _run(services.transition_session, tenant_id=tenant_id, actor_id=actor_id, session_id=session_id, **payload.dict())
+    return {"id": str(item.id), "status": item.status, "version": item.version}
+
+
+@router.post("/calendar-exceptions")
+def calendar_exception_request(request, payload: CalendarExceptionIn):
+    tenant_id, actor_id = _context(request)
+    item = _run(services.request_calendar_exception, tenant_id=tenant_id, actor_id=actor_id, **payload.dict())
+    return {"id": str(item.id), "status": item.status}
+
+
+@router.post("/calendar-exceptions/{exception_id}/decision")
+def calendar_exception_decision(request, exception_id: str, payload: CalendarDecisionIn):
+    tenant_id, actor_id = _context(request)
+    item = _run(services.decide_calendar_exception, tenant_id=tenant_id, actor_id=actor_id, exception_id=exception_id, approve=payload.approve)
+    return {"id": str(item.id), "status": item.status}

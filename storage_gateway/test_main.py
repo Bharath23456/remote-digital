@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import importlib
+import json
 import time
 from io import BytesIO
 from urllib.parse import urlencode
@@ -22,7 +23,7 @@ def signed_query(module, method, key, *, content_type="", max_bytes=0, expires=N
     ).encode()
 
 
-async def asgi_request(module, method, key, query, body=b"", headers=None):
+async def asgi_request(module, method, key, query, body=b"", headers=None, path=None):
     sent = []
     delivered = False
 
@@ -39,7 +40,7 @@ async def asgi_request(module, method, key, query, body=b"", headers=None):
     scope = {
         "type": "http",
         "method": method,
-        "path": f"/objects/{key}",
+        "path": path or f"/objects/{key}",
         "query_string": query,
         "headers": headers or [],
     }
@@ -48,8 +49,8 @@ async def asgi_request(module, method, key, query, body=b"", headers=None):
     return start["status"], dict(start["headers"]), content["body"]
 
 
-def request(module, method, key, query, body=b"", headers=None):
-    return asyncio.run(asgi_request(module, method, key, query, body, headers))
+def request(module, method, key, query, body=b"", headers=None, path=None):
+    return asyncio.run(asgi_request(module, method, key, query, body, headers, path))
 
 
 def configured_gateway(monkeypatch, tmp_path):
@@ -92,6 +93,21 @@ def test_immutable_master_cannot_be_overwritten_or_deleted(monkeypatch, tmp_path
     assert request(module, "PUT", key, query, b"second", [(b"content-type", b"image/webp")])[0] == 409
     delete_query = signed_query(module, "DELETE", key)
     assert request(module, "DELETE", key, delete_query)[0] == 409
+
+
+def test_internal_preview_masks_in_memory_without_creating_assets(monkeypatch, tmp_path):
+    module = configured_gateway(monkeypatch, tmp_path)
+    source = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(source, format="PNG")
+    module.store_object("scripts-raw/tenant/script/page-1.png", source.getvalue(), "image/png", immutable=True)
+    body = json.dumps({"source_key": "scripts-raw/tenant/script/page-1.png", "regions": [{"x": 0, "y": 0, "width": 1, "height": 1}]}).encode()
+    signature = hmac.new(module.SIGNING_KEY, body, hashlib.sha256).hexdigest().encode()
+    status, headers, masked = request(module, "POST", "", b"", body, [(b"x-storage-signature", signature)], path="/internal/mask-preview")
+    assert status == 200
+    assert headers[b"content-type"] == b"image/webp"
+    assert Image.open(BytesIO(masked)).convert("RGB").getpixel((50, 50))[0] < 40
+    assert request(module, "POST", "", b"", body, path="/internal/mask-preview")[0] == 403
+    assert not list(tmp_path.rglob("scripts-evaluation"))
 
 
 def test_expired_signature_and_ciphertext_tampering_are_rejected(monkeypatch, tmp_path):
