@@ -133,6 +133,8 @@ class EvaluatorRoleBoundaryMiddleware:
     allowed_paths = {
         "/api/health",
         "/api/v1/allocation/catalog",
+        "/api/v1/evaluator-management/face/status",
+        "/api/v1/evaluator-management/face/verify-access",
     }
     allowed_prefixes = (
         "/api/v1/auth/",

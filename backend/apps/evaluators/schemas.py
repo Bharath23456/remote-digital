@@ -62,3 +62,16 @@ class AvailabilityIn(Schema):
     ends_on: date
     daily_capacity: int
     notes: str = ""
+
+
+class FaceCaptureIn(Schema):
+    image_base64: str
+    liveness_passed: bool = False
+    face_count: int = 1
+    quality: dict[str, Any] = Field(default_factory=dict)
+    model_version: str = "opencv-sface-v1"
+    device_fingerprint: str = ""
+
+
+class FaceAccessIn(FaceCaptureIn):
+    assignment_id: str
