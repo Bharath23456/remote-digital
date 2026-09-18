@@ -20,6 +20,7 @@ from apps.evaluators import services as evaluator_services
 from apps.eligibility.api import router as eligibility_router
 from apps.identity_auth.api import router as auth_router
 from apps.receiving.api import router as receiving_router
+from apps.receiving.guided_api import router as guided_receiving_router
 from apps.receiving.models import Dispatch, ReceivingException
 from apps.repository.api import router as repository_router
 from apps.repository.models import ScriptAsset
@@ -53,6 +54,7 @@ api.add_router("/v1/eligibility", eligibility_router)
 api.add_router("/v1/auth", auth_router)
 api.add_router("/v1/security", security_router)
 api.add_router("/v1/receiving", receiving_router)
+api.add_router("/v1/receiving/guided", guided_receiving_router)
 api.add_router("/v1/custody", custody_router)
 api.add_router("/v1/repository", repository_router)
 api.add_router("/v1/anonymisation", anonymisation_router)

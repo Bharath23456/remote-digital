@@ -17,10 +17,12 @@ from apps.repository.models import ScriptAsset, UploadIntent
 from .models import IdentityLink, IdentityResolutionRequest, MaskingJob
 from .services import (
     apply_masking_job,
+    auto_mask_guided_script,
     decide_identity_resolution,
     issue_resolution_authorization,
     request_identity_resolution,
     reject_masking_job,
+    return_guided_mask_for_remasking,
     review_masking_job,
     start_masking_job,
     verify_masking_job,
@@ -63,6 +65,49 @@ class AnonymisationWorkflowTests(TestCase):
         self.assertEqual(self.script.state, Script.State.STORED)
         self.assertTrue(AuditEvent.objects.filter(action="anonymisation.masking.verified", aggregate_id=str(job.id)).exists())
         self.assertTrue(OutboxEvent.objects.filter(topic="anonymisation.masking.verified", aggregate_id=str(job.id)).exists())
+
+    @patch("apps.anonymisation.services.mask_object")
+    def test_guided_script_masks_identity_cover_without_manual_approval(self, mocked_mask):
+        mocked_mask.side_effect = lambda source_key, destinations, regions: {
+            "objects": [{"key": item["key"], "sha256": hashlib.sha256(item["key"].encode()).hexdigest(), "byte_size": 400, "mime_type": item["mime_type"]} for item in destinations]
+        }
+        self.script.packet.dispatch.intake_mode = Dispatch.IntakeMode.ON_SITE
+        self.script.packet.dispatch.save(update_fields=["intake_mode"])
+        IdentityLink.objects.create(tenant_id=self.script.tenant_id, script=self.script, identity_reference="10000000-0000-0000-0000-000000000103", linked_by_id=self.actors[0].id, stored_at=timezone.now())
+        job = auto_mask_guided_script(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script)
+        self.script.refresh_from_db()
+        self.assertEqual(self.script.state, Script.State.STORED)
+        self.assertEqual(job.status, MaskingJob.Status.VERIFIED)
+        self.assertIsNone(job.reviewed_by_id)
+        self.assertIsNone(job.verified_by_id)
+        self.assertEqual(ScriptAsset.objects.filter(script=self.script).count(), 30)
+        self.assertEqual(mocked_mask.call_args_list[0].kwargs["regions"], [{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}])
+        for call in mocked_mask.call_args_list[1:]:
+            self.assertEqual(call.kwargs["regions"], [])
+        self.assertEqual(auto_mask_guided_script(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script).id, job.id)
+
+    def test_guided_masking_requires_stored_omr_identity(self):
+        self.script.packet.dispatch.intake_mode = Dispatch.IntakeMode.ON_SITE
+        self.script.packet.dispatch.save(update_fields=["intake_mode"])
+        with self.assertRaisesMessage(Exception, "OMR identity must be stored"):
+            auto_mask_guided_script(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script)
+
+    @patch("apps.anonymisation.services.mask_object")
+    def test_guided_mask_can_return_for_remasking_before_assignment(self, mocked_mask):
+        mocked_mask.side_effect = lambda source_key, destinations, regions: {
+            "objects": [{"key": item["key"], "sha256": hashlib.sha256(item["key"].encode()).hexdigest(), "byte_size": 400, "mime_type": item["mime_type"]} for item in destinations]
+        }
+        self.script.packet.dispatch.intake_mode = Dispatch.IntakeMode.ON_SITE
+        self.script.packet.dispatch.save(update_fields=["intake_mode"])
+        IdentityLink.objects.create(tenant_id=self.script.tenant_id, script=self.script, identity_reference="10000000-0000-0000-0000-000000000104", linked_by_id=self.actors[0].id, stored_at=timezone.now())
+        job = auto_mask_guided_script(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script)
+        returned = return_guided_mask_for_remasking(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, job_id=job.id, expected_version=job.version, notes="Candidate details remain visible")
+        self.script.refresh_from_db()
+        self.assertEqual(returned.status, MaskingJob.Status.FAILED)
+        self.assertEqual(self.script.state, Script.State.SCANNED)
+        self.assertEqual(ScriptAsset.objects.filter(script=self.script, deleted_at__isnull=True).count(), 0)
+        retry = auto_mask_guided_script(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script)
+        self.assertEqual(retry.status, MaskingJob.Status.VERIFIED)
 
     def test_review_rejection_returns_script_for_remasking(self):
         job = start_masking_job(tenant_id=self.script.tenant_id, actor_id=self.actors[0].id, script=self.script, script_version=2, profile="identity-cover-v1")

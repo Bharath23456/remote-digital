@@ -181,14 +181,16 @@ def review_masking_job(*, tenant_id, actor_id, job_id, expected_version):
     return job
 
 
-def apply_masking_job(*, tenant_id, actor_id, job_id, expected_version):
+def apply_masking_job(*, tenant_id, actor_id, job_id, expected_version, automated=False):
     with transaction.atomic():
         job = MaskingJob.objects.select_for_update().select_related("script").filter(id=job_id, tenant_id=tenant_id).first()
         if not job:
             raise HttpError(404, "Masking job not found")
-        if job.status != MaskingJob.Status.REVIEWED or job.version != expected_version:
-            raise HttpError(409, "Only the current reviewed job can be applied")
-        if actor_id in (job.created_by_id, job.reviewed_by_id):
+        if job.version != expected_version or job.status != (MaskingJob.Status.DETECTED if automated else MaskingJob.Status.REVIEWED):
+            raise HttpError(409, "Masking job is not ready to be applied")
+        if automated and job.script.packet.dispatch.intake_mode == "legacy":
+            raise HttpError(403, "Automatic masking is limited to guided intake")
+        if not automated and actor_id in (job.created_by_id, job.reviewed_by_id):
             raise HttpError(409, "Mask application requires a third independent operator")
         if not job.regions.filter(is_active=True, page_number=1, category=MaskRegion.Category.IDENTITY_PAGE, x=0, y=0, width=1, height=1).exists():
             raise HttpError(409, "The first identity page must be fully masked")
@@ -197,7 +199,7 @@ def apply_masking_job(*, tenant_id, actor_id, job_id, expected_version):
         job.version += 1
         job.save(update_fields=["status", "applied_by_id", "version", "updated_at"])
         processing_version = job.version
-        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.processing", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id)})
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.processing", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "automated": automated})
     try:
         objects = []
         for page in range(1, job.script.page_count + 1):
@@ -293,6 +295,71 @@ def verify_masking_job(*, tenant_id, actor_id, job_id, expected_version, passed,
         job.save()
         transition_script(tenant_id=tenant_id, actor_id=actor_id, script_id=job.script_id, expected_version=job.script.version, to_state=Script.State.STORED, location="Encrypted digital repository", metadata={"masking_job_id": str(job.id), "verified": True})
         record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.verified", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "notes": notes})
+    return job
+
+
+def complete_automated_masking_job(*, tenant_id, actor_id, job_id, expected_version):
+    with transaction.atomic():
+        job = MaskingJob.objects.select_for_update().select_related("script__packet__dispatch").filter(id=job_id, tenant_id=tenant_id).first()
+        if not job or job.script.packet.dispatch.intake_mode == "legacy":
+            raise HttpError(404, "Guided masking job not found")
+        if job.status != MaskingJob.Status.APPLIED or job.version != expected_version:
+            raise HttpError(409, "The generated masked copy is not ready")
+        expected_pages = set(range(1, job.script.page_count + 1))
+        for kind in (ScriptAsset.Kind.MASTER, ScriptAsset.Kind.EVALUATION, ScriptAsset.Kind.THUMBNAIL):
+            pages = set(ScriptAsset.objects.filter(tenant_id=tenant_id, script=job.script, kind=kind, version=job.version - 1, deleted_at__isnull=True).values_list("page_number", flat=True))
+            if pages != expected_pages:
+                raise HttpError(409, "Masked copy is incomplete; retry after storage recovery")
+        job.status = MaskingJob.Status.VERIFIED
+        job.verified_at = timezone.now()
+        job.version += 1
+        job.save(update_fields=["status", "verified_at", "version", "updated_at"])
+        transition_script(tenant_id=tenant_id, actor_id=actor_id, script_id=job.script_id, expected_version=job.script.version, to_state=Script.State.STORED, location="Encrypted digital repository", metadata={"masking_job_id": str(job.id), "automated": True})
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.automated", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "pages": len(expected_pages)})
+    return job
+
+
+def auto_mask_guided_script(*, tenant_id, actor_id, script):
+    if script.packet.dispatch.intake_mode == "legacy":
+        raise HttpError(403, "Automatic masking is limited to guided intake")
+    if not IdentityLink.objects.filter(tenant_id=tenant_id, script=script, stored_at__isnull=False).exists():
+        raise HttpError(409, "OMR identity must be stored before masking")
+    if script.state == Script.State.STORED:
+        job = MaskingJob.objects.filter(tenant_id=tenant_id, script=script, status=MaskingJob.Status.VERIFIED).order_by("-created_at").first()
+        if job:
+            return job
+    if script.state == Script.State.SCANNED:
+        job = start_masking_job(tenant_id=tenant_id, actor_id=actor_id, script=script, script_version=script.version, profile="identity-cover-v1")
+    elif script.state in (Script.State.VALIDATED, Script.State.MASKED):
+        expected_status = MaskingJob.Status.DETECTED if script.state == Script.State.VALIDATED else MaskingJob.Status.APPLIED
+        job = MaskingJob.objects.filter(tenant_id=tenant_id, script=script, status=expected_status).order_by("-created_at").first()
+        if not job:
+            raise HttpError(409, "No resumable guided masking job was found")
+    else:
+        raise HttpError(409, "Only a scanned guided script can be masked")
+    if job.status == MaskingJob.Status.DETECTED:
+        job = apply_masking_job(tenant_id=tenant_id, actor_id=actor_id, job_id=job.id, expected_version=job.version, automated=True)
+    return complete_automated_masking_job(tenant_id=tenant_id, actor_id=actor_id, job_id=job.id, expected_version=job.version)
+
+
+def return_guided_mask_for_remasking(*, tenant_id, actor_id, job_id, expected_version, notes):
+    reason = notes.strip()
+    if len(reason) < 10:
+        raise HttpError(422, "Give a specific reason for remasking (at least 10 characters)")
+    with transaction.atomic():
+        job = MaskingJob.objects.select_for_update().select_related("script__packet__dispatch").filter(id=job_id, tenant_id=tenant_id).first()
+        if not job or job.script.packet.dispatch.intake_mode == "legacy":
+            raise HttpError(404, "Guided masking job not found")
+        if job.version != expected_version or job.status != MaskingJob.Status.VERIFIED or job.script.state != Script.State.STORED:
+            raise HttpError(409, "Only an unassigned, completed guided script can return for remasking")
+        asset_version = job.version - 2
+        ScriptAsset.objects.filter(tenant_id=tenant_id, script=job.script, version=asset_version, deleted_at__isnull=True).update(deleted_at=timezone.now(), deletion_reason=f"Returned for remasking: {reason[:500]}")
+        job.status = MaskingJob.Status.FAILED
+        job.failure_reason = reason[:1000]
+        job.version += 1
+        job.save(update_fields=["status", "failure_reason", "version", "updated_at"])
+        return_script_for_remasking(tenant_id=tenant_id, actor_id=actor_id, script_id=job.script_id, expected_version=job.script.version, job_id=job.id, reason=reason, allow_stored=True)
+        record_event(tenant_id=tenant_id, actor_id=actor_id, action="anonymisation.masking.returned_for_remasking", aggregate="MaskingJob", aggregate_id=job.id, payload={"script_id": str(job.script_id), "reason": reason})
     return job
 
 

@@ -140,7 +140,8 @@ def _user_context(user, membership, session):
         tenants.append({"id": tenant_id, "name": root.name if root else item.institution.name, "role": item.role})
     account = TenantAccount.objects.filter(root_institution__tenant_id=membership.institution.tenant_id).first()
     tenant_modules = account.enabled_modules if account else []
-    member_modules = membership.enabled_modules or tenant_modules
+    fixed_desk_roles = {Membership.Role.BUNDLE_PREPARER, Membership.Role.INTAKE_RECEIVER, Membership.Role.SCAN_OPERATOR}
+    member_modules = membership.enabled_modules if membership.role in fixed_desk_roles else membership.enabled_modules or tenant_modules
     enabled_modules = [module for module in tenant_modules if module in member_modules]
     return {
         "user": {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email},

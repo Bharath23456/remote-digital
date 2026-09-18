@@ -57,6 +57,7 @@ MIDDLEWARE = [
     "apps.identity_auth.middleware.IdentitySessionMiddleware",
     "apps.core.middleware.TenantEntitlementMiddleware",
     "apps.core.middleware.EvaluatorRoleBoundaryMiddleware",
+    "apps.core.middleware.IntakeDeskBoundaryMiddleware",
     "apps.security.middleware.DlpInspectionMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -123,6 +124,7 @@ X_FRAME_OPTIONS = "DENY"
 APPLICATION_ENCRYPTION_KEY = os.getenv("APPLICATION_ENCRYPTION_KEY", "")
 TRUST_PROXY_RISK_HEADERS = os.getenv("TRUST_PROXY_RISK_HEADERS", "false").lower() == "true"
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "")
+DEMO_MANUAL_INTAKE_ENABLED = os.getenv("DEMO_MANUAL_INTAKE_ENABLED", "false").lower() == "true"
 IDENTITY_AUTHORIZATION_KEY = os.getenv("IDENTITY_AUTHORIZATION_KEY", "local-identity-authorization-key-change-me")
 SCRIPT_STORAGE_URL = os.getenv("SCRIPT_STORAGE_URL", "")
 SCRIPT_STORAGE_INTERNAL_URL = os.getenv("SCRIPT_STORAGE_INTERNAL_URL", "http://127.0.0.1:9000")
