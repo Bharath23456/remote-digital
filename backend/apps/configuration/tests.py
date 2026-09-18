@@ -1,6 +1,7 @@
 import json
 import uuid
 
+from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import Client, TestCase
 
@@ -88,14 +89,27 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertEqual(approved.json()["status"], "approved")
 
         self.assertEqual(self.post(f"/api/v1/configuration/papers/{paper['id']}/freeze", {"version": approved.json()["version"], "note": "Must be rejected"}).status_code, 409)
-        frozen = self.authenticated_client("controller@admiezo.local").post(
+        approver_freeze = self.authenticated_client("controller@admiezo.local").post(
+            f"/api/v1/configuration/papers/{paper['id']}/freeze",
+            data=json.dumps({"version": approved.json()["version"], "note": "Must be rejected"}), content_type="application/json",
+        )
+        self.assertEqual(approver_freeze.status_code, 409)
+
+        frozen = self.authenticated_client("reviewer@admiezo.local").post(
             f"/api/v1/configuration/papers/{paper['id']}/freeze",
             data=json.dumps({"version": approved.json()["version"], "note": "Go-live configuration"}), content_type="application/json",
         )
         self.assertEqual(frozen.status_code, 200)
         self.assertEqual(frozen.json()["status"], "frozen")
         self.assertEqual(ConfigurationRevision.objects.filter(aggregate_id=paper["id"]).count(), 6)
-        self.assertTrue(AuditEvent.objects.filter(action="config.paper.frozen", aggregate_id=paper["id"]).exists())
+        stored = Paper.objects.get(id=paper["id"])
+        self.assertEqual(stored.submitted_by_id, User.objects.get(username="admin@admiezo.local").id)
+        self.assertEqual(stored.approved_by_id, User.objects.get(username="controller@admiezo.local").id)
+        self.assertEqual(stored.frozen_by_id, User.objects.get(username="reviewer@admiezo.local").id)
+        frozen_audit = AuditEvent.objects.get(action="config.paper.frozen", aggregate_id=paper["id"])
+        self.assertEqual(frozen_audit.payload["submitted_by_id"], stored.submitted_by_id)
+        self.assertEqual(frozen_audit.payload["approved_by_id"], stored.approved_by_id)
+        self.assertEqual(frozen_audit.payload["frozen_by_id"], stored.frozen_by_id)
         self.assertTrue(OutboxEvent.objects.filter(topic="config.paper.frozen", aggregate_id=paper["id"]).exists())
 
     def test_cross_tenant_related_record_is_rejected(self):

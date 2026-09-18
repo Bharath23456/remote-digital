@@ -120,9 +120,33 @@ class Command(BaseCommand):
                     "discrepancy_threshold": Decimal("15"),
                     "moderation_required": index == 0,
                     "status": Paper.Status.FROZEN if index < 3 else Paper.Status.REVIEW,
+                    "submitted_by_id": user.id,
+                    "submitted_at": timezone.now() - timedelta(days=5),
+                    "approved_by_id": operators["controller@admiezo.local"].id if index < 3 else None,
+                    "frozen_by_id": operators["reviewer@admiezo.local"].id if index < 3 else None,
                     "frozen_at": timezone.now() if index < 3 else None,
                 },
             )
+            actor_updates = []
+            if paper.status in {Paper.Status.REVIEW, Paper.Status.APPROVED, Paper.Status.FROZEN}:
+                if paper.submitted_by_id is None:
+                    paper.submitted_by_id = user.id
+                    actor_updates.append("submitted_by_id")
+                if paper.submitted_at is None:
+                    paper.submitted_at = timezone.now() - timedelta(days=5)
+                    actor_updates.append("submitted_at")
+            if paper.status in {Paper.Status.APPROVED, Paper.Status.FROZEN} and paper.approved_by_id is None:
+                paper.approved_by_id = operators["controller@admiezo.local"].id
+                actor_updates.append("approved_by_id")
+            if paper.status == Paper.Status.FROZEN:
+                if paper.frozen_by_id is None:
+                    paper.frozen_by_id = operators["reviewer@admiezo.local"].id
+                    actor_updates.append("frozen_by_id")
+                if paper.frozen_at is None:
+                    paper.frozen_at = timezone.now()
+                    actor_updates.append("frozen_at")
+            if actor_updates:
+                paper.save(update_fields=[*actor_updates, "updated_at"])
             if not paper.questions.exists():
                 for position in range(1, 6):
                     Question.objects.create(tenant_id=tenant_id, paper=paper, number=f"Q{position}", max_marks=Decimal("20"), position=position)
