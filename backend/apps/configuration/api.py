@@ -46,7 +46,13 @@ def _run(call, **kwargs):
 
 @router.get("/catalog")
 def catalog(request):
-    membership = require_roles(request, *WRITE_ROLES, Membership.Role.AUDITOR)
+    membership = require_roles(
+        request,
+        *WRITE_ROLES,
+        Membership.Role.RECEIVING_OFFICER,
+        Membership.Role.SCRIPT_RECEIVER,
+        Membership.Role.AUDITOR,
+    )
     return services.configuration_catalog(membership.institution.tenant_id)
 
 

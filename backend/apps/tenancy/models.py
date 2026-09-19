@@ -39,6 +39,9 @@ class Membership(TimeStampedModel):
         EXAM_CONTROLLER = "exam_controller", "Examination controller"
         EVALUATOR = "evaluator", "Evaluator"
         RECEIVING_OFFICER = "receiving_officer", "Receiving officer"
+        SCRIPT_RECEIVER = "script_receiver", "Script receiver"
+        SCANNER_OPERATOR = "scanner_operator", "Scanner operator"
+        CUSTODY_OFFICER = "custody_officer", "Chain custody officer"
         AUDITOR = "auditor", "Auditor"
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="admiezo_memberships")

@@ -10,7 +10,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.core.authz import membership_for, require_roles, require_step_up
+from apps.core.authz import ROLE_MODULES, allowed_modules_for_role, membership_for, require_roles, require_step_up
 from apps.core.services import record_event
 from apps.identity_auth.models import AccessSession, AuthenticationMethod, DeviceAuthorization, OidcProvider
 from apps.identity_auth.services import active_session_for_request, policy_for
@@ -168,7 +168,7 @@ def security_catalog(request):
                 "institution": item.institution.name,
                 "role": item.role,
                 "permissions": item.permissions,
-                "enabled_modules": item.enabled_modules,
+                "enabled_modules": allowed_modules_for_role(item.role, item.enabled_modules or (account.enabled_modules if account else [])),
                 "custom_fields": item.custom_fields,
                 "is_active": item.is_active,
             }
@@ -240,6 +240,10 @@ def _validate_membership_access(actor_membership, role, enabled_modules):
         raise HttpError(422, "One or more selected modules are not enabled for this university")
     if role == Membership.Role.EVALUATOR and requested != {"evaluation"}:
         raise HttpError(422, "Evaluator accounts can access only the Evaluation module")
+    scoped_modules = ROLE_MODULES.get(role)
+    if scoped_modules is not None and role != Membership.Role.EVALUATOR and requested != scoped_modules:
+        role_label = Membership.Role(role).label
+        raise HttpError(422, f"{role_label} accounts require exactly these modules: {', '.join(sorted(scoped_modules))}")
     return sorted(requested)
 
 

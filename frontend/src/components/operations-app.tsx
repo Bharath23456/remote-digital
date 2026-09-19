@@ -109,11 +109,20 @@ const viewModule: Partial<Record<ViewKey, string>> = {
   rubrics: "rubrics", evaluation: "evaluation", valuation: "valuation", assessmentControl: "assessment", liveControl: "operations",
   serviceControl: "services", security: "security", audit: "audit", tenancy: "enterprise",
 };
+const operationalRoleHome: Record<string, ViewKey> = {
+  receiving_officer: "receiving",
+  script_receiver: "receiving",
+  scanner_operator: "digitization",
+  custody_officer: "custody",
+  auditor: "audit",
+};
 
 function navigationFor(role: string, platformMode: boolean, enabledModules: string[]) {
   const allowed = (item: { key: ViewKey }) => !viewModule[item.key] || enabledModules.includes(viewModule[item.key]!);
   const entitledTenantNavigation = tenantNavigation.map((group) => ({ ...group, items: group.items.filter(allowed) })).filter((group) => group.items.length);
   if (role === "platform_admin") return platformMode ? platformNavigation : [{ label: "Platform", items: [{ key: "platformAdmin" as ViewKey, label: "Back to control plane", icon: Network }] }, ...entitledTenantNavigation];
+  const roleHome = operationalRoleHome[role];
+  if (roleHome) return entitledTenantNavigation.map((group) => ({ ...group, items: group.items.filter((item) => item.key === roleHome) })).filter((group) => group.items.length);
   if (role !== "evaluator") return entitledTenantNavigation;
   return tenantNavigation
     .map((group) => ({ ...group, items: group.items.filter((item) => evaluatorViews.has(item.key) && allowed(item)) }))
@@ -374,6 +383,10 @@ export function OperationsApp() {
         setContext(current); setOverview(emptyOverview()); setView("evaluation"); setGlobalError("");
         return;
       }
+      if (operationalRoleHome[current.role]) {
+        setContext(current); setOverview(emptyOverview()); setView(operationalRoleHome[current.role]); setGlobalError("");
+        return;
+      }
       const overviewResponse = await csrfFetch("/api/v1/operations/overview");
       if (!overviewResponse.ok) throw new Error("The operations API is unavailable");
       if (endingSession.current) return;
@@ -471,7 +484,7 @@ export function OperationsApp() {
   if (context.must_change_password) return <PasswordSetup onComplete={async () => { setChecking(true); await load(); }} onSignOut={signOut} />;
   const role = context.role;
   const visibleNavigation = navigationFor(role, platformMode, context.enabled_modules);
-  const activeView = role === "evaluator" && !evaluatorViews.has(view) ? "evaluation" : view;
+  const activeView = operationalRoleHome[role] || (role === "evaluator" && !evaluatorViews.has(view) ? "evaluation" : view);
   const isPlatformAdmin = role === "platform_admin";
   const meta = viewMeta[activeView];
   const initials = context.user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();

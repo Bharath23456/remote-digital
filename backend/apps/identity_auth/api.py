@@ -13,7 +13,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.core.authz import membership_for, require_roles
+from apps.core.authz import allowed_modules_for_role, membership_for, require_roles
 from apps.core.services import record_event
 from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Membership, TenantAccount
@@ -141,7 +141,10 @@ def _user_context(user, membership, session):
     account = TenantAccount.objects.filter(root_institution__tenant_id=membership.institution.tenant_id).first()
     tenant_modules = account.enabled_modules if account else []
     member_modules = membership.enabled_modules or tenant_modules
-    enabled_modules = [module for module in tenant_modules if module in member_modules]
+    enabled_modules = allowed_modules_for_role(
+        membership.role,
+        [module for module in tenant_modules if module in member_modules],
+    )
     return {
         "user": {"id": user.id, "name": user.get_full_name() or user.username, "email": user.email},
         "tenant": {
