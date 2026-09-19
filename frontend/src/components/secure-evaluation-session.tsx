@@ -47,7 +47,11 @@ async function availableScreens() {
   const managedWindow = window as typeof window & { getScreenDetails?: () => Promise<{ screens: unknown[] }> };
   if (!managedWindow.getScreenDetails) return { supported: false, count: null as number | null };
   try {
-    const details = await managedWindow.getScreenDetails();
+    const details = await Promise.race([
+      managedWindow.getScreenDetails(),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 5000)),
+    ]);
+    if (!details) return { supported: false, count: null as number | null };
     return { supported: true, count: details.screens.length };
   } catch {
     return { supported: true, count: null as number | null };
