@@ -21,10 +21,19 @@ from .storage import signed_object_url
 
 
 router = Router(tags=["Digital script repository"])
+INGEST_ROLES = (
+    Membership.Role.PLATFORM_ADMIN,
+    Membership.Role.UNIVERSITY_ADMIN,
+    Membership.Role.EXAM_CONTROLLER,
+    Membership.Role.RECEIVING_OFFICER,
+    Membership.Role.SCANNER_OPERATOR,
+    Membership.Role.SCAN_OPERATOR,
+    Membership.Role.OPERATIONS_SUPERVISOR,
+)
 
 
 def _require_guided_scan_script(membership, script):
-    if membership.role in (Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR) and (
+    if membership.role in (Membership.Role.SCANNER_OPERATOR, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR) and (
         script.packet.dispatch.intake_mode == "legacy" or script.packet.status not in ("received", "scanning", "complete")
     ):
         raise HttpError(403, "Intake operators can upload only scripts from received guided packets")
@@ -64,7 +73,7 @@ def repository_catalog(request, q: str = "", script_id: str | None = None, asset
 
 @router.post("/uploads")
 def issue_upload(request, payload: UploadIntentIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *INGEST_ROLES)
     if payload.kind != UploadIntent.Kind.RAW_SCAN:
         raise HttpError(403, "Master, evaluation and thumbnail copies are generated only by approved masking")
     script = Script.objects.filter(id=payload.script_id, tenant_id=membership.institution.tenant_id).first()
@@ -77,7 +86,7 @@ def issue_upload(request, payload: UploadIntentIn):
 @router.post("/manual-scan/uploads")
 @transaction.atomic
 def issue_manual_scan_upload(request, payload: ManualScanUploadIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR)
+    membership = require_roles(request, *INGEST_ROLES)
     tenant_id = membership.institution.tenant_id
     script = Script.objects.select_for_update().filter(id=payload.script_id, tenant_id=tenant_id).first()
     if not script:
@@ -114,7 +123,7 @@ def issue_manual_scan_upload(request, payload: ManualScanUploadIn):
 
 @router.get("/manual-scan/catalog")
 def manual_scan_catalog(request, page: int = 1, page_size: int = 20, q: str = "", state: str = "", date_from: date | None = None, date_to: date | None = None):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *INGEST_ROLES)
     if page < 1 or not 1 <= page_size <= 100:
         raise HttpError(422, "Page must be positive and page size must be between 1 and 100")
     uploads = UploadIntent.objects.filter(tenant_id=membership.institution.tenant_id, kind=UploadIntent.Kind.RAW_SCAN, status=UploadIntent.Status.COMPLETED)
@@ -142,8 +151,8 @@ def manual_scan_catalog(request, page: int = 1, page_size: int = 20, q: str = ""
 
 @router.post("/uploads/{intent_id}/finalize")
 def complete_upload(request, intent_id: str, payload: FinalizeUploadIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR)
-    if membership.role in (Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR):
+    membership = require_roles(request, *INGEST_ROLES)
+    if membership.role in (Membership.Role.SCANNER_OPERATOR, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR):
         scan_intent = UploadIntent.objects.filter(id=intent_id, tenant_id=membership.institution.tenant_id).select_related("script__packet__dispatch").first()
         if not scan_intent:
             raise HttpError(404, "Upload not found")
@@ -156,7 +165,7 @@ def complete_upload(request, intent_id: str, payload: FinalizeUploadIn):
 
 @router.post("/scripts/{script_id}/complete-scan")
 def complete_scan(request, script_id: str, payload: CompleteScanIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR)
+    membership = require_roles(request, *INGEST_ROLES)
     tenant_id = membership.institution.tenant_id
     script = Script.objects.filter(id=script_id, tenant_id=tenant_id).first()
     if not script:

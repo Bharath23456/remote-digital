@@ -30,6 +30,21 @@ button, input { font: inherit; } button { color: inherit; } h1, h2, h3 { font-fa
 .tenant-switch select { max-width: min(320px, 42vw); border: 0; outline: 0; background: transparent; color: var(--ink); font-family: var(--font-display), sans-serif; font-size: 14px; font-weight: 750; }
 .session-name { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .top-actions { display: flex; align-items: center; gap: 8px; }
+.language-selector { position: relative; }
+.language-trigger { display: inline-flex; height: 38px; align-items: center; gap: 7px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); padding: 0 10px; cursor: pointer; font-size: 12px; font-weight: 750; }
+.language-code { border-left: 1px solid var(--line); padding-left: 7px; color: var(--green); font-size: 10px; font-weight: 850; }
+.language-trigger:hover { background: var(--subtle); }
+.language-trigger:focus-visible, .language-menu button:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.language-trigger svg:first-child { width: 17px; height: 17px; }
+.language-trigger svg:last-child { width: 13px; height: 13px; color: var(--muted); transition: transform .15s ease; }
+.language-trigger svg:last-child.open { transform: rotate(180deg); }
+.language-menu { position: absolute; z-index: 75; top: 44px; right: 0; display: grid; width: 184px; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: 0 18px 46px rgba(18,34,27,.2); }
+.language-menu button { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 10px; border: 0; border-bottom: 1px solid var(--line); background: var(--surface); padding: 0 12px; cursor: pointer; text-align: left; }
+.language-menu button:last-child { border-bottom: 0; }
+.language-menu button:hover, .language-menu button[aria-checked="true"] { background: var(--subtle); }
+.language-menu button > span { display: flex; align-items: center; gap: 9px; }
+.language-menu button strong { width: 20px; color: var(--green); font-size: 10px; }
+.language-menu button svg { width: 15px; height: 15px; color: var(--green); }
 .icon-button { display: grid; width: 38px; height: 38px; flex: none; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }
 .icon-button:hover { border-color: var(--line-strong); background: var(--subtle); } .icon-button svg { width: 17px; height: 17px; }
 .avatar { display: grid; width: 36px; height: 36px; margin-left: 6px; place-items: center; border: 0; border-radius: 50%; background: var(--ink); color: white; cursor: pointer; font-family: var(--font-display), sans-serif; font-size: 12px; font-weight: 800; }
@@ -217,6 +232,25 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .check-field input { width: 16px; height: 16px; accent-color: var(--green); }
 .check-field span { margin: 0; }
 .modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 9px; border-top: 1px solid var(--line); padding: 14px 20px; }
+.localized-file-field { position: relative; min-height: 92px; }
+.localized-file-input { height: 64px; opacity: 0; cursor: pointer; }
+.localized-file-field::after { position: absolute; right: 0; bottom: 0; left: 0; display: flex; min-height: 64px; align-items: center; border: 1px dashed var(--line); border-radius: 6px; padding: 0 14px; background: white; color: var(--ink); content: attr(data-file-label); pointer-events: none; }
+.localized-date-input { cursor: pointer; }
+.localized-calendar { position: fixed; z-index: 300; width: 322px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: white; box-shadow: 0 18px 50px rgba(18, 34, 27, .24); color: var(--ink); }
+.localized-calendar-header, .localized-calendar-footer, .localized-calendar-time { display: flex; align-items: center; gap: 8px; }
+.localized-calendar-header { justify-content: space-between; margin-bottom: 8px; }
+.localized-calendar-header button, .localized-calendar-grid button, .localized-calendar-footer button { border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
+.localized-calendar-header button { width: 34px; height: 34px; font-size: 24px; }
+.localized-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; text-align: center; }
+.localized-calendar-grid > * { display: grid; min-height: 34px; place-items: center; }
+.localized-calendar-grid .weekday { color: var(--muted); font-size: 12px; font-weight: 700; }
+.localized-calendar-grid button:hover { background: var(--surface); }
+.localized-calendar-grid button.selected { background: var(--green); color: white; font-weight: 700; }
+.localized-calendar-time { justify-content: center; margin-top: 10px; }
+.localized-calendar-time select { min-height: 38px; border: 1px solid var(--line); border-radius: 5px; padding: 0 10px; background: white; }
+.localized-calendar-footer { justify-content: flex-end; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+.localized-calendar-footer button { min-height: 36px; padding: 0 10px; color: var(--green); font-weight: 700; }
+.localized-calendar-footer button.apply { background: var(--green); color: white; }
 .impact-warning { display: flex; align-items: center; gap: 10px; margin: 16px 20px 0; border-left: 3px solid var(--gold); background: var(--gold-soft); padding: 10px 12px; color: var(--gold); }
 .impact-warning svg { width: 18px; flex: none; }
 .impact-warning div { display: grid; gap: 2px; }

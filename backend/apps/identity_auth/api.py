@@ -13,7 +13,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.core.authz import membership_for, require_roles
+from apps.core.authz import allowed_modules_for_role, membership_for, require_roles
 from apps.core.services import record_event
 from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Membership, TenantAccount
@@ -140,9 +140,11 @@ def _user_context(user, membership, session):
         tenants.append({"id": tenant_id, "name": root.name if root else item.institution.name, "role": item.role})
     account = TenantAccount.objects.filter(root_institution__tenant_id=membership.institution.tenant_id).first()
     tenant_modules = account.enabled_modules if account else []
-    fixed_desk_roles = {Membership.Role.BUNDLE_PREPARER, Membership.Role.INTAKE_RECEIVER, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR}
-    member_modules = membership.enabled_modules if membership.role in fixed_desk_roles else membership.enabled_modules or tenant_modules
-    enabled_modules = [module for module in tenant_modules if module in member_modules]
+    member_modules = membership.enabled_modules or tenant_modules
+    enabled_modules = allowed_modules_for_role(
+        membership.role,
+        [module for module in tenant_modules if module in member_modules],
+    )
     security_policy = policy_for(membership.institution.tenant_id)
     ai_provider = {"provider": "admiezo_ai", "configured": False, "valid": False, "available": False, "message": "AI evaluation is disabled"}
     if security_policy.ai_evaluation_mode != SecurityPolicy.AIEvaluationMode.DISABLED:

@@ -2,6 +2,18 @@
 
 ADMIEZO is a multi-university answer-script evaluation operations platform. It runs a Next.js 16 frontend, a Django 5/Django Ninja evaluation core, an isolated Django identity service, an encrypted storage gateway, PostgreSQL, and a transactional outbox worker.
 
+## Operational RBAC
+
+Platform and university administrators can create users and assign operational roles from **Access governance → User access**. Operational roles have fixed least-privilege module access, enforced by both the UI and API:
+
+| Role | Module | Main responsibility |
+| --- | --- | --- |
+| Script receiver | Receiving | Receive dispatches, packets and bundles; reconcile receiving exceptions |
+| Scanner operator | Digitization | Run scanner batches, scan processing, manual uploads and integrity checks |
+| Chain custody officer | Chain of custody | Register scripts, scan barcodes, reconcile packets and control transfers |
+
+Role and module assignment is administrator-only. Do not put administrator or temporary passwords in source files. After pulling changes, run `docker compose up --build`; Django applies the role migration during backend startup. Sign in at `http://localhost:3000`, open **Access governance**, and create the operational users there.
+
 ## Implemented modules
 
 - 01 Digital Evaluation Administration and Configuration

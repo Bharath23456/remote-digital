@@ -4,7 +4,7 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.configuration.models import Paper
-from apps.core.authz import membership_for, require_roles
+from apps.core.authz import require_roles
 from apps.core.services import record_event
 from apps.tenancy.custom_fields import persist_custom_values, validate_custom_values
 from apps.tenancy.models import Membership
@@ -15,11 +15,22 @@ from .services import close_dispatch, confirm_receipt, create_dispatch, detect_t
 
 
 router = Router(tags=["Physical answer script receiving"])
+RECEIVING_ROLES = (
+    Membership.Role.PLATFORM_ADMIN,
+    Membership.Role.UNIVERSITY_ADMIN,
+    Membership.Role.EXAM_CONTROLLER,
+    Membership.Role.RECEIVING_OFFICER,
+    Membership.Role.SCRIPT_RECEIVER,
+    Membership.Role.BUNDLE_PREPARER,
+    Membership.Role.INTAKE_RECEIVER,
+    Membership.Role.OPERATIONS_SUPERVISOR,
+)
+RECEIVING_READ_ROLES = RECEIVING_ROLES + (Membership.Role.CUSTODY_OFFICER,)
 
 
 @router.get("/catalog")
 def receiving_catalog(request):
-    tenant_id = membership_for(request).institution.tenant_id
+    tenant_id = require_roles(request, *RECEIVING_READ_ROLES).institution.tenant_id
     dispatches = Dispatch.objects.filter(tenant_id=tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).select_related("paper").order_by("-created_at")
     packets = Packet.objects.filter(tenant_id=tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("dispatch").order_by("-created_at")
     bundles = Bundle.objects.filter(tenant_id=tenant_id, packet__dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("packet").order_by("-created_at")
@@ -36,7 +47,7 @@ def receiving_catalog(request):
 
 @router.post("/dispatches")
 def register_dispatch(request, payload: DispatchCreateIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     tenant_id = membership.institution.tenant_id
     custom_fields = validate_custom_values(tenant_id=tenant_id, form_key="dispatch", values=payload.custom_fields)
     paper = Paper.objects.filter(id=payload.paper_id, tenant_id=tenant_id).first()
@@ -56,7 +67,7 @@ def dispatch_verify(request, dispatch_id: str, payload: DispatchVerifyIn):
 
 @router.post("/dispatches/{dispatch_id}/packets")
 def register_packet(request, dispatch_id: str, payload: PacketCreateIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     dispatch = Dispatch.objects.filter(id=dispatch_id, tenant_id=membership.institution.tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
     if not dispatch:
         raise HttpError(404, "Dispatch not found")
@@ -73,14 +84,14 @@ def register_packet(request, dispatch_id: str, payload: PacketCreateIn):
 
 @router.post("/packets/{packet_id}/receive")
 def packet_receive(request, packet_id: str, payload: PacketReceiveIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     packet = receive_packet(tenant_id=membership.institution.tenant_id, actor=request.auth, packet_id=packet_id, version=payload.version, received_scripts=payload.received_scripts, condition=payload.condition, handed_over_by=payload.handed_over_by)
     return {"id": str(packet.id), "status": packet.status, "version": packet.version}
 
 
 @router.post("/packets/{packet_id}/bundles")
 def register_bundle(request, packet_id: str, payload: BundleCreateIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).first()
     if not packet:
         raise HttpError(404, "Packet not found")
@@ -95,21 +106,21 @@ def register_bundle(request, packet_id: str, payload: BundleCreateIn):
 
 @router.post("/bundles/{bundle_id}/receive")
 def bundle_receive(request, bundle_id: str, payload: BundleReceiveIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     bundle = receive_bundle(tenant_id=membership.institution.tenant_id, actor=request.auth, bundle_id=bundle_id, version=payload.version, received_scripts=payload.received_scripts, condition=payload.condition)
     return {"id": str(bundle.id), "status": bundle.status, "version": bundle.version}
 
 
 @router.post("/dispatches/{dispatch_id}/reconcile")
 def dispatch_reconcile(request, dispatch_id: str, payload: VersionIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     dispatch = reconcile_dispatch(tenant_id=membership.institution.tenant_id, actor=request.auth, dispatch_id=dispatch_id, version=payload.version)
     return {"id": str(dispatch.id), "status": dispatch.status, "version": dispatch.version, "received_packets": dispatch.received_packets, "received_scripts": dispatch.received_scripts}
 
 
 @router.post("/dispatches/{dispatch_id}/confirm")
 def dispatch_confirm(request, dispatch_id: str, payload: ConfirmationIn):
-    membership = membership_for(request)
+    membership = require_roles(request, *RECEIVING_ROLES)
     dispatch = Dispatch.objects.filter(id=dispatch_id, tenant_id=membership.institution.tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
     if not dispatch:
         raise HttpError(404, "Dispatch not found")
@@ -126,7 +137,7 @@ def dispatch_close(request, dispatch_id: str, payload: VersionIn):
 
 @router.post("/exceptions")
 def create_exception(request, payload: ExceptionCreateIn):
-    membership = membership_for(request)
+    membership = require_roles(request, *RECEIVING_ROLES)
     tenant_id = membership.institution.tenant_id
     dispatch = Dispatch.objects.filter(id=payload.dispatch_id, tenant_id=tenant_id).first()
     packet = Packet.objects.filter(id=payload.packet_id, tenant_id=tenant_id).first() if payload.packet_id else None
@@ -162,7 +173,7 @@ def review_exception(request, exception_id: str, payload: ExceptionReviewIn):
 
 @router.post("/exceptions/{exception_id}/reconcile")
 def reconcile_exception(request, exception_id: str, payload: ExceptionReconcileIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     with transaction.atomic():
         item = ReceivingException.objects.select_for_update().filter(id=exception_id, tenant_id=membership.institution.tenant_id).first()
         if not item or item.version != payload.version:
@@ -198,5 +209,5 @@ def clear_exception(request, exception_id: str, payload: ExceptionClearIn):
 
 @router.post("/alerts/detect-delays")
 def delay_detection(request):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *RECEIVING_ROLES)
     return {"alerts_created": detect_transit_delays(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id)}
