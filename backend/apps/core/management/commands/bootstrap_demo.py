@@ -64,7 +64,14 @@ class Command(BaseCommand):
             hostname=f"{account.slug}.{settings.TENANT_BASE_DOMAIN}",
             defaults={"tenant_account": account, "kind": TenantDomain.Kind.MANAGED, "status": TenantDomain.Status.ACTIVE, "is_primary": True, "verified_at": timezone.now()},
         )
-        Membership.objects.get_or_create(user=user, institution=institution, defaults={"role": Membership.Role.UNIVERSITY_ADMIN, "permissions": ["*"]})
+        admin_membership, _ = Membership.objects.get_or_create(
+            user=user,
+            institution=institution,
+            defaults={"role": Membership.Role.UNIVERSITY_ADMIN, "permissions": ["*"], "enabled_modules": account.enabled_modules},
+        )
+        if admin_membership.enabled_modules != account.enabled_modules:
+            admin_membership.enabled_modules = list(account.enabled_modules)
+            admin_membership.save(update_fields=["enabled_modules", "updated_at"])
         operators = {}
         for account_email, first_name, last_name, role in [
             ("platform@admiezo.local", "Platform", "Administrator", Membership.Role.PLATFORM_ADMIN),
@@ -77,7 +84,14 @@ class Command(BaseCommand):
             if operator_created or not operator.has_usable_password():
                 operator.set_password(password)
                 operator.save()
-            Membership.objects.get_or_create(user=operator, institution=institution, defaults={"role": role})
+            operator_membership, _ = Membership.objects.get_or_create(
+                user=operator,
+                institution=institution,
+                defaults={"role": role, "enabled_modules": account.enabled_modules if role == Membership.Role.PLATFORM_ADMIN else []},
+            )
+            if role == Membership.Role.PLATFORM_ADMIN and operator_membership.enabled_modules != account.enabled_modules:
+                operator_membership.enabled_modules = list(account.enabled_modules)
+                operator_membership.save(update_fields=["enabled_modules", "updated_at"])
             operators[account_email] = operator
         year, _ = AcademicYear.objects.get_or_create(tenant_id=tenant_id, label="2026-27", defaults={"starts_on": date(2026, 7, 1), "ends_on": date(2027, 6, 30)})
         term, _ = Term.objects.get_or_create(tenant_id=tenant_id, academic_year=year, name="Odd semester", defaults={"sequence": 1, "starts_on": year.starts_on, "ends_on": year.ends_on})

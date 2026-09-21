@@ -317,6 +317,7 @@ def system_ai_evaluator(*, tenant_id):
 def synchronize_ai_governance(*, tenant_id, mode):
     enabled = mode != SecurityPolicy.AIEvaluationMode.DISABLED
     account = TenantAccount.objects.select_for_update().filter(root_institution__tenant_id=tenant_id).first()
+    tenant_modules = set()
     if account:
         modules = set(account.enabled_modules)
         before = set(modules)
@@ -328,10 +329,14 @@ def synchronize_ai_governance(*, tenant_id, mode):
             account.enabled_modules = sorted(modules)
             account.version += 1
             account.save(update_fields=["enabled_modules", "version", "updated_at"])
+        tenant_modules = modules
     memberships = Membership.objects.select_for_update().filter(institution__tenant_id=tenant_id)
     for membership in memberships:
-        modules = set(membership.enabled_modules)
-        before = set(modules)
+        before = set(membership.enabled_modules)
+        if membership.role in {Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN}:
+            modules = set(tenant_modules)
+        else:
+            modules = set(before)
         if enabled and membership.role in {Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN}:
             modules.add("ai_evaluation")
         elif not enabled:

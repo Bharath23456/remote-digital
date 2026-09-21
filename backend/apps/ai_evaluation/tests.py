@@ -189,7 +189,9 @@ class AIEvaluationTests(TestCase):
         admin_membership = Membership.objects.get(user=self.actor, institution__tenant_id=tenant_id)
         account.enabled_modules = [item for item in account.enabled_modules if item != "ai_evaluation"]
         account.save(update_fields=["enabled_modules"])
-        admin_membership.enabled_modules = [item for item in admin_membership.enabled_modules if item != "ai_evaluation"]
+        # A legacy bootstrap left privileged memberships empty; the first AI sync
+        # then turned that into an AI-only entitlement and hid every other module.
+        admin_membership.enabled_modules = []
         admin_membership.save(update_fields=["enabled_modules"])
 
         synchronize_ai_governance(tenant_id=tenant_id, mode=SecurityPolicy.AIEvaluationMode.AUTONOMOUS)
@@ -198,6 +200,7 @@ class AIEvaluationTests(TestCase):
         system_evaluator = Evaluator.objects.get(tenant_id=tenant_id, evaluator_code="AI-ADMIEZO")
         self.assertIn("ai_evaluation", account.enabled_modules)
         self.assertIn("ai_evaluation", admin_membership.enabled_modules)
+        self.assertEqual(set(admin_membership.enabled_modules), set(account.enabled_modules))
         self.assertTrue(system_evaluator.is_system_ai)
         self.assertEqual(system_evaluator.status, Evaluator.Status.ACTIVE)
 
@@ -207,6 +210,7 @@ class AIEvaluationTests(TestCase):
         system_evaluator.refresh_from_db()
         self.assertNotIn("ai_evaluation", account.enabled_modules)
         self.assertNotIn("ai_evaluation", admin_membership.enabled_modules)
+        self.assertEqual(set(admin_membership.enabled_modules), set(account.enabled_modules))
         self.assertEqual(system_evaluator.status, Evaluator.Status.INACTIVE)
 
     def test_ai_requests_are_blocked_until_the_backend_key_is_configured(self):
