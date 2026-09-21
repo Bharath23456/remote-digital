@@ -63,6 +63,18 @@ class TenantDomainMiddleware:
 class TenantEntitlementMiddleware:
     """Enforce purchased module boundaries at the API edge."""
 
+    evaluator_evaluation_paths = {
+        "/api/v1/allocation/catalog",
+        "/api/v1/evaluator-management/face/status",
+        "/api/v1/evaluator-management/face/verify-access",
+    }
+    evaluator_evaluation_prefixes = (
+        "/api/v1/allocation/assignments/",
+        "/api/v1/assignment-governance/assignments/",
+        "/api/v1/phase4/remote-security/",
+        "/api/v1/valuation/evaluations/",
+    )
+
     module_prefixes = (
         ("/api/v1/configuration/", "configuration"),
         ("/api/v1/evaluator-management", "evaluators"),
@@ -108,14 +120,19 @@ class TenantEntitlementMiddleware:
             module = self._module_for(request)
             if module:
                 active_tenant_id = request.session.get("active_tenant_id")
-                account = TenantAccount.objects.filter(root_institution__tenant_id=active_tenant_id).only("enabled_modules").first()
-                if account and module not in account.enabled_modules:
-                    return JsonResponse({"detail": "This module is not enabled for the university", "code": "module_not_enabled"}, status=403)
                 membership = Membership.objects.filter(
                     user=request.user,
                     institution__tenant_id=active_tenant_id,
                     is_active=True,
-                ).only("enabled_modules").first()
+                ).only("role", "enabled_modules").first()
+                if membership and membership.role == Membership.Role.EVALUATOR and (
+                    request.path in self.evaluator_evaluation_paths
+                    or request.path.startswith(self.evaluator_evaluation_prefixes)
+                ):
+                    module = "evaluation"
+                account = TenantAccount.objects.filter(root_institution__tenant_id=active_tenant_id).only("enabled_modules").first()
+                if account and module not in account.enabled_modules:
+                    return JsonResponse({"detail": "This module is not enabled for the university", "code": "module_not_enabled"}, status=403)
                 if membership and membership.enabled_modules and module not in membership.enabled_modules:
                     return JsonResponse({"detail": "Your administrator has not granted access to this module", "code": "module_access_denied"}, status=403)
         return self.get_response(request)
@@ -219,6 +236,15 @@ class IntakeDeskBoundaryMiddleware:
             ("GET", "/api/v1/receiving/guided/catalog"),
             ("POST", "/api/v1/repository/manual-scan/uploads"),
         },
+        Membership.Role.OPERATIONS_SUPERVISOR: {
+            ("GET", "/api/v1/receiving/guided/catalog"),
+            ("GET", "/api/v1/receiving/guided/papers"),
+            ("POST", "/api/v1/receiving/guided/bundles"),
+            ("POST", "/api/v1/receiving/guided/bundles/start"),
+            ("POST", "/api/v1/receiving/guided/bundles/receive"),
+            ("POST", "/api/v1/receiving/guided/packets/receive"),
+            ("POST", "/api/v1/repository/manual-scan/uploads"),
+        },
     }
     scan_patterns = (
         re.compile(r"/api/v1/receiving/guided/packets/[^/]+/recognize"),
@@ -239,11 +265,11 @@ class IntakeDeskBoundaryMiddleware:
             if membership and membership.role in self.desk_paths:
                 route = (request.method, request.path)
                 allowed = request.path.startswith("/api/v1/auth/") or route in self.desk_paths[membership.role]
-                if request.method == "GET" and membership.role == Membership.Role.INTAKE_RECEIVER:
+                if request.method == "GET" and membership.role in (Membership.Role.INTAKE_RECEIVER, Membership.Role.OPERATIONS_SUPERVISOR):
                     allowed = allowed or bool(self.receiver_lookup.fullmatch(request.path))
-                if request.method == "GET" and membership.role == Membership.Role.SCAN_OPERATOR:
+                if request.method == "GET" and membership.role in (Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR):
                     allowed = allowed or bool(self.scanner_lookup.fullmatch(request.path))
-                if membership.role == Membership.Role.SCAN_OPERATOR and request.method == "POST":
+                if membership.role in (Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR) and request.method == "POST":
                     allowed = allowed or any(pattern.fullmatch(request.path) for pattern in self.scan_patterns)
                 if not allowed:
                     return JsonResponse({"detail": "This intake desk cannot access that operation"}, status=403)

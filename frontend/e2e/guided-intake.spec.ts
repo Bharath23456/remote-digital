@@ -130,10 +130,47 @@ test("bundle, packet and script move through the three desks", async ({ page }) 
   await navigate(page, "Digitization");
   await page.getByPlaceholder("Scan or type packet barcode").fill("PKT-TEST-002");
   await page.getByRole("button", { name: "Open packet" }).click();
-  await page.locator('input[type="file"]').setInputFiles({ name: "page-1.png", mimeType: "image/png", buffer: Buffer.from("test-image") });
+  await page.getByLabel("Front page").setInputFiles({ name: "page-1.png", mimeType: "image/png", buffer: Buffer.from("test-image") });
   await page.getByRole("button", { name: "Upload script" }).click();
   await expect(page.getByText("AS-OPAQUE-002 - 1 pages stored and identity cover masked.")).toBeVisible();
   await expect(page.getByText("1/1 scripts scanned")).toBeVisible();
+});
+
+test("unreadable cover offers demo-only manual QR and USN entry", async ({ page }) => {
+  await mockDesk(page, "scan_operator");
+  await page.route("**/api/v1/receiving/guided/lookup/packets/PKT-2026-001", (route) => route.fulfill({ json: {
+    id: "packet-1", barcode: "PKT-2026-001", subject: "CS402-A", status: "scanning", expected_scripts: 2,
+    scanned_scripts: 1, missing_count: 1, missing_references: ["A1B2C3D4E5F6"], bundle: "BND-2026-001", manual_recognition_enabled: true,
+  } }));
+  let attempts = 0;
+  await page.route("**/api/v1/receiving/guided/packets/packet-1/recognize", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.fulfill({ status: 422, json: { detail: "USN has an unfilled or ambiguous bubble" } });
+      return;
+    }
+    const body = route.request().postData() || "";
+    expect(body).toContain("QR-TEST-002");
+    expect(body).toContain("4UB22CS032");
+    await route.fulfill({ json: { script_id: "script-2", script_code: "AS-OPAQUE-002", version: 1, subject: "CS402-A", identity_linked: true } });
+  });
+  await page.route("**/api/v1/repository/manual-scan/uploads", (route) => route.fulfill({ json: { id: "upload-1", version: 1, upload_url: "/api/v1/test-upload", headers: {} } }));
+  await page.route("**/api/v1/test-upload", (route) => route.fulfill({ status: 200, body: "" }));
+  await page.route("**/api/v1/repository/uploads/upload-1/finalize", (route) => route.fulfill({ json: { status: "completed" } }));
+  await page.route("**/api/v1/repository/scripts/script-2/complete-scan", (route) => route.fulfill({ json: { status: "scanned" } }));
+  await page.route("**/api/v1/anonymisation/scripts/script-2/auto-mask", (route) => route.fulfill({ json: { status: "masked" } }));
+
+  await page.getByPlaceholder("Scan or type packet barcode").fill("PKT-2026-001");
+  await page.getByRole("button", { name: "Open packet" }).click();
+  await page.getByLabel("Front page").setInputFiles({ name: "page-1.png", mimeType: "image/png", buffer: Buffer.from("test-image") });
+  await page.getByRole("button", { name: "Upload script" }).click();
+  await expect(page.getByLabel("Booklet QR code")).toBeVisible();
+  await page.getByLabel("Booklet QR code").fill("QR-TEST-002");
+  await page.getByLabel("USN from front page").fill("4UB22CS032");
+  await page.getByRole("button", { name: "Confirm details and upload" }).click();
+  await expect(page.getByText("AS-OPAQUE-002 - 1 pages stored and identity cover masked.")).toBeVisible();
+  await expect(page.getByLabel("USN from front page")).toHaveCount(0);
+  expect(attempts).toBe(2);
 });
 
 for (const desk of [

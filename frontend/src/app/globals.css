@@ -176,6 +176,13 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .expertise-list button { display: inline-flex; height: 25px; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--gold-soft); color: var(--gold); padding: 0 7px; cursor: pointer; font-size: 10px; font-weight: 800; }
 .expertise-list button.verified { background: var(--green-soft); color: var(--green); }
 .expertise-list button svg { width: 12px; height: 12px; }
+.expertise-current { display: grid; gap: 0; margin: 14px 0 10px; }
+.expertise-current > strong { padding: 0 0 8px; font-size: 12px; }
+.expertise-current > span { color: var(--muted); font-size: 12px; }
+.expertise-current-row { display: flex; min-height: 43px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.expertise-current-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.expertise-current-row .secondary-button { min-height: 30px; padding: 4px 9px; font-size: 11px; }
+.expertise-current-row .secondary-button svg { width: 14px; height: 14px; }
 .verification-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .verification-grid .check-field { margin-top: 4px; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; overflow-y: auto; background: rgba(13, 27, 21, .42); padding: 28px; }
@@ -193,6 +200,18 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .field select[multiple] { height: 92px; padding: 7px 10px; }
 .field select:focus { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
 .full-field { grid-column: 1 / -1; }
+.subject-picker { min-width: 0; margin: 14px 0 0; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+.subject-picker legend { padding: 0 6px; font-size: 12px; font-weight: 750; }
+.subject-picker > input[type="search"] { width: 100%; height: 40px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 0 10px; }
+.subject-picker-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 190px; overflow-y: auto; gap: 0 12px; margin-top: 8px; }
+.subject-picker-options label { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 7px 3px; font-size: 12px; }
+.subject-picker-options input { accent-color: var(--green); }
+.subject-picker-options span { overflow-wrap: anywhere; }
+.subject-picker-empty, .subject-picker > small { color: var(--muted); font-size: 11px; }
+.allocation-blockers { color: #a13d38; font-size: 12px; line-height: 1.4; }
+.search-field { display: flex; width: min(440px, 100%); height: 43px; align-items: center; gap: 9px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 0 12px; background: white; }
+.search-field svg { width: 17px; height: 17px; flex: none; color: var(--muted); }
+.search-field input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); }
 .check-field { display: flex; min-height: 43px; align-items: center; gap: 9px; margin-top: 31px; border: 1px solid var(--line); border-radius: 6px; padding: 0 11px; }
 .check-field input { width: 16px; height: 16px; accent-color: var(--green); }
 .check-field span { margin: 0; }
@@ -685,6 +704,9 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .guided-scan-form, .guided-upload-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 16px; padding: 4px 20px 22px; }
 .guided-packet-scan { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
 .guided-upload-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.guided-upload-form.manual-recognition { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.guided-upload-form.manual-recognition .field:nth-child(-n+2) { grid-column: 1 / -1; }
+.guided-upload-form.manual-recognition .primary-button { grid-column: 1 / -1; justify-self: end; }
 .guided-scan-form .primary-button, .guided-upload-form .primary-button { margin-bottom: 0; min-height: 43px; }
 @media (max-width: 900px) { .guided-upload-form, .guided-packet-scan { grid-template-columns: 1fr 1fr; } .guided-upload-form .primary-button, .guided-packet-scan .primary-button { grid-column: 1 / -1; } }
 @media (max-width: 600px) { .guided-scan-form, .guided-upload-form, .guided-packet-scan { grid-template-columns: 1fr; } .guided-upload-form .primary-button, .guided-packet-scan .primary-button { grid-column: auto; } }

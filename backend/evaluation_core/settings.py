@@ -10,7 +10,6 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-local-development-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
 DEMO_PASSWORD_ONLY_LOGIN = (
     DEBUG
-    and os.getenv("LOAD_DEMO_DATA", "false").lower() == "true"
     and os.getenv("DEMO_PASSWORD_ONLY_LOGIN", "false").lower() == "true"
 )
 DEMO_SKIP_EVALUATOR_FACE_VERIFICATION = DEBUG and os.getenv("DEMO_SKIP_EVALUATOR_FACE_VERIFICATION", "false").lower() == "true"
@@ -130,6 +129,7 @@ EVALUATOR_FACE_VERIFICATION_TTL_MINUTES = int(os.getenv("EVALUATOR_FACE_VERIFICA
 TRUST_PROXY_RISK_HEADERS = os.getenv("TRUST_PROXY_RISK_HEADERS", "false").lower() == "true"
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "")
 DEMO_MANUAL_INTAKE_ENABLED = os.getenv("DEMO_MANUAL_INTAKE_ENABLED", "false").lower() == "true"
+DEMO_MANUAL_RECOGNITION_ENABLED = os.getenv("DEMO_MANUAL_RECOGNITION_ENABLED", "false").lower() == "true"
 IDENTITY_AUTHORIZATION_KEY = os.getenv("IDENTITY_AUTHORIZATION_KEY", "local-identity-authorization-key-change-me")
 SCRIPT_STORAGE_URL = os.getenv("SCRIPT_STORAGE_URL", "")
 SCRIPT_STORAGE_INTERNAL_URL = os.getenv("SCRIPT_STORAGE_INTERNAL_URL", "http://127.0.0.1:9000")
