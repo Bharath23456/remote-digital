@@ -1,0 +1,65 @@
+{
+  "languageSelector": { "label": "Select language" },
+  "navigation": {
+    "groups": { "operations": "Operations", "administration": "Administration", "evaluation": "Evaluation", "governance": "Governance", "platform": "Platform" },
+    "items": {
+      "dashboard": "Command centre", "receiving": "Script receiving", "custody": "Chain of custody", "digitization": "Digitization", "liveControl": "Live operations",
+      "configuration": "Exam configuration", "evaluators": "Evaluator master", "allocation": "Allocation engine", "assignmentGovernance": "Assignment control", "serviceControl": "Results & services",
+      "anonymisation": "Anonymization", "repository": "Script repository", "rubrics": "Marking schemes", "evaluation": "Evaluation desk", "valuation": "Valuation review", "assessmentControl": "Assessment control",
+      "security": "Access governance", "tenancy": "Enterprise settings", "audit": "Audit trail", "platformControl": "Platform operations", "platformAdmin": "Universities", "backToControlPlane": "Back to control plane"
+    }
+  },
+  "shell": {
+    "brandLabel": "Evaluation cloud",
+    "navigation": "Primary navigation",
+    "healthy": "Evaluation core healthy",
+    "activeUniversity": "Active university",
+    "noSession": "No active examination session",
+    "openNavigation": "Open navigation",
+    "closeNavigation": "Close navigation",
+    "signOut": "Sign out",
+    "accountSettings": "Account settings"
+  },
+  "actions": { "refresh": "Refresh", "refreshing": "Refreshing..." },
+  "views": {
+    "platformAdmin": { "eyebrow": "Super Admin", "title": "University management", "description": "Provision and govern every isolated ADMIEZO university tenant." },
+    "dashboard": { "eyebrow": "Live operations", "title": "Evaluation operations", "description": "Script movement, allocation and evaluation readiness." },
+    "configuration": { "title": "Exam configuration", "description": "Versioned paper rules, marks and readiness state." },
+    "evaluators": { "title": "Evaluator master", "description": "Verified profiles, capacity and lifecycle controls." },
+    "receiving": { "title": "Script receiving", "description": "Dispatch intake, counts, reconciliation and exceptions." },
+    "custody": { "title": "Chain of custody", "description": "Opaque script identities and controlled movement history." },
+    "digitization": { "title": "Digitization control", "description": "Scanner fleet, image quality processing and signed integrity evidence." },
+    "repository": { "title": "Script repository", "description": "Immutable asset metadata, integrity and retention." },
+    "anonymisation": { "title": "Candidate anonymization", "description": "PII isolation, irreversible masking and dual-authorized resolution." },
+    "allocation": { "title": "Allocation engine", "description": "Blind assignments constrained by capacity and valuation round." },
+    "rubrics": { "title": "Marking schemes", "description": "Versioned criteria, guidance, approvals, freeze and clarifications." },
+    "assignmentGovernance": { "title": "Assignment governance", "description": "Blind access, concurrent locks, expiry and controlled workflow routing." },
+    "evaluation": { "title": "Evaluation desk", "description": "Secure script review, digital annotations and question-wise marking." },
+    "valuation": { "title": "Valuation review", "description": "Independent round comparison, discrepancy reconciliation and final mark control." },
+    "assessmentControl": { "title": "Assessment control", "description": "Moderation, revaluation and signed completion workflows." },
+    "liveControl": { "title": "Live operations", "description": "Secure remote evaluation, monitoring, recovery and centre operations." },
+    "serviceControl": { "title": "Results & student services", "description": "Remuneration and protected student script services." },
+    "platformControl": { "title": "Platform operations", "description": "Forensics, integrations, interface languages and recovery drills." },
+    "security": { "title": "Access governance", "description": "Authentication sessions, least privilege and protected operations." },
+    "tenancy": { "title": "Enterprise settings", "description": "University hierarchy, institution policies and isolated records." },
+    "audit": { "title": "Audit trail", "description": "Operational evidence emitted beside every domain write." }
+  },
+  "dashboard": {
+    "metrics": {
+      "expected": "Scripts expected",
+      "expectedDetail": "Across active dispatches",
+      "received": "Scripts received",
+      "receivedDetail": "{{percent}}% of dispatch manifest",
+      "assigned": "Assigned",
+      "assignedDetail": "{{count}} digitally registered",
+      "progress": "Evaluation progress",
+      "progressDetail": "Submitted assignments"
+    },
+    "pipeline": { "title": "Evaluation pipeline", "subtitle": "Current volume at each controlled stage", "open": "Open custody" },
+    "attention": { "title": "Attention queue", "subtitle": "Items requiring operational review", "clear": "Clear" },
+    "papers": { "title": "Active papers", "subtitle": "Configuration readiness and assignment coverage", "viewAll": "View all", "paper": "Paper", "programme": "Programme", "scripts": "Scripts", "allocation": "Allocation", "config": "Config" },
+    "custody": { "title": "Recent custody", "subtitle": "Latest script state changes" },
+    "modules": { "title": "Module status", "subtitle": "Consolidated record volume across core operations", "records": "Operational records", "ready": "Ready for setup" }
+  },
+  "notifications": { "title": "Notifications", "unread": "{{count}} unread", "caughtUp": "All caught up", "close": "Close notifications", "empty": "No notifications yet." }
+}

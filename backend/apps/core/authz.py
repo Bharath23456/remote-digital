@@ -4,6 +4,23 @@ from django.utils import timezone
 from apps.tenancy.models import Membership
 
 
+ROLE_MODULES = {
+    Membership.Role.EVALUATOR: {"evaluation"},
+    Membership.Role.RECEIVING_OFFICER: {"receiving"},
+    Membership.Role.SCRIPT_RECEIVER: {"receiving"},
+    Membership.Role.SCANNER_OPERATOR: {"digitization"},
+    Membership.Role.CUSTODY_OFFICER: {"custody"},
+    Membership.Role.AUDITOR: {"audit"},
+}
+
+
+def allowed_modules_for_role(role, available_modules):
+    """Return tenant modules constrained by the member's operational role."""
+    available = set(available_modules)
+    role_modules = ROLE_MODULES.get(role)
+    return sorted(available if role_modules is None else available.intersection(role_modules))
+
+
 def membership_for(request):
     memberships = Membership.objects.select_related("institution", "user").filter(
         user=request.auth,
