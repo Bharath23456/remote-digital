@@ -21,6 +21,7 @@ import { EvaluationWorkspace } from "@/components/evaluation-workspace";
 import { RubricWorkspace } from "@/components/rubric-workspace";
 import { GovernanceWorkspace } from "@/components/governance-workspace";
 import { ValuationWorkspace } from "@/components/valuation-workspace";
+import { RevaluationWorkspace } from "@/components/revaluation-workspace";
 import { AdvancedOperationsWorkspace } from "@/components/advanced-operations-workspace";
 import { PlatformAdminWorkspace } from "@/components/platform-admin-workspace";
 import { PlatformAuditWorkspace } from "@/components/platform-audit-workspace";
@@ -55,7 +56,7 @@ type GenericRow = Record<string, unknown>;
 type SsoProvider = { id: string; name: string; domain_hint: string };
 type DomainContext = { scope: "platform" | "university"; hostname: string; university: { name: string; code: string; status: string } | null };
 type MfaEnrollment = { method_id: string; secret: string; provisioning_uri: string };
-type ViewKey = "platformAdmin" | "dashboard" | "configuration" | "evaluators" | "receiving" | "custody" | "digitization" | "anonymisation" | "repository" | "allocation" | "rubrics" | "assignmentGovernance" | "evaluation" | "valuation" | "assessmentControl" | "liveControl" | "serviceControl" | "platformControl" | "security" | "tenancy" | "audit";
+type ViewKey = "platformAdmin" | "dashboard" | "configuration" | "evaluators" | "receiving" | "custody" | "digitization" | "anonymisation" | "repository" | "allocation" | "rubrics" | "assignmentGovernance" | "evaluation" | "valuation" | "revaluation" | "assessmentControl" | "liveControl" | "serviceControl" | "platformControl" | "security" | "tenancy" | "audit";
 
 const navGroups: { label: string; items: { key: ViewKey; label: string; icon: typeof Gauge }[] }[] = [
   { label: "Operations", items: [
@@ -69,7 +70,12 @@ const navGroups: { label: string; items: { key: ViewKey; label: string; icon: ty
     { key: "configuration", label: "Exam configuration", icon: SlidersHorizontal },
     { key: "evaluators", label: "Evaluator master", icon: Users },
     { key: "allocation", label: "Allocation engine", icon: Network },
+
     { key: "assignmentGovernance", label: "Allocation history", icon: Workflow },
+
+    { key: "assignmentGovernance", label: "Assignment control", icon: Workflow },
+    { key: "revaluation", label: "Revaluation", icon: RefreshCw },
+
     { key: "serviceControl", label: "Results & services", icon: FileCheck2 },
   ]},
   { label: "Evaluation", items: [
@@ -105,7 +111,7 @@ const tenantNavigation = navGroups.map((group) => ({ ...group, items: group.item
 const viewModule: Partial<Record<ViewKey, string>> = {
   configuration: "configuration", evaluators: "evaluators", receiving: "receiving", custody: "custody", digitization: "digitization",
   anonymisation: "anonymisation", repository: "repository", allocation: "allocation", assignmentGovernance: "assignment_governance",
-  rubrics: "rubrics", evaluation: "evaluation", valuation: "valuation", assessmentControl: "assessment", liveControl: "operations",
+  rubrics: "rubrics", evaluation: "evaluation", valuation: "valuation", revaluation: "valuation", assessmentControl: "assessment", liveControl: "operations",
   serviceControl: "services", security: "security", audit: "audit", tenancy: "enterprise",
 };
 
@@ -140,6 +146,7 @@ const viewMeta: Record<ViewKey, { eyebrow: string; title: string; description: s
   assignmentGovernance: { eyebrow: "", title: "Allocation history", description: "Read-only record of allocation simulations and evaluator matches.", controls: [] },
   evaluation: { eyebrow: "Modules 14, 15 & 16", title: "Evaluation desk", description: "Secure script review, digital annotations and question-wise marking.", endpoint: "/api/v1/allocation/assignments", countKey: "allocation", controls: ["Five-minute media URLs", "Append-only mark revisions", "Previous valuations hidden"] },
   valuation: { eyebrow: "Modules 23 & 25", title: "Valuation review", description: "Independent round comparison, discrepancy reconciliation and final mark control.", controls: ["Blind valuations", "Threshold-based routing", "Immutable final mark lock"] },
+  revaluation: { eyebrow: "Revaluation", title: "Revaluation control", description: "Govern approved revaluation requests, independent evaluator assignment and final revaluation decisions.", controls: ["Locked final mark required", "Independent evaluator", "Auditable final decision"] },
   assessmentControl: { eyebrow: "Modules 24, 27 & 28", title: "Assessment control", description: "Moderation, revaluation and signed completion workflows.", controls: ["Independent decisions", "Final-mark checks", "Controlled release"] },
   liveControl: { eyebrow: "Modules 29 & 31–37", title: "Live operations", description: "Secure remote evaluation, monitoring, recovery and centre operations.", controls: ["Session evidence", "SLA workflows", "Continuity queue"] },
   serviceControl: { eyebrow: "Modules 38 & 39", title: "Results & student services", description: "Remuneration and protected student script services.", controls: ["Verified work units", "Payment reconciliation", "Expiring access"] },
@@ -504,13 +511,260 @@ export function OperationsApp() {
       setRefreshing(false);
     }
   }
-  return <div className="app-shell">
-    <aside className={`sidebar ${menuOpen ? "open" : ""}`}><div className="brand"><span className="brand-mark">A</span><div><div className="brand-name">ADMIEZO</div><div className="brand-label">Evaluation cloud</div></div></div><nav className="nav-scroll" aria-label="Primary navigation">{visibleNavigation.map((group) => <div className="nav-group" key={group.label}><div className="nav-label">{group.label}</div>{group.items.map((item) => <button className={`nav-item ${activeView === item.key ? "active" : ""}`} onClick={() => navigate(item.key)} key={item.key}><item.icon /><span>{item.label}</span></button>)}</div>)}</nav><div className="sidebar-footer"><div className="environment"><span className="environment-dot" />Evaluation core healthy</div></div></aside>
-    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? "Close navigation" : "Open navigation"} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <>{context.tenants.length > 1 ? <select aria-label="Active university" value={context.tenant.id} onChange={(event) => switchTenant(event.target.value)}>{context.tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}</select> : <div className="tenant-name">{context.tenant.name}</div>}<div className="session-name">{role === "operations_supervisor" ? "Intake workflow" : overview.session?.name || "No active examination session"}</div></>}</div><div className="top-actions">{!(platformMode && context.role === "platform_admin") && !intakeDeskViews[role] && role !== "operations_supervisor" && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} />}<button className="icon-button" title="Sign out" onClick={signOut}><LogOut /></button><button className="avatar" title="Account settings" aria-label="Account settings" onClick={() => setAccountOpen(true)}>{initials}</button></div></header>
-      <main className="content"><header className="page-heading"><div>{!/^Modules?\s+\d/.test(meta.eyebrow) && <p className="eyebrow">{meta.eyebrow}</p>}<h1>{meta.title}</h1><p className="heading-note">{meta.description}</p></div>
-        {activeView !== "valuation" && <button className="secondary-button" onClick={refreshCurrentView} disabled={refreshing}><RefreshCw className={refreshing ? "spin" : undefined} />{refreshing ? "Refreshing..." : "Refresh"}</button>}
-      </header>{toast && <div className="toast-stack" aria-live="polite"><div className="app-toast"><Check />{toast}</div></div>}{globalError && <div className="form-error" role="alert">{globalError}</div>}{activeView === "platformAdmin" ? <PlatformAdminWorkspace key={`platform-admin-${workspaceRefreshToken}`} onOpenTenant={switchTenant} /> : activeView === "audit" && platformMode && isPlatformAdmin ? <PlatformAuditWorkspace refreshToken={auditRefreshToken} /> : activeView === "dashboard" ? (role === "operations_supervisor" ? <IntakeOperationsDashboard key={workspaceRefreshToken} onNavigate={navigate} /> : <Dashboard overview={overview} navigate={navigate} />) : activeView === "configuration" ? <ConfigurationWorkspace /> : activeView === "evaluators" ? <EvaluatorWorkspace /> : activeView === "receiving" ? <GuidedIntakeWorkspace key={`receiving-${workspaceRefreshToken}`} stage="receiving" /> : activeView === "custody" ? <GuidedIntakeWorkspace key={`custody-${workspaceRefreshToken}`} stage="custody" /> : activeView === "digitization" ? <GuidedIntakeWorkspace key={`digitization-${workspaceRefreshToken}`} stage="digitization" /> : activeView === "anonymisation" ? <GuidedMaskingWorkspace key={`anonymisation-${workspaceRefreshToken}`} /> : activeView === "repository" ? <RepositoryWorkspace /> : activeView === "allocation" ? <AllocationWorkspace key={`allocation-${workspaceRefreshToken}`} /> : activeView === "rubrics" ? <RubricWorkspace /> : activeView === "assignmentGovernance" ? <GovernanceWorkspace key={`allocation-history-${workspaceRefreshToken}`} /> : activeView === "evaluation" ? <EvaluationWorkspace role={role} /> : activeView === "valuation" ? <ValuationWorkspace /> : activeView === "assessmentControl" ? <AdvancedOperationsWorkspace section="assessment" /> : activeView === "liveControl" ? <AdvancedOperationsWorkspace section="operations" /> : activeView === "serviceControl" ? <AdvancedOperationsWorkspace section="services" /> : activeView === "platformControl" ? <AdvancedOperationsWorkspace key={`platform-control-${workspaceRefreshToken}`} section="platform" /> : activeView === "security" ? <SecurityWorkspace /> : activeView === "tenancy" ? <EnterpriseWorkspace role={role} onTenantChange={async () => { await load(); }} /> : <ModuleWorkspace key={activeView} view={activeView} overview={overview} />}</main>
-      {accountOpen && <AccountSettings email={context.user.email} onClose={() => setAccountOpen(false)} />}
+    return (
+    <div className="app-shell">
+      <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
+        <div className="brand">
+          <span className="brand-mark">A</span>
+          <div>
+            <div className="brand-name">ADMIEZO</div>
+            <div className="brand-label">Evaluation cloud</div>
+          </div>
+        </div>
+
+        <nav className="nav-scroll" aria-label="Primary navigation">
+          {visibleNavigation.map((group) => (
+            <div className="nav-group" key={group.label}>
+              <div className="nav-label">{group.label}</div>
+
+              {group.items.map((item) => (
+                <button
+                  className={`nav-item ${
+                    activeView === item.key ? "active" : ""
+                  }`}
+                  onClick={() => navigate(item.key)}
+                  key={item.key}
+                >
+                  <item.icon />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="environment">
+            <span className="environment-dot" />
+            Evaluation core healthy
+          </div>
+        </div>
+      </aside>
+
+      <div className="main-shell">
+        <header className="topbar">
+          <button
+            className="icon-button mobile-menu"
+            title={menuOpen ? "Close navigation" : "Open navigation"}
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            {menuOpen ? <X /> : <Menu />}
+          </button>
+
+          <div className="tenant-switch">
+            {platformMode && context.role === "platform_admin" ? (
+              <>
+                <div className="tenant-name">ADMIEZO Platform</div>
+                <div className="session-name">
+                  Super administrator control plane
+                </div>
+              </>
+            ) : (
+              <>
+                {context.tenants.length > 1 ? (
+                  <select
+                    aria-label="Active university"
+                    value={context.tenant.id}
+                    onChange={(event) => switchTenant(event.target.value)}
+                  >
+                    {context.tenants.map((tenant) => (
+                      <option value={tenant.id} key={tenant.id}>
+                        {tenant.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="tenant-name">{context.tenant.name}</div>
+                )}
+
+                <div className="session-name">
+                  {role === "operations_supervisor"
+                    ? "Intake workflow"
+                    : overview.session?.name ||
+                      "No active examination session"}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="top-actions">
+            {!(platformMode && context.role === "platform_admin") &&
+              !intakeDeskViews[role] &&
+              role !== "operations_supervisor" && (
+                <NotificationCenter
+                  onOpenEvaluations={() => navigate("evaluation")}
+                />
+              )}
+
+            <button
+              className="icon-button"
+              title="Sign out"
+              onClick={signOut}
+            >
+              <LogOut />
+            </button>
+
+            <button
+              className="avatar"
+              title="Account settings"
+              aria-label="Account settings"
+              onClick={() => setAccountOpen(true)}
+            >
+              {initials}
+            </button>
+          </div>
+        </header>
+
+        <main className="content">
+          <header className="page-heading">
+            <div>
+              {!/^Modules?\s+\d/.test(meta.eyebrow) && (
+                <p className="eyebrow">{meta.eyebrow}</p>
+              )}
+
+              <h1>{meta.title}</h1>
+              <p className="heading-note">{meta.description}</p>
+            </div>
+
+            {activeView !== "valuation" && (
+              <button
+                className="secondary-button"
+                onClick={refreshCurrentView}
+                disabled={refreshing}
+              >
+                <RefreshCw
+                  className={refreshing ? "spin" : undefined}
+                />
+                {refreshing ? "Refreshing..." : "Refresh"}
+              </button>
+            )}
+          </header>
+
+          {toast && (
+            <div className="toast-stack" aria-live="polite">
+              <div className="app-toast">
+                <Check />
+                {toast}
+              </div>
+            </div>
+          )}
+
+          {globalError && (
+            <div className="form-error" role="alert">
+              {globalError}
+            </div>
+          )}
+
+          {activeView === "platformAdmin" ? (
+            <PlatformAdminWorkspace
+              key={`platform-admin-${workspaceRefreshToken}`}
+              onOpenTenant={switchTenant}
+            />
+          ) : activeView === "audit" &&
+            platformMode &&
+            isPlatformAdmin ? (
+            <PlatformAuditWorkspace
+              refreshToken={auditRefreshToken}
+            />
+          ) : activeView === "dashboard" ? (
+            role === "operations_supervisor" ? (
+              <IntakeOperationsDashboard
+                key={workspaceRefreshToken}
+                onNavigate={navigate}
+              />
+            ) : (
+              <Dashboard
+                overview={overview}
+                navigate={navigate}
+              />
+            )
+          ) : activeView === "configuration" ? (
+            <ConfigurationWorkspace />
+          ) : activeView === "evaluators" ? (
+            <EvaluatorWorkspace />
+          ) : activeView === "receiving" ? (
+            <GuidedIntakeWorkspace
+              key={`receiving-${workspaceRefreshToken}`}
+              stage="receiving"
+            />
+          ) : activeView === "custody" ? (
+            <GuidedIntakeWorkspace
+              key={`custody-${workspaceRefreshToken}`}
+              stage="custody"
+            />
+          ) : activeView === "digitization" ? (
+            <GuidedIntakeWorkspace
+              key={`digitization-${workspaceRefreshToken}`}
+              stage="digitization"
+            />
+          ) : activeView === "anonymisation" ? (
+            <GuidedMaskingWorkspace
+              key={`anonymisation-${workspaceRefreshToken}`}
+            />
+          ) : activeView === "repository" ? (
+            <RepositoryWorkspace />
+          ) : activeView === "allocation" ? (
+            <AllocationWorkspace
+              key={`allocation-${workspaceRefreshToken}`}
+            />
+          ) : activeView === "rubrics" ? (
+            <RubricWorkspace />
+          ) : activeView === "assignmentGovernance" ? (
+            <GovernanceWorkspace
+              key={`allocation-history-${workspaceRefreshToken}`}
+            />
+          ) : activeView === "evaluation" ? (
+            <EvaluationWorkspace role={role} />
+          ) : activeView === "valuation" ? (
+            <ValuationWorkspace />
+          ) : activeView === "revaluation" ? (
+            <RevaluationWorkspace />
+          ) : activeView === "assessmentControl" ? (
+            <AdvancedOperationsWorkspace section="assessment" />
+          ) : activeView === "liveControl" ? (
+            <AdvancedOperationsWorkspace section="operations" />
+          ) : activeView === "serviceControl" ? (
+            <AdvancedOperationsWorkspace section="services" />
+          ) : activeView === "platformControl" ? (
+            <AdvancedOperationsWorkspace
+              key={`platform-control-${workspaceRefreshToken}`}
+              section="platform"
+            />
+          ) : activeView === "security" ? (
+            <SecurityWorkspace />
+          ) : activeView === "tenancy" ? (
+            <EnterpriseWorkspace
+              role={role}
+              onTenantChange={async () => {
+                await load();
+              }}
+            />
+          ) : (
+            <ModuleWorkspace
+              key={activeView}
+              view={activeView}
+              overview={overview}
+            />
+          )}
+        </main>
+
+        {accountOpen && (
+          <AccountSettings
+            email={context.user.email}
+            onClose={() => setAccountOpen(false)}
+          />
+        )}
+      </div>
     </div>
-  </div>;
+  );
 }

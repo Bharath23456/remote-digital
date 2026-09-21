@@ -23,7 +23,7 @@ SCRIPT_TRANSITIONS = {
     Script.State.REVIEW: {Script.State.MODERATED, Script.State.REVALUATED, Script.State.FINALIZED},
     Script.State.MODERATED: {Script.State.FINALIZED},
     Script.State.REVALUATED: {Script.State.FINALIZED},
-    Script.State.FINALIZED: {Script.State.ARCHIVED},
+    Script.State.FINALIZED: {Script.State.REVALUATED, Script.State.ARCHIVED},
     Script.State.EXCEPTION: {Script.State.REGISTERED},
 }
 
