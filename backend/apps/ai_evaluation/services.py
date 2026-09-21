@@ -174,7 +174,7 @@ def finalize_reference_upload(*, tenant_id, actor_id, upload_id, expected_versio
         upload.save(update_fields=["status", "updated_at"])
         raise HttpError(409, "Reference upload expired")
     metadata = read_object_metadata(upload.storage_key)
-    if metadata.content_type != upload.content_type or metadata.byte_size > upload.maximum_bytes:
+    if metadata.mime_type != upload.content_type or metadata.byte_size > upload.maximum_bytes:
         raise HttpError(409, "Uploaded reference does not match its signed intent")
     previous = AIReferenceAsset.objects.filter(pack=upload.pack, kind=upload.kind, slot=upload.slot).first()
     previous_key = previous.storage_key if previous else ""
@@ -182,7 +182,7 @@ def finalize_reference_upload(*, tenant_id, actor_id, upload_id, expected_versio
     if previous:
         previous.storage_key = upload.storage_key
         previous.file_name = upload.file_name
-        previous.mime_type = metadata.content_type
+        previous.mime_type = metadata.mime_type
         previous.sha256 = metadata.sha256
         previous.byte_size = metadata.byte_size
         previous.asset_version = asset_version
@@ -197,7 +197,7 @@ def finalize_reference_upload(*, tenant_id, actor_id, upload_id, expected_versio
             slot=upload.slot,
             storage_key=upload.storage_key,
             file_name=upload.file_name,
-            mime_type=metadata.content_type,
+            mime_type=metadata.mime_type,
             sha256=metadata.sha256,
             byte_size=metadata.byte_size,
             uploaded_by_id=actor_id,
@@ -416,6 +416,34 @@ def assign_paper_to_ai(*, tenant_id, actor_id, paper, maximum_scripts):
             analysis = AIAnalysis.objects.create(tenant_id=tenant_id, assignment=assignment, trigger=AIAnalysis.Trigger.AUTONOMOUS, model_name=policy.ai_model_name, requested_by_id=actor_id)
             record_event(tenant_id=tenant_id, actor_id=actor_id, action="ai_evaluation.autonomous.queued", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "script_id": str(script.id)})
             created.append(analysis)
+    return created
+
+
+def assign_all_ready_scripts_to_ai(*, tenant_id, actor_id, maximum_scripts):
+    if not 1 <= maximum_scripts <= 5000:
+        raise HttpError(422, "AI assignment batch size must be between 1 and 5000")
+    policy = tenant_ai_policy(tenant_id)
+    if policy.ai_evaluation_mode != SecurityPolicy.AIEvaluationMode.AUTONOMOUS:
+        raise HttpError(409, "Autonomous AI must be enabled before assigning scripts to AI")
+    if not provider_status(tenant_id, policy.ai_model_name)["available"]:
+        raise HttpError(409, "ADMIEZO AI Assistant is not configured or its API key is invalid")
+
+    created = []
+    packs = AIReferencePack.objects.filter(
+        tenant_id=tenant_id,
+        paper__status=Paper.Status.FROZEN,
+    ).select_related("paper").prefetch_related("assets", "question_guides", "paper__questions").order_by("paper__code")
+    for pack in packs:
+        if len(created) >= maximum_scripts:
+            break
+        if not pack_readiness(pack)["ready"]:
+            continue
+        created.extend(assign_paper_to_ai(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            paper=pack.paper,
+            maximum_scripts=maximum_scripts - len(created),
+        ))
     return created
 
 

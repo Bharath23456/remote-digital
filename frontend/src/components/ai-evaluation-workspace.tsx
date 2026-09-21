@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
 type Governance = { mode: "assistive" | "autonomous"; confidence_threshold: number; model_name: string };
-type Paper = { id: string; code: string; title: string; subject: string; status: string; reference_pack: { readiness: { ready: boolean } } };
+type Readiness = { ready: boolean; question_paper: boolean; reference_answers: number; configured_questions: number; total_questions: number; missing_question_guides: number };
+type Paper = { id: string; code: string; title: string; subject: string; status: string; ready_scripts: number; reference_pack: { readiness: Readiness } };
 type Analysis = { id: string; assignment_id: string; script: string; paper_id: string; paper: string; trigger: string; status: string; model_name: string; effective_confidence: number | null; error_message: string; evaluator: string; created_at: string; started_at: string | null; completed_at: string | null };
 type Catalog = { provider: { provider: string; configured: boolean; valid: boolean; available: boolean; message: string }; governance: Governance; papers: Paper[]; analyses: Analysis[] };
 
@@ -25,7 +26,7 @@ export function AIEvaluationWorkspace() {
     try {
       const body = await api("/api/v1/ai-evaluation/catalog") as Catalog;
       setCatalog(body);
-      setPaperId((current) => current || body.papers[0]?.id || "");
+      setPaperId((current) => body.papers.some((item) => item.id === current) ? current : body.papers[0]?.id || "");
       setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "AI evaluation workspace could not be loaded"); }
     finally { setLoading(false); }
@@ -34,6 +35,19 @@ export function AIEvaluationWorkspace() {
   useEffect(() => { const initial = window.setTimeout(() => void load(), 0); const poll = window.setInterval(() => void load(), 5000); return () => { window.clearTimeout(initial); window.clearInterval(poll); }; }, [load]);
   const paper = useMemo(() => catalog.papers.find((item) => item.id === paperId) || catalog.papers[0], [catalog.papers, paperId]);
   const analyses = catalog.analyses.filter((item) => !paper || item.paper_id === paper.id);
+  const blockers = useMemo(() => {
+    if (!paper) return [];
+    const readiness = paper.reference_pack.readiness;
+    const items: string[] = [];
+    if (!catalog.provider.available) items.push(catalog.provider.message);
+    if (catalog.governance.mode === "autonomous" && paper.status !== "frozen") items.push("Freeze this paper configuration");
+    if (!readiness.question_paper) items.push("Upload the question paper");
+    if (readiness.reference_answers < 3) items.push(`Upload ${3 - readiness.reference_answers} more reference ${3 - readiness.reference_answers === 1 ? "answer" : "answers"}`);
+    if (readiness.total_questions === 0) items.push("Configure questions and maximum marks");
+    else if (readiness.missing_question_guides > 0) items.push(`Complete question text for ${readiness.missing_question_guides} ${readiness.missing_question_guides === 1 ? "question" : "questions"}`);
+    if (catalog.governance.mode === "autonomous" && paper.ready_scripts === 0) items.push("No unassigned stored scripts are ready for this paper");
+    return items;
+  }, [catalog.governance.mode, catalog.provider.available, catalog.provider.message, paper]);
 
   async function assignAll() {
     if (!paper) return;
@@ -50,6 +64,6 @@ export function AIEvaluationWorkspace() {
   return <div className="config-workspace ai-evaluation-workspace">
     <div className="workspace-toolbar"><label className="field ai-paper-select"><span>Paper and subject</span><select value={paper?.id || ""} onChange={(event) => setPaperId(event.target.value)}>{catalog.papers.map((item) => <option value={item.id} key={item.id}>{item.code} · {item.subject} · {item.title}</option>)}</select></label><div className="header-actions"><div className="provider-state ready"><BrainCircuit /><div><strong>{catalog.governance.mode === "autonomous" ? "Autonomous evaluation" : "Assisted evaluation"}</strong><span>{catalog.governance.confidence_threshold}% human fallback threshold</span></div></div><div className="provider-state ready"><Check /><div><strong>ADMIEZO AI Assistant verified</strong><span>{catalog.provider.message}</span></div></div></div></div>
     {notice && <div className="success-banner"><Check />{notice}</div>}{error && <div className="form-error">{error}</div>}
-    {!paper ? <section className="panel"><div className="empty-state">Create a paper before running AI evaluation.</div></section> : <section className="panel"><header className="panel-header"><div><h2 className="panel-title">AI analysis progress</h2><p className="panel-subtitle">{catalog.governance.mode === "autonomous" ? `AI evaluates in the background. Work below ${catalog.governance.confidence_threshold}% is automatically routed to a human evaluator.` : "Evaluators can request AI analysis from the Evaluation desk after reference material is configured under Exam configuration."}</p></div>{catalog.governance.mode === "autonomous" && <button className="primary-button" disabled={saving || !paper.reference_pack.readiness.ready || !catalog.provider.available || paper.status !== "frozen"} onClick={assignAll}><Bot />Assign ready scripts to AI</button>}</header><div className="table-wrap"><table><thead><tr><th>Anonymous script</th><th>Mode</th><th>Evaluator</th><th>Confidence</th><th>Started</th><th>Status</th></tr></thead><tbody>{analyses.map((item) => <tr key={item.id}><td><strong>{item.script}</strong><br/><small>{item.paper}</small></td><td>{titleCase(item.trigger)}</td><td>{item.evaluator}</td><td>{item.effective_confidence === null ? "—" : `${item.effective_confidence}%`}</td><td>{new Date(item.created_at).toLocaleString("en-IN")}</td><td><span className={`status-pill ${item.status}`}>{titleCase(item.status)}</span>{item.error_message && <small className="analysis-error">{item.error_message}</small>}</td></tr>)}</tbody></table></div>{!analyses.length && <div className="empty-state"><Sparkles />No AI analyses for this paper yet.</div>}</section>}
+    {!paper ? <section className="panel"><div className="empty-state">Create a paper before running AI evaluation.</div></section> : <section className="panel"><header className="panel-header"><div><h2 className="panel-title">AI analysis progress</h2><p className="panel-subtitle">{catalog.governance.mode === "autonomous" ? `AI evaluates in the background. Work below ${catalog.governance.confidence_threshold}% is automatically routed to a human evaluator.` : "Evaluators can request AI analysis from the Evaluation desk after reference material is configured under Exam configuration."}</p></div>{catalog.governance.mode === "autonomous" && <button className="primary-button" title={blockers.length ? blockers.join(". ") : `Queue ${paper.ready_scripts} ready scripts for this paper`} disabled={saving || blockers.length > 0} onClick={assignAll}><Bot />Assign {paper.ready_scripts || "ready"} {paper.ready_scripts === 1 ? "script" : "scripts"} to AI</button>}</header><div className="table-wrap"><table><thead><tr><th>Anonymous script</th><th>Mode</th><th>Evaluator</th><th>Confidence</th><th>Started</th><th>Status</th></tr></thead><tbody>{analyses.map((item) => <tr key={item.id}><td><strong>{item.script}</strong><br/><small>{item.paper}</small></td><td>{titleCase(item.trigger)}</td><td>{item.evaluator}</td><td>{item.effective_confidence === null ? "—" : `${item.effective_confidence}%`}</td><td>{new Date(item.created_at).toLocaleString("en-IN")}</td><td><span className={`status-pill ${item.status}`}>{titleCase(item.status)}</span>{item.error_message && <small className="analysis-error">{item.error_message}</small>}</td></tr>)}</tbody></table></div>{!analyses.length && <div className="ai-queue-empty"><Sparkles /><strong>{blockers.length ? "AI setup is not ready" : catalog.governance.mode === "autonomous" ? "No AI analyses yet" : "No assistance requested yet"}</strong><p>{blockers.length ? "Complete these items before using AI evaluation:" : catalog.governance.mode === "autonomous" ? `${paper.ready_scripts} ready ${paper.ready_scripts === 1 ? "script is" : "scripts are"} available for autonomous evaluation.` : "Evaluators can request an analysis while reviewing an assigned script."}</p>{blockers.length > 0 && <ul>{blockers.map((item) => <li key={item}>{item}</li>)}</ul>}</div>}</section>}
   </div>;
 }

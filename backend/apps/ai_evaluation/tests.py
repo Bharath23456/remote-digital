@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -17,6 +17,7 @@ from apps.evaluators.models import Evaluator, Expertise
 from apps.marking.models import Evaluation, QuestionMark
 from apps.receiving.models import Dispatch, Packet
 from apps.repository.models import ScriptAsset
+from apps.repository.storage import ObjectMetadata
 from apps.rubrics.models import MarkingScheme
 from apps.security.crypto import encrypt_secret
 from apps.security.models import SecurityPolicy
@@ -24,7 +25,24 @@ from apps.tenancy.models import Membership, TenantAccount
 from apps.valuation.models import FinalMark, ValuationResult
 
 from .models import AIAnalysis, AIProviderConfiguration, AIQuestionGuide, AIReferenceAsset, AIReferencePack, AIReferenceUpload
-from .services import _analysis_input, assign_paper_to_ai, pack_readiness, process_next_analysis, queue_assistive_analysis, synchronize_ai_governance
+from .provider import _provider_model
+from .services import (
+    _analysis_input,
+    assign_all_ready_scripts_to_ai,
+    assign_paper_to_ai,
+    finalize_reference_upload,
+    pack_readiness,
+    process_next_analysis,
+    queue_assistive_analysis,
+    synchronize_ai_governance,
+)
+
+
+class AdmiezoAIProviderTests(SimpleTestCase):
+    @override_settings(ADMIEZO_AI_PROVIDER_MODEL="gemini-3.8-flash")
+    def test_assistant_alias_resolves_to_configured_provider_model(self):
+        self.assertEqual(_provider_model("admiezo-ai-v1"), "gemini-3.8-flash")
+        self.assertEqual(_provider_model("gemini-3.7-flash"), "gemini-3.7-flash")
 
 
 class AIEvaluationTests(TestCase):
@@ -183,6 +201,56 @@ class AIEvaluationTests(TestCase):
         self.assertFalse(readiness["ready"])
         self.assertEqual(readiness["reference_answers"], 2)
 
+    @patch("apps.ai_evaluation.services.delete_object")
+    @patch("apps.ai_evaluation.services.read_object_metadata")
+    def test_reference_upload_finalization_uses_storage_mime_type(self, metadata, delete_object):
+        self.pack.assets.filter(kind=AIReferenceUpload.Kind.REFERENCE_ANSWER, slot=3).delete()
+        uploads = [
+            AIReferenceUpload.objects.create(
+                tenant_id=self.paper.tenant_id,
+                pack=self.pack,
+                kind=AIReferenceUpload.Kind.REFERENCE_ANSWER,
+                slot=3,
+                storage_key="ai-tests/new-reference-answer.png",
+                file_name="new-reference-answer.png",
+                content_type="image/png",
+                maximum_bytes=1024,
+                expires_at=timezone.now() + timedelta(minutes=5),
+                created_by_id=self.actor.id,
+            ),
+            AIReferenceUpload.objects.create(
+                tenant_id=self.paper.tenant_id,
+                pack=self.pack,
+                kind=AIReferenceUpload.Kind.QUESTION_PAPER,
+                slot=1,
+                storage_key="ai-tests/replacement-question.pdf",
+                file_name="replacement-question.pdf",
+                content_type="application/pdf",
+                maximum_bytes=2048,
+                expires_at=timezone.now() + timedelta(minutes=5),
+                created_by_id=self.actor.id,
+            ),
+        ]
+        metadata.side_effect = [
+            ObjectMetadata("b" * 64, 512, "image/png"),
+            ObjectMetadata("c" * 64, 1024, "application/pdf"),
+        ]
+
+        for upload in uploads:
+            with self.subTest(kind=upload.kind, slot=upload.slot):
+                asset = finalize_reference_upload(
+                    tenant_id=self.paper.tenant_id,
+                    actor_id=self.actor.id,
+                    upload_id=upload.id,
+                    expected_version=upload.version,
+                )
+                upload.refresh_from_db()
+                self.assertEqual(asset.mime_type, upload.content_type)
+                self.assertEqual(upload.status, AIReferenceUpload.Status.COMPLETED)
+                self.assertEqual(upload.byte_size, asset.byte_size)
+
+        delete_object.assert_called_once()
+
     def test_autonomous_governance_controls_entitlement_and_system_evaluator(self):
         tenant_id = self.paper.tenant_id
         account = TenantAccount.objects.get(root_institution__tenant_id=tenant_id)
@@ -309,6 +377,21 @@ class AIEvaluationTests(TestCase):
         self.assertEqual(evaluation.total_marks, Decimal("8"))
         self.assertEqual(ValuationResult.objects.get(evaluation=evaluation).total_marks, Decimal("8"))
         self.assertEqual(FinalMark.objects.get(script=self.script).mark, Decimal("8"))
+
+    def test_bulk_autonomous_assignment_queues_every_ready_script(self):
+        self.set_ai_policy(SecurityPolicy.AIEvaluationMode.AUTONOMOUS)
+        with patch("apps.ai_evaluation.services.provider_status", return_value={"available": True}):
+            analyses = assign_all_ready_scripts_to_ai(
+                tenant_id=self.paper.tenant_id,
+                actor_id=self.actor.id,
+                maximum_scripts=5000,
+            )
+
+        self.assertEqual(len(analyses), 1)
+        assignment = analyses[0].assignment
+        self.assertEqual(assignment.script_id, self.script.id)
+        self.assertTrue(assignment.evaluator.is_system_ai)
+        self.assertEqual(assignment.source, "ai_autonomous")
 
     def test_low_confidence_autonomous_result_routes_only_to_a_human(self):
         self.set_ai_policy(SecurityPolicy.AIEvaluationMode.AUTONOMOUS)

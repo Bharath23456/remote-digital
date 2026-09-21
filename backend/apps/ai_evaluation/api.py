@@ -4,11 +4,13 @@ from pydantic import Field
 
 from apps.configuration.models import Paper, Question
 from apps.core.authz import require_roles
+from apps.custody.models import Script
 from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Membership
 
 from .models import AIAnalysis, AIReferencePack
 from .services import (
+    assign_all_ready_scripts_to_ai,
     assign_paper_to_ai,
     create_reference_upload,
     extract_question_paper,
@@ -52,6 +54,10 @@ class AssignAIIn(Schema):
     maximum_scripts: int = Field(default=500, ge=1, le=5000)
 
 
+class AssignAllAIIn(Schema):
+    maximum_scripts: int = Field(default=5000, ge=1, le=5000)
+
+
 def analysis_data(item):
     return {
         "id": str(item.id),
@@ -92,6 +98,11 @@ def paper_data(paper, tenant_id):
         "title": paper.title,
         "subject": paper.subject.code,
         "status": paper.status,
+        "ready_scripts": Script.objects.filter(
+            tenant_id=tenant_id,
+            paper=paper,
+            state=Script.State.STORED,
+        ).exclude(assignments__valuation_round=1).count(),
         "reference_pack": {
             "id": str(pack.id),
             "version": pack.version,
@@ -211,4 +222,15 @@ def assign_ai(request, payload: AssignAIIn):
     if not paper:
         raise HttpError(409, "A frozen paper configuration is required")
     analyses = assign_paper_to_ai(tenant_id=tenant_id, actor_id=request.auth.id, paper=paper, maximum_scripts=payload.maximum_scripts)
+    return {"queued": len(analyses), "analysis_ids": [str(item.id) for item in analyses]}
+
+
+@router.post("/assignments/all-ready")
+def assign_all_ai(request, payload: AssignAllAIIn):
+    membership, _policy, _provider = _governance(request)
+    analyses = assign_all_ready_scripts_to_ai(
+        tenant_id=membership.institution.tenant_id,
+        actor_id=request.auth.id,
+        maximum_scripts=payload.maximum_scripts,
+    )
     return {"queued": len(analyses), "analysis_ids": [str(item.id) for item in analyses]}
