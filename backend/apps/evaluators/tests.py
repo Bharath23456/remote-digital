@@ -7,7 +7,7 @@ from django.test import Client, TestCase
 from apps.allocation.models import Assignment
 from apps.configuration.models import Subject
 from apps.core.models import AuditEvent, OutboxEvent
-from apps.evaluators.models import Evaluator, EvaluatorIdentityVerification
+from apps.evaluators.models import Evaluator, EvaluatorIdentityVerification, Expertise
 from apps.tenancy.models import Membership
 
 
@@ -57,6 +57,21 @@ class EvaluatorManagementTests(TestCase):
         deactivated = self.post(f"/api/v1/evaluator-management/{evaluator['id']}/lifecycle", {"version": lifecycle.json()["version"], "status": "inactive", "reason": "Temporarily removed from evaluator pool"})
         self.assertEqual(deactivated.status_code, 200)
         self.assertEqual(deactivated.json()["status"], "inactive")
+
+    def test_registration_stores_selected_subjects_as_pending_expertise(self):
+        subjects = list(Subject.objects.all()[:2])
+        self.assertEqual(len(subjects), 2)
+        response = self.post("/api/v1/evaluator-management", {
+            "evaluator_code": "EV-SUBJECT-01", "display_name": "Dr. Subject Examiner",
+            "email": "subjects@example.edu", "institution_name": "Northbridge University",
+            "department": "Computer Science", "designation": "Professor", "qualification": "PhD",
+            "years_experience": 12, "daily_capacity": 20, "create_login": False,
+            "subject_ids": [str(subject.id) for subject in subjects],
+        })
+        self.assertEqual(response.status_code, 200)
+        expertise = Expertise.objects.filter(evaluator_id=response.json()["id"])
+        self.assertEqual(set(expertise.values_list("subject_id", flat=True)), {subject.id for subject in subjects})
+        self.assertFalse(expertise.filter(verified=True).exists())
 
     def test_profile_update_and_work_history_are_real_and_tenant_scoped(self):
         membership = Membership.objects.get(user__username="admin@admiezo.local")

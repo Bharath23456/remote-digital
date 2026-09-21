@@ -368,6 +368,12 @@ def require_recent_identity_verification(*, tenant_id, evaluator, assignment, ac
 @transaction.atomic
 def create_evaluator(*, tenant_id, actor_id, values):
     create_login = values.pop("create_login", True)
+    subject_ids = list(dict.fromkeys(values.pop("subject_ids", [])))
+    if len(subject_ids) > 100:
+        raise EvaluatorError("Select no more than 100 subjects")
+    subjects = list(Subject.objects.filter(tenant_id=tenant_id, id__in=subject_ids))
+    if len(subjects) != len(subject_ids):
+        raise EvaluatorError("Selected subjects must belong to this university")
     values["email"] = values.get("email", "").strip().lower()
     values["custom_fields"] = validate_custom_values(tenant_id=tenant_id, form_key="evaluator_profile", values=values.get("custom_fields"))
     temporary_password = ""
@@ -417,8 +423,12 @@ def create_evaluator(*, tenant_id, actor_id, values):
         evaluator = Evaluator.objects.create(tenant_id=tenant_id, **values)
     except IntegrityError as exc:
         raise EvaluatorConflict("Evaluator code already exists") from exc
+    Expertise.objects.bulk_create([
+        Expertise(tenant_id=tenant_id, evaluator=evaluator, subject=subject, level=3, years_experience=evaluator.years_experience)
+        for subject in subjects
+    ])
     EvaluatorHistory.objects.create(tenant_id=tenant_id, evaluator=evaluator, action="created", to_status=evaluator.status, to_grade=evaluator.grade, actor_id=actor_id, snapshot=snapshot(evaluator))
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="evaluator.created", aggregate="Evaluator", aggregate_id=evaluator.id, payload={"code": evaluator.evaluator_code})
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="evaluator.created", aggregate="Evaluator", aggregate_id=evaluator.id, payload={"code": evaluator.evaluator_code, "subject_ids": [str(subject.id) for subject in subjects]})
     return evaluator, temporary_password
 
 

@@ -175,7 +175,7 @@ def create_masking_job(request, script_id: str, payload: StartMaskingIn):
 
 @router.post("/scripts/{script_id}/auto-mask")
 def auto_mask_script(request, script_id: str):
-    membership = require_roles(request, *OPERATIONS_ROLES, Membership.Role.SCAN_OPERATOR)
+    membership = require_roles(request, *OPERATIONS_ROLES, Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR)
     script = Script.objects.filter(id=script_id, tenant_id=membership.institution.tenant_id).select_related("packet__dispatch").first()
     if not script:
         raise HttpError(404, "Script not found")

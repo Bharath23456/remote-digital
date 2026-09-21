@@ -23,17 +23,18 @@ from apps.custody.services import register_script
 from apps.tenancy.models import Membership
 
 from .models import Dispatch, Packet
-from .omr import RecognitionError, recognize_cover
+from .omr import RecognitionError, read_cover_qr_if_present, recognize_cover
 from .schemas import GuidedBundleIn, GuidedPacketScanIn, GuidedScanIn
 
 
 router = Router(tags=["Guided script intake"])
-SUPERVISORS = (Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER)
+SUPERVISORS = (Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.OPERATIONS_SUPERVISOR)
 PREPARERS = SUPERVISORS + (Membership.Role.BUNDLE_PREPARER,)
 RECEIVERS = SUPERVISORS + (Membership.Role.INTAKE_RECEIVER,)
 SCANNERS = SUPERVISORS + (Membership.Role.SCAN_OPERATOR,)
 READERS = SUPERVISORS + (Membership.Role.BUNDLE_PREPARER, Membership.Role.INTAKE_RECEIVER, Membership.Role.SCAN_OPERATOR)
 BARCODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$")
+MANUAL_USN = re.compile(r"^[A-Z0-9]{6,20}$")
 
 
 def _enabled():
@@ -94,7 +95,7 @@ def packet_by_barcode(request, barcode: str):
     packet = Packet.objects.filter(tenant_id=tenant_id, barcode=_code(barcode)).exclude(dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("paper", "dispatch").prefetch_related("scripts").first()
     if not packet or packet.status not in ("received", "scanning", "complete"):
         raise HttpError(404, "Packet is not received or its barcode is not in this university's manifest")
-    return {**_packet_row(packet), "bundle": packet.dispatch.reference}
+    return {**_packet_row(packet), "bundle": packet.dispatch.reference, "manual_recognition_enabled": settings.DEMO_MANUAL_RECOGNITION_ENABLED}
 
 
 @router.get("/papers")
@@ -208,6 +209,12 @@ def receive_guided_packet(request, payload: GuidedPacketScanIn):
 def recognize_script(request, packet_id: str, cover: UploadedFile = File(...)):
     _enabled()
     membership = require_roles(request, *SCANNERS)
+    manual_qr = request.POST.get("manual_qr", "").strip()
+    manual_usn = request.POST.get("manual_usn", "").strip().upper()
+    if bool(manual_qr) != bool(manual_usn):
+        raise HttpError(422, "Enter both the booklet QR and USN for manual recognition")
+    if manual_qr and not settings.DEMO_MANUAL_RECOGNITION_ENABLED:
+        raise HttpError(403, "Manual recognition is disabled on this deployment")
     tenant_id = membership.institution.tenant_id
     packet = Packet.objects.filter(id=packet_id, tenant_id=tenant_id).select_related("dispatch", "paper").first()
     if not packet or packet.dispatch.intake_mode == Dispatch.IntakeMode.LEGACY:
@@ -216,11 +223,26 @@ def recognize_script(request, packet_id: str, cover: UploadedFile = File(...)):
         raise HttpError(409, "Receive the packet before scanning scripts")
     content = cover.read(12_000_001)
     cover_hash = hashlib.sha256(content).hexdigest()
+    manual_entry = False
     try:
         qr, usn = recognize_cover(content)
     except RecognitionError as exc:
-        raise HttpError(422, str(exc)) from exc
+        if not manual_qr:
+            raise HttpError(422, str(exc)) from exc
+        try:
+            detected_qr = read_cover_qr_if_present(content)
+        except RecognitionError as image_error:
+            raise HttpError(422, str(image_error)) from image_error
+        qr = _code(manual_qr)
+        if detected_qr and _code(detected_qr) != qr:
+            raise HttpError(409, "Entered booklet QR does not match the QR visible on the front page")
+        if not MANUAL_USN.fullmatch(manual_usn):
+            raise HttpError(422, "Enter a 6-20 character alphanumeric USN")
+        usn = manual_usn
+        manual_entry = True
     qr = _code(qr)
+    if manual_qr and not manual_entry and (_code(manual_qr) != qr or manual_usn != usn):
+        raise HttpError(409, "Entered details do not match the recognized front page")
     if qr not in packet.script_manifest:
         raise HttpError(409, "Booklet QR does not belong to this packet; isolate it and check the manifest")
     existing = Script.objects.filter(primary_barcode=qr).first()
@@ -249,4 +271,7 @@ def recognize_script(request, packet_id: str, cover: UploadedFile = File(...)):
         except (HTTPError, URLError, TimeoutError, ValueError, KeyError) as exc:
             raise HttpError(503, "Identity service could not store OMR data; retry this script") from exc
         confirm_identity_storage(tenant_id=tenant_id, actor_id=request.auth.id, link_id=link.id, version=link.version, receipt=receipt)
+        if manual_entry:
+            with transaction.atomic():
+                record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="receiving.guided.manual_recognition", aggregate="Script", aggregate_id=script.id, payload={"packet_id": str(packet.id), "cover_sha256": cover_hash, "qr_reference": _masked(qr)})
     return {"script_id": str(script.id), "script_code": script.script_code, "version": script.version, "subject": script.paper.code, "identity_linked": True}

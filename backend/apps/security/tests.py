@@ -141,6 +141,25 @@ class SecurityGovernanceTests(TestCase):
             denied = self.post(self.admin, "/api/v1/security/memberships", payload)
             self.assertEqual(denied.status_code, 422, denied.content)
 
+    def test_operations_supervisor_requires_only_the_three_intake_modules(self):
+        self.assertEqual(self.post(self.admin, "/api/v1/auth/step-up", {"password": "ChangeMe123!"}).status_code, 200)
+        payload = {
+            "first_name": "Intake", "last_name": "Supervisor", "email": "intake.supervisor@example.edu",
+            "role": "operations_supervisor", "permissions": [],
+            "enabled_modules": ["receiving", "custody", "digitization"], "custom_fields": {},
+        }
+        created = self.post(self.admin, "/api/v1/security/memberships", payload)
+        self.assertEqual(created.status_code, 200, created.content)
+        self.assertEqual(set(created.json()["enabled_modules"]), {"receiving", "custody", "digitization"})
+        for modules in (["receiving", "custody"], ["receiving", "custody", "digitization", "security"]):
+            payload["email"] = f"denied-{len(modules)}@example.edu"
+            payload["enabled_modules"] = modules
+            self.assertEqual(self.post(self.admin, "/api/v1/security/memberships", payload).status_code, 422)
+        payload["email"] = "permission-denied@example.edu"
+        payload["enabled_modules"] = ["receiving", "custody", "digitization"]
+        payload["permissions"] = ["identity.resolve"]
+        self.assertEqual(self.post(self.admin, "/api/v1/security/memberships", payload).status_code, 422)
+
     def test_emergency_role_grant_is_time_bound_and_revocable(self):
         auditor_client = Client()
         self.assertEqual(

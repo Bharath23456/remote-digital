@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-test("manual assignment offers only required next rounds", async ({ page }) => {
+test("simulation offers only configured rounds and no manual assignment", async ({ page }) => {
   await page.goto("/");
-  await page.getByLabel("Email address").fill("controller@admiezo.local");
+  await page.getByLabel("Email address").fill("admin@admiezo.local");
   await page.getByLabel("Password").fill("ChangeMe123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Evaluation operations" })).toBeVisible();
@@ -18,7 +18,7 @@ test("manual assignment offers only required next rounds", async ({ page }) => {
     ];
     catalog.papers = [
       { id: "paper-one", code: "MA301-A", title: "One round", valuation_rounds: 1, second_valuation_mark_threshold: null, stored_scripts: 1, status: "frozen" },
-      { id: "paper-two", code: "CS401-A", title: "Two rounds", valuation_rounds: 2, second_valuation_mark_threshold: null, stored_scripts: 1, status: "frozen" },
+      { id: "paper-two", code: "CS401-A", title: "Two rounds", subject_code: "CS401", subject_name: "Computer Science", valuation_rounds: 2, second_valuation_mark_threshold: null, stored_scripts: 1, status: "frozen" },
       { id: "paper-trigger", code: "PH301-A", title: "Conditional second round", valuation_rounds: 1, second_valuation_mark_threshold: "75.00", stored_scripts: 0, status: "frozen" },
     ];
     await route.fulfill({ response, json: catalog });
@@ -29,25 +29,15 @@ test("manual assignment offers only required next rounds", async ({ page }) => {
   await navigation.getByRole("button", { name: "Allocation engine", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Allocation engine", exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Manual", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Manual", exact: true })).toHaveCount(0);
   const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Anonymous script").selectOption("script-one");
-  await expect(dialog.getByLabel("Valuation round").locator("option")).toHaveCount(1);
-  await expect(dialog.getByLabel("Valuation round")).toHaveValue("1");
-  await dialog.getByLabel("Anonymous script").selectOption("script-two");
-  await expect(dialog.getByLabel("Valuation round").locator("option")).toHaveCount(1);
-  await expect(dialog.getByLabel("Valuation round")).toHaveValue("2");
-  await dialog.getByLabel("Anonymous script").selectOption("script-trigger");
-  await expect(dialog.getByLabel("Valuation round")).toHaveValue("2");
-  await expect(dialog.getByLabel("Anonymous script").locator('option[value="script-complete"]')).toHaveCount(0);
-  await dialog.getByTitle("Close").click();
-
   await page.getByRole("button", { name: "Simulate allocation" }).click();
   await dialog.getByLabel("Frozen paper").selectOption("paper-one");
   await expect(dialog.getByLabel("Valuation round").locator("option")).toHaveCount(1);
   await expect(dialog.getByLabel("Valuation round")).toHaveValue("1");
   await dialog.getByLabel("Frozen paper").selectOption("paper-two");
   await expect(dialog.getByLabel("Valuation round").locator("option")).toHaveCount(2);
+  await expect(dialog.getByText(/Subject: CS401.*Computer Science/)).toBeVisible();
   await dialog.getByLabel("Frozen paper").selectOption("paper-trigger");
   await expect(dialog.getByLabel("Valuation round").locator("option")).toHaveCount(2);
 });

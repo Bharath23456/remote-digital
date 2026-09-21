@@ -1,5 +1,6 @@
 from datetime import date
 from typing import Any
+from uuid import UUID
 
 from ninja import Field, Schema
 
@@ -23,6 +24,7 @@ class EvaluatorCreateIn(Schema):
     available_to: date | None = None
     create_login: bool = True
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+    subject_ids: list[UUID] = Field(default_factory=list)
 
 
 class EvaluatorUpdateIn(Schema):

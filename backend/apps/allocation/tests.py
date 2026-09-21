@@ -9,7 +9,7 @@ from django.test import Client, TestCase
 from django.utils import timezone
 from ninja.errors import HttpError
 
-from apps.configuration.models import Paper
+from apps.configuration.models import Paper, Subject
 from apps.core.models import AuditEvent, OutboxEvent
 from apps.custody.models import Script
 from apps.eligibility.models import EligibilityRecord
@@ -17,6 +17,7 @@ from apps.evaluators.models import Evaluator, Expertise
 from apps.receiving.models import Dispatch, Packet
 from apps.repository.models import ScriptAsset
 from apps.phase4.models import NotificationDelivery
+from apps.tenancy.models import Membership
 
 from .models import AllocationPolicy, AllocationProposal, AllocationRun, Assignment, AssignmentHistory
 from .services import build_plan, create_assignment, execute_plan, redistribute_assignment
@@ -66,9 +67,7 @@ class AllocationEngineTests(TestCase):
             create_assignment(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, script=self.scripts[0], evaluator=self.evaluators[0], backup_evaluator=None, valuation_round=1, due_at=timezone.now() + timedelta(days=3), source="manual", quality_score=None, score_breakdown=None)
         self.assertFalse(Assignment.objects.filter(script=self.scripts[0]).exists())
 
-    def test_manual_assignment_rejects_round_outside_paper_configuration(self):
-        self.paper.valuation_rounds = 1
-        self.paper.save(update_fields=["valuation_rounds"])
+    def test_manual_assignment_endpoint_is_disabled(self):
         client = Client()
         login = client.post(
             "/api/v1/auth/login",
@@ -84,15 +83,42 @@ class AllocationEngineTests(TestCase):
             "priority": 3,
         }
         response = client.post("/api/v1/allocation/assignments", data=json.dumps(payload), content_type="application/json")
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("not required", response.json()["detail"])
+        self.assertEqual(response.status_code, 410)
+        self.assertIn("Manual allocation is disabled", response.json()["detail"])
         self.assertFalse(Assignment.objects.filter(script=self.scripts[0]).exists())
 
-        payload["valuation_round"] = 1
-        payload["priority"] = 6
-        response = client.post("/api/v1/allocation/assignments", data=json.dumps(payload), content_type="application/json")
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(response.json()["detail"], "Priority must be between 1 and 5")
+    def test_simulation_never_matches_an_unrelated_subject(self):
+        civil = self.evaluators[0]
+        other_subject = Subject.objects.filter(tenant_id=self.paper.tenant_id).exclude(id=self.paper.subject_id).first()
+        self.assertIsNotNone(other_subject)
+        Expertise.objects.filter(evaluator=civil, subject=self.paper.subject).delete()
+        EligibilityRecord.objects.filter(evaluator=civil, subject=self.paper.subject).delete()
+        Expertise.objects.update_or_create(tenant_id=self.paper.tenant_id, evaluator=civil, subject=other_subject, defaults={"level": 5, "verified": True, "years_experience": civil.years_experience})
+        EligibilityRecord.objects.update_or_create(tenant_id=self.paper.tenant_id, evaluator=civil, subject=other_subject, defaults={"status": EligibilityRecord.Status.ELIGIBLE, "qualification_ok": True, "experience_ok": True, "institution_ok": True, "expertise_ok": True, "has_conflict": False, "is_debarred": False, "is_blacklisted": False, "expires_on": timezone.localdate() + timedelta(days=90)})
+        run = build_plan(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, paper=self.paper, algorithm=AllocationPolicy.Algorithm.INTELLIGENT, valuation_round=1, maximum_scripts=4, mode=AllocationRun.Mode.SIMULATION)
+        self.assertFalse(run.proposals.filter(evaluator=civil).exists())
+
+    def test_history_shows_simulation_actor_subject_and_matches(self):
+        run = build_plan(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, paper=self.paper, algorithm=AllocationPolicy.Algorithm.INTELLIGENT, valuation_round=1, maximum_scripts=4, mode=AllocationRun.Mode.SIMULATION)
+        execute_plan(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, run_id=run.id)
+        client = Client()
+        login = client.post("/api/v1/auth/login", data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "allocation-history-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200)
+        catalog = client.get("/api/v1/allocation/catalog")
+        paper = next(item for item in catalog.json()["papers"] if item["id"] == str(self.paper.id))
+        self.assertEqual(paper["subject_code"], self.paper.subject.code)
+        response = client.get("/api/v1/allocation/history")
+        self.assertEqual(response.status_code, 200)
+        rows = [row for row in response.json()["rows"] if row["run_id"] == str(run.id)]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["subject"] for row in rows}, {self.paper.subject.code})
+        self.assertEqual({row["ran_by"] for row in rows}, {self.actor.get_full_name() or self.actor.username})
+        self.assertTrue(all(row["evaluator"] and row["status"] == "completed" for row in rows))
+        searched = client.get(f"/api/v1/allocation/history?q={self.scripts[0].script_code}")
+        self.assertEqual(searched.status_code, 200)
+        self.assertEqual(searched.json()["total"], 1)
+        self.assertEqual(searched.json()["rows"][0]["script"], self.scripts[0].script_code)
+        self.assertEqual(client.get("/api/v1/allocation/history?page=0").status_code, 422)
 
     def test_redistribution_uses_backup_and_preserves_history(self):
         assignment = create_assignment(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, script=self.scripts[0], evaluator=self.evaluators[0], backup_evaluator=self.evaluators[1], valuation_round=1, due_at=timezone.now() + timedelta(days=3), source="manual", quality_score=None, score_breakdown=None)
@@ -129,6 +155,9 @@ class AllocationEngineTests(TestCase):
 
     def test_evaluator_catalog_contains_only_their_queue(self):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        membership = Membership.objects.get(user=evaluator.user, institution__tenant_id=evaluator.tenant_id)
+        membership.enabled_modules = ["evaluation"]
+        membership.save(update_fields=["enabled_modules"])
         client = Client()
         login = client.post(
             "/api/v1/auth/login",
@@ -138,6 +167,9 @@ class AllocationEngineTests(TestCase):
         self.assertEqual(login.status_code, 200)
         response = client.get("/api/v1/allocation/catalog")
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.get("/api/v1/evaluator-management/face/status").status_code, 200)
+        self.assertEqual(client.get("/api/v1/phase4/remote-security/policy").status_code, 200)
+        self.assertEqual(client.get("/api/v1/allocation/history").status_code, 403)
         body = response.json()
         self.assertTrue(body["assignments"])
         self.assertTrue(all(item["id"] in {str(value) for value in Assignment.objects.filter(evaluator=evaluator).values_list("id", flat=True)} for item in body["assignments"]))
