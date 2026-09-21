@@ -12,6 +12,7 @@ type BufferedChunk = { blob: Blob; startedAt: Date; endedAt: Date };
 type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
 type FaceDetectorLike = { detect(source: CanvasImageSource): Promise<unknown[]> };
 type FaceDetectorConstructor = new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => FaceDetectorLike;
+type MonitoringStatus = { camera: "ok" | "error" | "required"; face: "detected" | "not_detected"; multipleFaces: "none" | "detected"; mobile: "not_detected" | "detected" };
 const modelVersion = "opencv-sface-v1";
 const identityPauseReasons = new Set(["identity_mismatch", "face_absent", "multiple_faces", "camera_obstructed", "camera_stopped"]);
 
@@ -133,6 +134,7 @@ export function useSecureEvaluationSession() {
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [needsReauthentication, setNeedsReauthentication] = useState(false);
+  const [monitoringStatus, setMonitoringStatus] = useState<MonitoringStatus>({ camera: "required", face: "not_detected", multipleFaces: "none", mobile: "not_detected" });
   const sessionRef = useRef<Session | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const preflightRef = useRef<Preflight | null>(null);
@@ -207,7 +209,7 @@ export function useSecureEvaluationSession() {
       setPolicy(currentPolicy);
       const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
       streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = camera; setStream(camera);
+      streamRef.current = camera; setStream(camera); setMonitoringStatus((current) => ({ ...current, camera: "ok" }));
       const inventory = await mediaInventory();
       const screens = await availableScreens();
       inventoryRef.current = inventory.rawDigest;
@@ -216,6 +218,7 @@ export function useSecureEvaluationSession() {
       if (currentPolicy.single_screen_required && screens.count !== null && screens.count > 1) setError("Disconnect additional displays before starting evaluation.");
     } catch (reason) {
       const message = reason instanceof Error && reason.name === "NotAllowedError" ? "Webcam permission is required for secure evaluation." : reason instanceof Error ? reason.message : "Security checks could not be completed";
+      setMonitoringStatus((current) => ({ ...current, camera: "error" }));
       setError(message);
     } finally { setChecking(false); }
   }, []);
@@ -289,7 +292,7 @@ export function useSecureEvaluationSession() {
     sessionStorage.removeItem("admiezo-secure-evaluation-id");
     sessionStorage.removeItem("admiezo-secure-session-fingerprint");
     recorderRef.current?.stop(); recorderRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => track.stop()); streamRef.current = null; setStream(null);
+    streamRef.current?.getTracks().forEach((track) => track.stop()); streamRef.current = null; setStream(null); setMonitoringStatus({ camera: "required", face: "not_detected", multipleFaces: "none", mobile: "not_detected" });
     sessionRef.current = null; setSession(null); setPaused(false); setPauseReason(""); setPreflight(null); preflightRef.current = null; chunksRef.current = [];
     if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
   }, []);
@@ -375,6 +378,7 @@ export function useSecureEvaluationSession() {
           const faces = await detector.detect(analysisVideo);
           noFaceChecks = faces.length === 0 ? noFaceChecks + 1 : 0;
           multipleFaceChecks = faces.length > 1 ? multipleFaceChecks + 1 : 0;
+          setMonitoringStatus((current) => ({ ...current, face: faces.length > 0 ? "detected" : "not_detected", multipleFaces: faces.length > 1 ? "detected" : "none" }));
           if (faces.length > 0) noFaceWarned = false;
           const warnChecks = Math.max(1, Math.floor(current.policy.no_face_seconds / 10));
           const pauseChecks = Math.max(2, Math.ceil(current.policy.no_face_seconds / 5));
@@ -399,7 +403,7 @@ export function useSecureEvaluationSession() {
     };
   }, [paused, posture, report, session?.id, stream, updateSession, uploadEvidence, verifyLiveIdentity]);
 
-  return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, prepare, start, resume, finish, report, pause };
+  return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, monitoringStatus, prepare, start, resume, finish, report, pause };
 }
 
 export function CameraPreview({ stream, compact = false }: { stream: MediaStream | null; compact?: boolean }) {

@@ -49,12 +49,17 @@ def save_draft(*, tenant_id, actor_id, workflow_id, assignment, evaluator, expec
     workflow = EvaluationWorkflow.objects.select_for_update().filter(id=workflow_id, tenant_id=tenant_id, assignment=assignment).first()
     if not workflow or workflow.version != expected_version:
         raise HttpError(409, "Evaluation workflow is missing or stale")
-    current_assignment = Assignment.objects.select_for_update().get(id=assignment.id, tenant_id=tenant_id)
+    current_assignment = Assignment.objects.select_for_update().select_related("script__paper__session").get(id=assignment.id, tenant_id=tenant_id)
     verify_assignment_lock(assignment=current_assignment, evaluator=evaluator, token=lock_token)
     if workflow.state not in (EvaluationWorkflow.State.DRAFT, EvaluationWorkflow.State.REVIEW):
         raise HttpError(409, "This workflow no longer accepts drafts")
-    if workflow.draft_expires_at and workflow.draft_expires_at <= timezone.now():
+    session_expiry = current_assignment.script.paper.session.evaluation_ends_at
+    configured_expiries = [value for value in (current_assignment.due_at, session_expiry) if value]
+    expiry = max(configured_expiries) if configured_expiries else workflow.draft_expires_at
+    if expiry and expiry <= timezone.now():
         raise HttpError(409, "Evaluation window has expired")
+    if workflow.draft_expires_at != expiry:
+        workflow.draft_expires_at = expiry
     allowed = {"zoom", "rotation", "active_tool", "sidebar", "fit", "scroll"}
     payload = {key: value for key, value in ui_state.items() if key in allowed}
     checksum = hashlib.sha256(json.dumps({"sequence": client_sequence, "question": str(last_question.id) if last_question else None, "page": last_page, "ui": payload}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
