@@ -1,7 +1,7 @@
 from ninja import Field, Router, Schema
 from ninja.errors import HttpError
 
-from apps.core.authz import membership_for, require_roles
+from apps.core.authz import require_roles
 from apps.scanning.models import ScanJob
 from apps.tenancy.models import Membership
 
@@ -10,7 +10,11 @@ from .services import create_profile, execute_run, queue_run, resolve_exception
 
 
 router = Router(tags=["Scan processing and quality control"])
-ROLES = (Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER)
+ROLES = (
+    Membership.Role.UNIVERSITY_ADMIN,
+    Membership.Role.EXAM_CONTROLLER,
+    Membership.Role.SCANNER_OPERATOR,
+)
 
 
 class ProfileIn(Schema):
@@ -36,7 +40,7 @@ class ExceptionIn(Schema):
 
 @router.get("/catalog")
 def catalog(request):
-    tenant_id = membership_for(request).institution.tenant_id
+    tenant_id = require_roles(request, *ROLES).institution.tenant_id
     return {
         "profiles": [{"id": str(item.id), "code": item.code, "name": item.name, "configuration": item.configuration, "version": item.version, "active": item.is_active} for item in ProcessingProfile.objects.filter(tenant_id=tenant_id).order_by("code", "-version")],
         "runs": [{"id": str(item.id), "script": item.script.script_code, "job_id": str(item.scan_job_id), "profile": item.profile.code, "status": item.status, "stage": item.current_stage, "metrics": item.metrics, "recognition": item.recognition_summary, "version": item.version} for item in ProcessingRun.objects.filter(tenant_id=tenant_id).select_related("script", "profile")[:1000]],
