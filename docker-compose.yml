@@ -56,7 +56,7 @@ services:
       OUTBOX_WEBHOOK_URL: ${OUTBOX_WEBHOOK_URL:-}
       OUTBOX_AUTH_TOKEN: ${OUTBOX_AUTH_TOKEN:-}
       ADMIEZO_AI_PROVIDER_BASE: ${ADMIEZO_AI_PROVIDER_BASE:-https://generativelanguage.googleapis.com/v1beta}
-      ADMIEZO_AI_PROVIDER_MODEL: ${ADMIEZO_AI_PROVIDER_MODEL:-gemini-2.5-flash}
+      ADMIEZO_AI_PROVIDER_MODEL: ${ADMIEZO_AI_PROVIDER_MODEL:-gemini-3.8-flash}
     depends_on:
       db:
         condition: service_healthy
@@ -124,7 +124,7 @@ services:
       LOAD_DEMO_DATA: "false"
       APPLICATION_ENCRYPTION_KEY: ${APPLICATION_ENCRYPTION_KEY:-}
       ADMIEZO_AI_PROVIDER_BASE: ${ADMIEZO_AI_PROVIDER_BASE:-https://generativelanguage.googleapis.com/v1beta}
-      ADMIEZO_AI_PROVIDER_MODEL: ${ADMIEZO_AI_PROVIDER_MODEL:-gemini-2.5-flash}
+      ADMIEZO_AI_PROVIDER_MODEL: ${ADMIEZO_AI_PROVIDER_MODEL:-gemini-3.8-flash}
       ADMIEZO_AI_REQUEST_TIMEOUT_SECONDS: ${ADMIEZO_AI_REQUEST_TIMEOUT_SECONDS:-120}
       SCRIPT_STORAGE_INTERNAL_URL: http://storage-gateway:9000
       SCRIPT_STORAGE_PUBLIC_BASE: /storage
