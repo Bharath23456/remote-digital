@@ -21,20 +21,39 @@ USN_COLUMN_SYMBOLS = (
 
 
 def recognize_cover(content: bytes) -> tuple[str, str]:
+    image = _decode_cover(content)
+    qr, points = _read_qr(image)
+    usn = _read_usn_grid(image, points)
+    return qr, usn
+
+
+def read_cover_qr_if_present(content: bytes) -> str | None:
+    image = _decode_cover(content, minimum_dimension=300)
+    try:
+        qr, _ = _read_qr(image)
+        return qr
+    except RecognitionError:
+        return None
+
+
+def _decode_cover(content: bytes, *, minimum_dimension: int = 700) -> np.ndarray:
     if not 100 <= len(content) <= 12_000_000:
         raise RecognitionError("Front-page image must be between 100 bytes and 12 MB")
     image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-    if image is None or image.shape[0] < 700 or image.shape[1] < 700 or image.size > 30_000_000:
+    if image is None or image.shape[0] < minimum_dimension or image.shape[1] < minimum_dimension or image.size > 30_000_000:
         raise RecognitionError("Upload a clear, complete front-page image")
     scale = 2000 / image.shape[1]
     if abs(scale - 1) > 0.01:
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+    return image
+
+
+def _read_qr(image: np.ndarray) -> tuple[str, np.ndarray]:
     qr, points, _ = cv2.QRCodeDetector().detectAndDecode(image)
     qr = qr.strip()
     if not qr or points is None or len(qr) > 64:
         raise RecognitionError("Booklet QR could not be read; rescan the front page")
-    usn = _read_usn_grid(image, points[0])
-    return qr, usn
+    return qr, points[0]
 
 
 def _clusters(values: list[int], tolerance: int) -> list[tuple[int, int]]:

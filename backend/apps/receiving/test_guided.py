@@ -14,6 +14,7 @@ from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
 from apps.configuration.models import Paper
+from apps.core.models import AuditEvent
 from apps.custody.models import Script
 from apps.anonymisation.models import IdentityLink
 from apps.repository.models import UploadIntent
@@ -23,7 +24,7 @@ from .models import Dispatch, Packet
 from .omr import RecognitionError, _read_usn_grid, USN_COLUMN_SYMBOLS
 
 
-@override_settings(DEMO_MANUAL_INTAKE_ENABLED=True, IDENTITY_SERVICE_URL="http://identity-service:8100")
+@override_settings(DEMO_MANUAL_INTAKE_ENABLED=True, DEMO_MANUAL_RECOGNITION_ENABLED=True, IDENTITY_SERVICE_URL="http://identity-service:8100")
 class GuidedIntakeTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -46,6 +47,72 @@ class GuidedIntakeTests(TestCase):
         response = self.post("/api/v1/receiving/guided/bundles", {"barcode": "BND-GUIDED-001", "source_centre": "Test College", "mode": mode, "packets": packets})
         self.assertEqual(response.status_code, 200, response.content)
         return response.json()
+
+    def ready_packet(self):
+        self.create_manifest("on_site")
+        self.post("/api/v1/receiving/guided/bundles/start", {"barcode": "BND-GUIDED-001"})
+        self.post("/api/v1/receiving/guided/packets/receive", {"barcode": "PKT-GUIDED-1", "bundle_barcode": "BND-GUIDED-001"})
+        return Packet.objects.get(barcode="PKT-GUIDED-1")
+
+    def cover_image(self, dimension=800):
+        _, image = cv2.imencode(".png", np.full((dimension, dimension), 255, dtype=np.uint8))
+        return bytes(image)
+
+    def test_manual_recognition_fallback_links_identity_and_audits_without_exposing_usn(self):
+        packet = self.ready_packet()
+        path = f"/api/v1/receiving/guided/packets/{packet.id}/recognize"
+        cover = self.cover_image()
+        unreadable = self.client.post(path, {"cover": SimpleUploadedFile("front.png", cover, content_type="image/png")})
+        self.assertEqual(unreadable.status_code, 422)
+        self.assertFalse(Script.objects.filter(primary_barcode="QR-GUIDED-1").exists())
+
+        with patch("apps.receiving.guided_api.urlopen", return_value=io.BytesIO(b'{"receipt":"test"}')) as identity_service, patch("apps.receiving.guided_api.confirm_identity_storage"):
+            response = self.client.post(path, {
+                "cover": SimpleUploadedFile("front.png", cover, content_type="image/png"),
+                "manual_qr": "QR-GUIDED-1", "manual_usn": "4UB22CS032",
+            })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(Script.objects.get(id=response.json()["script_id"]).paper_id, packet.paper_id)
+        self.assertNotIn("4UB22CS032", response.content.decode())
+        self.assertNotIn("QR-GUIDED-1", response.content.decode())
+        self.assertEqual(json.loads(identity_service.call_args.args[0].data)["usn"], "4UB22CS032")
+        event = AuditEvent.objects.get(action="receiving.guided.manual_recognition", aggregate_id=response.json()["script_id"])
+        self.assertNotIn("4UB22CS032", json.dumps(event.payload))
+        self.assertNotIn("QR-GUIDED-1", json.dumps(event.payload))
+
+    def test_manual_recognition_requires_demo_flag_and_valid_cover(self):
+        packet = self.ready_packet()
+        path = f"/api/v1/receiving/guided/packets/{packet.id}/recognize"
+        data = {"manual_qr": "QR-GUIDED-1", "manual_usn": "4UB22CS032"}
+        with override_settings(DEMO_MANUAL_RECOGNITION_ENABLED=False):
+            disabled = self.client.post(path, {**data, "cover": SimpleUploadedFile("front.png", self.cover_image(), content_type="image/png")})
+        self.assertEqual(disabled.status_code, 403)
+        invalid = self.client.post(path, {**data, "cover": SimpleUploadedFile("front.png", b"not-an-image", content_type="image/png")})
+        self.assertEqual(invalid.status_code, 422)
+        self.assertFalse(Script.objects.filter(primary_barcode="QR-GUIDED-1").exists())
+
+    def test_manual_recognition_accepts_small_demo_cover_after_auto_reader_rejects_it(self):
+        packet = self.ready_packet()
+        path = f"/api/v1/receiving/guided/packets/{packet.id}/recognize"
+        cover = self.cover_image(dimension=400)
+        self.assertEqual(self.client.post(path, {"cover": SimpleUploadedFile("front.png", cover, content_type="image/png")}).status_code, 422)
+        with patch("apps.receiving.guided_api.urlopen", return_value=io.BytesIO(b'{"receipt":"test"}')), patch("apps.receiving.guided_api.confirm_identity_storage"):
+            response = self.client.post(path, {"cover": SimpleUploadedFile("front.png", cover, content_type="image/png"), "manual_qr": "QR-GUIDED-1", "manual_usn": "4UB22CS032"})
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def test_manual_recognition_cannot_override_qr_or_packet_manifest(self):
+        packet = self.ready_packet()
+        path = f"/api/v1/receiving/guided/packets/{packet.id}/recognize"
+        data = {"manual_qr": "QR-GUIDED-1", "manual_usn": "4UB22CS032"}
+        with patch("apps.receiving.guided_api.recognize_cover", side_effect=RecognitionError("USN bubbles were not found")), patch("apps.receiving.guided_api.read_cover_qr_if_present", return_value="QR-GUIDED-2"):
+            conflict = self.client.post(path, {**data, "cover": SimpleUploadedFile("front.png", self.cover_image(), content_type="image/png")})
+        self.assertEqual(conflict.status_code, 409)
+        wrong_packet = self.client.post(path, {**data, "manual_qr": "QR-GUIDED-2", "cover": SimpleUploadedFile("front.png", self.cover_image(), content_type="image/png")})
+        self.assertEqual(wrong_packet.status_code, 409)
+        with patch("apps.receiving.guided_api.recognize_cover", return_value=("QR-GUIDED-1", "4UB22CS032")):
+            override = self.client.post(path, {**data, "manual_usn": "4UB22CS033", "cover": SimpleUploadedFile("front.png", self.cover_image(), content_type="image/png")})
+        self.assertEqual(override.status_code, 409)
+        self.assertFalse(Script.objects.filter(primary_barcode__in=["QR-GUIDED-1", "QR-GUIDED-2"]).exists())
 
     def test_transfer_requires_bundle_before_packet_and_tracks_missing(self):
         self.create_manifest()
@@ -170,6 +237,36 @@ class GuidedIntakeTests(TestCase):
         with patch("apps.receiving.guided_api.recognize_cover", return_value=("QR-GUIDED-1", "AB12345678")), patch("apps.receiving.guided_api.urlopen", return_value=io.BytesIO(b'{"receipt":"test"}')), patch("apps.receiving.guided_api.confirm_identity_storage"):
             self.assertEqual(scanner.post(f"/api/v1/receiving/guided/packets/{packet.id}/recognize", {"cover": SimpleUploadedFile("front.png", b"cover", content_type="image/png")}).status_code, 200)
         self.assertEqual(scanner.post("/api/v1/receiving/guided/packets/receive", data=json.dumps({"barcode": "PKT-GUIDED-2", "bundle_barcode": "BND-GUIDED-001"}), content_type="application/json").status_code, 403)
+
+    def test_operations_supervisor_can_work_across_intake_but_not_other_modules(self):
+        institution = Membership.objects.get(user__email="admin@admiezo.local").institution
+        user = User.objects.create_user(username="intake.supervisor@example.test", email="intake.supervisor@example.test", password="ChangeMe123!")
+        Membership.objects.create(user=user, institution=institution, role=Membership.Role.OPERATIONS_SUPERVISOR, enabled_modules=["receiving", "custody", "digitization"])
+        supervisor = Client()
+        login = supervisor.post("/api/v1/auth/login", data=json.dumps({"email": user.email, "password": "ChangeMe123!", "device_id": "supervisor-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200, login.content)
+        self.assertEqual(set(supervisor.get("/api/v1/auth/me").json()["enabled_modules"]), {"receiving", "custody", "digitization"})
+
+        def submit(path, payload):
+            return supervisor.post(path, data=json.dumps(payload), content_type="application/json")
+
+        self.assertEqual(supervisor.get("/api/v1/receiving/guided/catalog").status_code, 200)
+        self.assertEqual(supervisor.get("/api/v1/receiving/guided/papers").status_code, 200)
+        created = submit("/api/v1/receiving/guided/bundles", {"barcode": "BND-SUP-001", "source_centre": "Test College", "mode": "transfer", "packets": [{"barcode": "PKT-SUP-001", "paper_id": str(self.paper.id), "script_barcodes": ["QR-SUP-001"]}]})
+        self.assertEqual(created.status_code, 200, created.content)
+        self.assertEqual(submit("/api/v1/receiving/guided/bundles/start", {"barcode": "BND-SUP-001"}).status_code, 200)
+        self.assertEqual(submit("/api/v1/receiving/guided/bundles/receive", {"barcode": "BND-SUP-001"}).status_code, 200)
+        self.assertEqual(supervisor.get("/api/v1/receiving/guided/lookup/bundles/BND-SUP-001").status_code, 200)
+        self.assertEqual(submit("/api/v1/receiving/guided/packets/receive", {"barcode": "PKT-SUP-001", "bundle_barcode": "BND-SUP-001"}).status_code, 200)
+        self.assertEqual(supervisor.get("/api/v1/receiving/guided/lookup/packets/PKT-SUP-001").status_code, 200)
+        packet = Packet.objects.get(barcode="PKT-SUP-001")
+        with patch("apps.receiving.guided_api.recognize_cover", return_value=("QR-SUP-001", "AB12345678")), patch("apps.receiving.guided_api.urlopen", return_value=io.BytesIO(b'{"receipt":"test"}')), patch("apps.receiving.guided_api.confirm_identity_storage"):
+            recognized = supervisor.post(f"/api/v1/receiving/guided/packets/{packet.id}/recognize", {"cover": SimpleUploadedFile("front.png", b"cover", content_type="image/png")})
+        self.assertEqual(recognized.status_code, 200, recognized.content)
+        uploaded = submit("/api/v1/repository/manual-scan/uploads", {"script_id": recognized.json()["script_id"], "page_number": 1, "content_type": "image/png", "maximum_bytes": 5000})
+        self.assertEqual(uploaded.status_code, 200, uploaded.content)
+        for path in ("/api/v1/operations/overview", "/api/v1/receiving/catalog", "/api/v1/security/catalog", "/api/v1/phase4/catalog?section=operations"):
+            self.assertEqual(supervisor.get(path).status_code, 403, path)
 
 
 class OMRReaderTests(TestCase):

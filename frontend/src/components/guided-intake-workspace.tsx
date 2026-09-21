@@ -7,7 +7,7 @@ import { csrfFetch } from "@/lib/api";
 type Stage = "receiving" | "custody" | "digitization";
 type Paper = { id: string; code: string; title: string };
 type PacketDraft = { barcode: string; paper_id: string; script_barcodes: string };
-type Packet = { id: string; barcode: string; subject: string; status: string; expected_scripts: number; scanned_scripts: number; missing_count: number; missing_references: string[] };
+type Packet = { id: string; barcode: string; subject: string; status: string; expected_scripts: number; scanned_scripts: number; missing_count: number; missing_references: string[]; manual_recognition_enabled?: boolean };
 type Bundle = { id: string; barcode: string; source_centre: string; mode: string; status: string; expected_packets: number; received_packets: number; expected_scripts: number; scanned_scripts: number; packets: Packet[] };
 
 const root = "/api/v1/receiving/guided";
@@ -16,8 +16,12 @@ const emptyPacket = (): PacketDraft => ({ barcode: "", paper_id: "", script_barc
 async function api(path: string, init?: RequestInit) {
   const response = await csrfFetch(path, init);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`);
+  if (!response.ok) throw new ApiError(body.detail || `Request failed (${response.status})`, response.status);
   return body;
+}
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
 }
 
 const post = (path: string, body: object) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -37,11 +41,17 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   const [selectedPacket, setSelectedPacket] = useState("");
   const [selectedPacketBarcode, setSelectedPacketBarcode] = useState("");
   const [activePacket, setActivePacket] = useState<(Packet & { bundle: string }) | null>(null);
-  const [files, setFiles] = useState<File[]>([]);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [answerFiles, setAnswerFiles] = useState<File[]>([]);
+  const [manualEntryRequired, setManualEntryRequired] = useState(false);
+  const [manualQr, setManualQr] = useState("");
+  const [manualUsn, setManualUsn] = useState("");
   const [bundlePage, setBundlePage] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+
+  function clearManualEntry() { setManualEntryRequired(false); setManualQr(""); setManualUsn(""); }
 
   const load = useCallback(async () => {
     try {
@@ -120,7 +130,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
     setBusy(true); setError(""); setNotice("");
     try {
       const match = await api(`${root}/lookup/packets/${encodeURIComponent(code)}`);
-      setSelectedPacket(match.id); setSelectedPacketBarcode(code); setActivePacket(match); setPacketLookup("");
+      setSelectedPacket(match.id); setSelectedPacketBarcode(code); setActivePacket(match); setPacketLookup(""); clearManualEntry();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Packet could not be opened"); }
     finally { setBusy(false); }
   }
@@ -134,13 +144,25 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
 
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const input = event.currentTarget.querySelector<HTMLInputElement>('input[type="file"]');
+    const form = event.currentTarget;
+    const files = coverFile ? [coverFile, ...answerFiles] : [];
     setBusy(true); setError(""); setNotice("");
     try {
       if (!selectedPacket || !files.length) throw new Error("Select a received packet and its front-page image");
       if (files.some((file) => !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 12_000_000)) throw new Error("Use JPEG, PNG or WebP pages under 12 MB each");
       const cover = new FormData(); cover.append("cover", files[0]);
-      const script = await api(`${root}/packets/${selectedPacket}/recognize`, { method: "POST", body: cover });
+      if (manualEntryRequired) { cover.append("manual_qr", manualQr.trim()); cover.append("manual_usn", manualUsn.trim()); }
+      let script;
+      try {
+        script = await api(`${root}/packets/${selectedPacket}/recognize`, { method: "POST", body: cover });
+      } catch (reason) {
+        if (reason instanceof ApiError && reason.status === 422 && activePacket?.manual_recognition_enabled && !manualEntryRequired) {
+          setManualEntryRequired(true);
+          setError(`${reason.message}. Enter the booklet QR and USN from the front page to continue.`);
+          return;
+        }
+        throw reason;
+      }
       for (let i = 0; i < files.length; i += 1) {
         const file = files[i];
         const intent = await post("/api/v1/repository/manual-scan/uploads", { script_id: script.script_id, page_number: i + 1, content_type: file.type, maximum_bytes: file.size });
@@ -156,8 +178,9 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         setNotice(`${script.script_code} - ${files.length} pages stored. Masking needs attention in Anonymization.`);
         setError(reason instanceof Error ? reason.message : "Automatic masking did not finish");
       }
-      setFiles([]);
-      if (input) input.value = "";
+      setCoverFile(null); setAnswerFiles([]);
+      clearManualEntry();
+      form.reset();
       await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Upload failed"); }
     finally { setBusy(false); }
@@ -208,8 +231,8 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Open packet</h2><p className="panel-subtitle">Scan a received packet before uploading its scripts.</p></div></header>
         <form className="guided-scan-form" onSubmit={openPacket}><label className="field"><span>Packet barcode</span><input value={packetLookup} onChange={(event) => setPacketLookup(event.target.value)} required placeholder="Scan or type packet barcode" autoFocus /></label><button className="primary-button" disabled={busy}><ScanLine />Open packet</button></form>
       </section>
-      {activePacket && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">{activePacket.barcode}</h2><p className="panel-subtitle">{activePacket.subject} - {activePacket.bundle} - {activePacket.scanned_scripts}/{activePacket.expected_scripts} scripts scanned</p></div><button className="secondary-button" onClick={() => { setSelectedPacket(""); setSelectedPacketBarcode(""); setActivePacket(null); setFiles([]); }}>Change packet</button></header>
-        {activePacket.status === "complete" ? <div className="success-banner"><Check />Packet complete. All expected scripts are scanned.</div> : <form className="guided-upload-form" onSubmit={upload}><label className="field"><span>Front page and answer pages</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple required onChange={(event) => setFiles(Array.from(event.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })))} /></label><button className="primary-button" disabled={busy || !files.length}><CloudUpload />{busy ? "Recognizing and uploading..." : "Upload script"}</button></form>}
+      {activePacket && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">{activePacket.barcode}</h2><p className="panel-subtitle">{activePacket.subject} - {activePacket.bundle} - {activePacket.scanned_scripts}/{activePacket.expected_scripts} scripts scanned</p></div><button className="secondary-button" onClick={() => { setSelectedPacket(""); setSelectedPacketBarcode(""); setActivePacket(null); setCoverFile(null); setAnswerFiles([]); clearManualEntry(); }}>Change packet</button></header>
+        {activePacket.status === "complete" ? <div className="success-banner"><Check />Packet complete. All expected scripts are scanned.</div> : <form className={`guided-upload-form ${manualEntryRequired ? "manual-recognition" : ""}`} onSubmit={upload}><label className="field"><span>Front page</span><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(event) => { setCoverFile(event.target.files?.[0] || null); clearManualEntry(); }} /></label><label className="field"><span>Answer pages</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => setAnswerFiles(Array.from(event.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })))} /></label>{manualEntryRequired && <><label className="field"><span>Booklet QR code</span><input value={manualQr} onChange={(event) => setManualQr(event.target.value)} required autoComplete="off" spellCheck={false} maxLength={64} /></label><label className="field"><span>USN from front page</span><input value={manualUsn} onChange={(event) => setManualUsn(event.target.value.toUpperCase())} required autoComplete="off" spellCheck={false} maxLength={20} /></label></>}<button className="primary-button" disabled={busy || !coverFile || (manualEntryRequired && (!manualQr.trim() || !manualUsn.trim()))}><CloudUpload />{busy ? "Recognizing and uploading..." : manualEntryRequired ? "Confirm details and upload" : "Upload script"}</button></form>}
       </section>}
     </>}
   </div>;
