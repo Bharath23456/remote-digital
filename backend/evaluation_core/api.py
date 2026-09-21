@@ -5,6 +5,9 @@ from ninja import NinjaAPI, Schema
 from ninja.errors import HttpError
 from ninja.security import SessionAuth
 
+# from apps.revaluation.api import router as revaluation_router
+
+
 from apps.allocation.models import Assignment
 from apps.configuration.api import router as configuration_router
 from apps.configuration import services as configuration_services
@@ -47,6 +50,7 @@ api = NinjaAPI(
     auth=SessionAuth(),
     urls_namespace="admiezo_api",
 )
+
 api.add_router("/v1/enterprise", enterprise_router)
 api.add_router("/v1/configuration", configuration_router)
 api.add_router("/v1/evaluator-management", evaluators_router)

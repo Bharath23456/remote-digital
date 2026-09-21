@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "apps.marking",
     "apps.workflow",
     "apps.valuation",
+    # "apps.revaluation",
     "apps.discrepancy",
     "apps.integrity",
     "apps.phase4",

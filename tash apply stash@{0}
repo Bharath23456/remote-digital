@@ -1,0 +1,119 @@
+[1mdiff --git a/backend/apps/custody/services.py b/backend/apps/custody/services.py[m
+[1mindex 2c66680..f4693ad 100644[m
+[1m--- a/backend/apps/custody/services.py[m
+[1m+++ b/backend/apps/custody/services.py[m
+[36m@@ -23,7 +23,7 @@[m [mSCRIPT_TRANSITIONS = {[m
+     Script.State.REVIEW: {Script.State.MODERATED, Script.State.REVALUATED, Script.State.FINALIZED},[m
+     Script.State.MODERATED: {Script.State.FINALIZED},[m
+     Script.State.REVALUATED: {Script.State.FINALIZED},[m
+[31m-    Script.State.FINALIZED: {Script.State.ARCHIVED},[m
+[32m+[m[32m    Script.State.FINALIZED: {Script.State.REVALUATED, Script.State.ARCHIVED},[m
+     Script.State.EXCEPTION: {Script.State.REGISTERED},[m
+ }[m
+ [m
+[1mdiff --git a/backend/evaluation_core/api.py b/backend/evaluation_core/api.py[m
+[1mindex 2de4764..2f4c514 100644[m
+[1m--- a/backend/evaluation_core/api.py[m
+[1m+++ b/backend/evaluation_core/api.py[m
+[36m@@ -5,6 +5,9 @@[m [mfrom ninja import NinjaAPI, Schema[m
+ from ninja.errors import HttpError[m
+ from ninja.security import SessionAuth[m
+ [m
+[32m+[m[32m# from apps.revaluation.api import router as revaluation_router[m
+[32m+[m
+[32m+[m
+ from apps.allocation.models import Assignment[m
+ from apps.configuration.api import router as configuration_router[m
+ from apps.configuration import services as configuration_services[m
+[36m@@ -36,7 +39,7 @@[m [mfrom apps.marking.api import router as marking_router[m
+ from apps.workflow.api import router as workflow_router[m
+ from apps.valuation.api import router as valuation_router[m
+ from apps.discrepancy.api import router as discrepancy_router[m
+[31m-from apps.integrity.api import router as integrity_router[m
+[32m+[m[32mfrom apps.integrity.api import router as integrity_routerq[m
+ from apps.phase4.api import router as phase4_router[m
+ [m
+ [m
+[36m@@ -46,6 +49,7 @@[m [mapi = NinjaAPI([m
+     auth=SessionAuth(),[m
+     urls_namespace="admiezo_api",[m
+ )[m
+[32m+[m[32m# api.add_router("/v1/revaluation", revaluation_router)[m
+ api.add_router("/v1/enterprise", enterprise_router)[m
+ api.add_router("/v1/configuration", configuration_router)[m
+ api.add_router("/v1/evaluator-management", evaluators_router)[m
+[1mdiff --git a/backend/evaluation_core/settings.py b/backend/evaluation_core/settings.py[m
+[1mindex aab23d4..fcbd523 100644[m
+[1m--- a/backend/evaluation_core/settings.py[m
+[1m+++ b/backend/evaluation_core/settings.py[m
+[36m@@ -41,6 +41,7 @@[m [mINSTALLED_APPS = [[m
+     "apps.marking",[m
+     "apps.workflow",[m
+     "apps.valuation",[m
+[32m+[m[32m    # "apps.revaluation",[m
+     "apps.discrepancy",[m
+     "apps.integrity",[m
+     "apps.phase4",[m
+[1mdiff --git a/frontend/src/app/globals.css b/frontend/src/app/globals.css[m
+[1mindex b578c7c..3b0a58c 100644[m
+[1m--- a/frontend/src/app/globals.css[m
+[1m+++ b/frontend/src/app/globals.css[m
+[36m@@ -677,3 +677,18 @@[m [mtd svg { width: 14px; height: 14px; vertical-align: middle; }[m
+ }[m
+ @media (max-width: 470px) { .filter-bar { grid-template-columns: 1fr; } .filter-bar > label:first-child { grid-column: auto; } .paper-record-list { padding: 9px; } .paper-record-header { padding: 14px 14px 10px; } .paper-record-metrics { margin: 0 14px; } .paper-record-footer { padding: 10px 14px; } .paper-question-row { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 14px; } .paper-question-row span { grid-row: 2; } .paper-question-row b { grid-column: 2; grid-row: 1 / 3; } }[m
+ .evaluation-viewer.security-printscreen-lock::before { position: fixed; inset: 0; z-index: 10050; display: grid; place-items: center; background: rgba(10, 15, 12, .98); color: white; content: "Evaluation paused"; font-size: 22px; font-weight: 800; pointer-events: all; }[m
+[32m+[m[32m/* Revaluation workspace */[m
+[32m+[m[32m.table-subtext {[m
+[32m+[m[32m  display: block;[m
+[32m+[m[32m  margin-top: 0.2rem;[m
+[32m+[m[32m  color: var(--muted, #64748b);[m
+[32m+[m[32m  font-size: 0.75rem;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m.success-note {[m
+[32m+[m[32m  border: 1px solid rgba(22, 163, 74, 0.24);[m
+[32m+[m[32m  border-radius: 10px;[m
+[32m+[m[32m  padding: 0.75rem 1rem;[m
+[32m+[m[32m  background: rgba(22, 163, 74, 0.08);[m
+[32m+[m[32m  font-size: 0.9rem;[m
+[32m+[m[32m}[m
+[1mdiff --git a/frontend/src/components/operations-app.tsx b/frontend/src/components/operations-app.tsx[m
+[1mindex 158fd89..b7469f8 100644[m
+[1m--- a/frontend/src/components/operations-app.tsx[m
+[1m+++ b/frontend/src/components/operations-app.tsx[m
+[36m@@ -22,6 +22,7 @@[m [mimport { DigitizationWorkspace } from "@/components/digitization-workspace";[m
+ import { RubricWorkspace } from "@/components/rubric-workspace";[m
+ import { GovernanceWorkspace } from "@/components/governance-workspace";[m
+ import { ValuationWorkspace } from "@/components/valuation-workspace";[m
+[32m+[m[32mimport { RevaluationWorkspace } from "@/components/revaluation-workspace";[m
+ import { AdvancedOperationsWorkspace } from "@/components/advanced-operations-workspace";[m
+ import { PlatformAdminWorkspace } from "@/components/platform-admin-workspace";[m
+ import { PlatformAuditWorkspace } from "@/components/platform-audit-workspace";[m
+[36m@@ -56,7 +57,7 @@[m [mtype GenericRow = Record<string, unknown>;[m
+ type SsoProvider = { id: string; name: string; domain_hint: string };[m
+ type DomainContext = { scope: "platform" | "university"; hostname: string; university: { name: string; code: string; status: string } | null };[m
+ type MfaEnrollment = { method_id: string; secret: string; provisioning_uri: string };[m
+[31m-type ViewKey = "platformAdmin" | "dashboard" | "configuration" | "evaluators" | "receiving" | "custody" | "digitization" | "anonymisation" | "repository" | "allocation" | "rubrics" | "assignmentGovernance" | "evaluation" | "valuation" | "assessmentControl" | "liveControl" | "serviceControl" | "platformControl" | "security" | "tenancy" | "audit";[m
+[32m+[m[32mtype ViewKey = "platformAdmin" | "dashboard" | "configuration" | "evaluators" | "receiving" | "custody" | "digitization" | "anonymisation" | "repository" | "allocation" | "rubrics" | "assignmentGovernance" | "evaluation" | "valuation" | "revaluation" | "assessmentControl" | "liveControl" | "serviceControl" | "platformControl" | "security" | "tenancy" | "audit";[m
+ [m
+ const navGroups: { label: string; items: { key: ViewKey; label: string; icon: typeof Gauge }[] }[] = [[m
+   { label: "Operations", items: [[m
+[36m@@ -71,6 +72,7 @@[m [mconst navGroups: { label: string; items: { key: ViewKey; label: string; icon: ty[m
+     { key: "evaluators", label: "Evaluator master", icon: Users },[m
+     { key: "allocation", label: "Allocation engine", icon: Network },[m
+     { key: "assignmentGovernance", label: "Assignment control", icon: Workflow },[m
+[32m+[m[32m    { key: "revaluation", label: "Revaluation", icon: RefreshCw },[m
+     { key: "serviceControl", label: "Results & services", icon: FileCheck2 },[m
+   ]},[m
+   { label: "Evaluation", items: [[m
+[36m@@ -103,7 +105,7 @@[m [mconst tenantNavigation = navGroups.map((group) => ({ ...group, items: group.item[m
+ const viewModule: Partial<Record<ViewKey, string>> = {[m
+   configuration: "configuration", evaluators: "evaluators", receiving: "receiving", custody: "custody", digitization: "digitization",[m
+   anonymisation: "anonymisation", repository: "repository", allocation: "allocation", assignmentGovernance: "assignment_governance",[m
+[31m-  rubrics: "rubrics", evaluation: "evaluation", valuation: "valuation", assessmentControl: "assessment", liveControl: "operations",[m
+[32m+[m[32m  rubrics: "rubrics", evaluation: "evaluation", valuation: "valuation", revaluation: "valuation", assessmentControl: "assessment", liveControl: "operations",[m
+   serviceControl: "services", security: "security", audit: "audit", tenancy: "enterprise",[m
+ };[m
+ [m
+[36m@@ -136,6 +138,7 @@[m [mconst viewMeta: Record<ViewKey, { eyebrow: string; title: string; description: s[m
+   assignmentGovernance: { eyebrow: "Modules 07 & 18", title: "Assignment governance", de
