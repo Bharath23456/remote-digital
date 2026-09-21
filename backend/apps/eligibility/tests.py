@@ -3,10 +3,13 @@ import uuid
 from datetime import date, timedelta
 from unittest.mock import patch
 
+from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import Client, TestCase
 from django.utils import timezone
+from ninja.errors import HttpError
 
+from apps.allocation.services import create_assignment
 from apps.core.models import AuditEvent
 from apps.custody.models import Script
 from apps.eligibility.models import EligibilityRecord, VerificationApproval, VerificationCase, VerificationDocument
@@ -55,8 +58,8 @@ class EligibilityAllocationTests(TestCase):
         self.assertEqual(assessed.status_code, 200)
         self.assertEqual(assessed.json()["status"], "eligible")
         script = Script.objects.filter(state=Script.State.STORED, paper__subject=expertise.subject).first()
-        allocation = self.post("/api/v1/allocation/assignments", {"script_id": str(script.id), "evaluator_id": str(evaluator.id), "valuation_round": 1, "due_in_days": 5})
-        self.assertEqual(allocation.status_code, 200)
+        assignment = create_assignment(tenant_id=evaluator.tenant_id, actor_id=User.objects.get(username="admin@admiezo.local").id, script=script, evaluator=evaluator, backup_evaluator=None, valuation_round=1, due_at=timezone.now() + timedelta(days=5), source="intelligent", quality_score=None, score_breakdown=None)
+        self.assertEqual(assignment.evaluator_id, evaluator.id)
 
     def test_unverified_evaluator_is_hard_blocked(self):
         evaluator = Evaluator.objects.filter(status=Evaluator.Status.ACTIVE, expertise__verified=True).first()
@@ -65,8 +68,8 @@ class EligibilityAllocationTests(TestCase):
         VerificationApproval.objects.filter(verification__evaluator=evaluator).delete()
         VerificationCase.objects.filter(evaluator=evaluator).delete()
         script = Script.objects.filter(state=Script.State.STORED, paper__subject=expertise.subject).first()
-        response = self.post("/api/v1/allocation/assignments", {"script_id": str(script.id), "evaluator_id": str(evaluator.id), "valuation_round": 1, "due_in_days": 5})
-        self.assertEqual(response.status_code, 409)
+        with self.assertRaises(HttpError):
+            create_assignment(tenant_id=evaluator.tenant_id, actor_id=evaluator.user_id, script=script, evaluator=evaluator, backup_evaluator=None, valuation_round=1, due_at=timezone.now() + timedelta(days=5), source="intelligent", quality_score=None, score_breakdown=None)
 
     @patch("apps.eligibility.services.read_object_metadata")
     def test_verification_document_is_direct_upload_and_hash_finalized(self, metadata):

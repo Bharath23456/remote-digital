@@ -3,6 +3,7 @@ import json
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
@@ -56,6 +57,7 @@ SECURE_PAUSE_CATEGORIES = {
     "external_media_device",
     "fullscreen_exited",
     "heartbeat_lost",
+    "identity_mismatch",
     "multiple_faces",
     "multiple_screens",
     "viewer_hidden",
@@ -65,6 +67,7 @@ SECURE_PAUSE_CATEGORIES = {
 def security_policy_snapshot(tenant_id):
     policy = SecurityPolicy.objects.filter(tenant_id=tenant_id).first() or SecurityPolicy()
     return {
+        "identity_verification_required": not settings.DEMO_SKIP_EVALUATOR_FACE_VERIFICATION,
         "camera_required": policy.evaluation_camera_required,
         "fullscreen_required": policy.evaluation_fullscreen_required,
         "single_screen_required": policy.evaluation_single_screen_required,
@@ -414,6 +417,13 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
         raise HttpError(409, "Disconnect additional displays before evaluation")
     if len(session_fingerprint) != 64 or len(device_fingerprint) != 64:
         raise HttpError(422, "Secure device fingerprints are invalid")
+    if policy["identity_verification_required"]:
+        from apps.evaluators.services import EvaluatorError, require_recent_identity_verification
+
+        try:
+            require_recent_identity_verification(tenant_id=tenant_id, evaluator=evaluator, assignment=assignment, access_session=access_session)
+        except EvaluatorError as exc:
+            raise HttpError(428, str(exc)) from exc
     now = timezone.now()
     for previous in SecureEvaluationSession.objects.select_for_update().filter(
         tenant_id=tenant_id,

@@ -599,6 +599,17 @@ def secure_evaluation_policy(request):
 @router.post("/remote-security/sessions")
 def secure_evaluation_start(request, payload: SecureSessionIn):
     membership, evaluator, assignment = _secure_evaluator_context(request, payload.assignment_id)
+    existing = SecureEvaluationSession.objects.select_related("assignment", "assignment__script").filter(
+        tenant_id=membership.institution.tenant_id,
+        evaluator=evaluator,
+        status__in=[SecureEvaluationSession.Status.ACTIVE, SecureEvaluationSession.Status.PAUSED],
+    ).order_by("-started_at").first()
+    if existing and existing.assignment_id != assignment.id:
+        script_code = getattr(existing.assignment.script, "script_code", "")
+        suffix = f" Current assignment: {script_code}." if script_code else ""
+        raise HttpError(409, f"Finish or exit the current evaluation before opening another paper.{suffix}")
+    if existing and existing.access_session_id == request.access_session.id:
+        return _secure_session_data(existing)
     item = start_secure_evaluation_session(
         tenant_id=membership.institution.tenant_id,
         actor_id=request.auth.id,

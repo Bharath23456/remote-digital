@@ -1,10 +1,11 @@
 import json
 import uuid
 
+from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import Client, TestCase
 
-from apps.configuration.models import ConfigurationChangeRequest, ConfigurationRevision, Course, EvaluationCentre, ExamSession, Paper, Programme, Regulation, Subject
+from apps.configuration.models import AcademicYear, ConfigurationChangeRequest, ConfigurationRevision, Course, EvaluationCentre, ExamSession, Paper, Programme, Regulation, Subject, Term
 from apps.core.models import AuditEvent, OutboxEvent
 
 
@@ -34,6 +35,23 @@ class ConfigurationWorkflowTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return client
+
+    def test_one_round_score_trigger_is_validated_separately_from_difference_threshold(self):
+        session = ExamSession.objects.first()
+        subject = Subject.objects.first()
+        payload = {
+            "session_id": str(session.id), "subject_id": str(subject.id), "code": "SCORE-TRIGGER-101",
+            "title": "Conditional second valuation", "max_marks": "100.00", "pass_marks": "40.00",
+            "valuation_rounds": 1, "discrepancy_threshold": "10.00",
+            "rules": {"second_valuation_mark_threshold": "75.00"},
+        }
+        created = self.post("/api/v1/configuration/papers", payload)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["rules"]["second_valuation_mark_threshold"], "75.00")
+        invalid_rounds = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-102", "valuation_rounds": 2})
+        self.assertEqual(invalid_rounds.status_code, 422)
+        invalid_score = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-103", "rules": {"second_valuation_mark_threshold": "100.00"}})
+        self.assertEqual(invalid_score.status_code, 422)
 
     def test_complete_paper_configuration_lifecycle(self):
         session = ExamSession.objects.first()
@@ -78,21 +96,37 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertEqual(replay.json()["version"], submitted.json()["version"])
         self.assertEqual(OutboxEvent.objects.filter(topic="config.paper.submitted", aggregate_id=paper["id"]).count(), 1)
 
-        approved = self.post(
+        self_approval = self.post(f"/api/v1/configuration/papers/{paper['id']}/approve", {"version": submitted.json()["version"], "note": "Must be rejected"})
+        self.assertEqual(self_approval.status_code, 409)
+        approved = self.authenticated_client("controller@admiezo.local").post(
             f"/api/v1/configuration/papers/{paper['id']}/approve",
-            {"version": submitted.json()["version"], "note": "Approved for evaluation"},
+            data=json.dumps({"version": submitted.json()["version"], "note": "Approved for evaluation"}), content_type="application/json",
         )
         self.assertEqual(approved.status_code, 200)
         self.assertEqual(approved.json()["status"], "approved")
 
-        frozen = self.post(
+        self.assertEqual(self.post(f"/api/v1/configuration/papers/{paper['id']}/freeze", {"version": approved.json()["version"], "note": "Must be rejected"}).status_code, 409)
+        approver_freeze = self.authenticated_client("controller@admiezo.local").post(
             f"/api/v1/configuration/papers/{paper['id']}/freeze",
-            {"version": approved.json()["version"], "note": "Go-live configuration"},
+            data=json.dumps({"version": approved.json()["version"], "note": "Must be rejected"}), content_type="application/json",
+        )
+        self.assertEqual(approver_freeze.status_code, 409)
+
+        frozen = self.authenticated_client("reviewer@admiezo.local").post(
+            f"/api/v1/configuration/papers/{paper['id']}/freeze",
+            data=json.dumps({"version": approved.json()["version"], "note": "Go-live configuration"}), content_type="application/json",
         )
         self.assertEqual(frozen.status_code, 200)
         self.assertEqual(frozen.json()["status"], "frozen")
         self.assertEqual(ConfigurationRevision.objects.filter(aggregate_id=paper["id"]).count(), 6)
-        self.assertTrue(AuditEvent.objects.filter(action="config.paper.frozen", aggregate_id=paper["id"]).exists())
+        stored = Paper.objects.get(id=paper["id"])
+        self.assertEqual(stored.submitted_by_id, User.objects.get(username="admin@admiezo.local").id)
+        self.assertEqual(stored.approved_by_id, User.objects.get(username="controller@admiezo.local").id)
+        self.assertEqual(stored.frozen_by_id, User.objects.get(username="reviewer@admiezo.local").id)
+        frozen_audit = AuditEvent.objects.get(action="config.paper.frozen", aggregate_id=paper["id"])
+        self.assertEqual(frozen_audit.payload["submitted_by_id"], stored.submitted_by_id)
+        self.assertEqual(frozen_audit.payload["approved_by_id"], stored.approved_by_id)
+        self.assertEqual(frozen_audit.payload["frozen_by_id"], stored.frozen_by_id)
         self.assertTrue(OutboxEvent.objects.filter(topic="config.paper.frozen", aggregate_id=paper["id"]).exists())
 
     def test_cross_tenant_related_record_is_rejected(self):
@@ -287,3 +321,103 @@ class ConfigurationWorkflowTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 409)
+
+    def test_event_requires_assigned_active_centre_and_retry_is_idempotent(self):
+        session = ExamSession.objects.first()
+        payload = {"session_id": str(session.id), "name": "Controlled event", "starts_at": session.evaluation_starts_at.isoformat(), "ends_at": session.evaluation_ends_at.isoformat(), "evaluation_centre_ids": []}
+        self.assertEqual(self.post("/api/v1/configuration/events", payload).status_code, 422)
+        centre = EvaluationCentre.objects.create(tenant_id=session.tenant_id, code="RETRY-CENTRE", name="Retry centre")
+        payload["evaluation_centre_ids"] = [str(centre.id)]
+        key = f"event-{uuid.uuid4()}"
+        first = self.client.post("/api/v1/configuration/events", data=json.dumps(payload), content_type="application/json", HTTP_IDEMPOTENCY_KEY=key)
+        second = self.client.post("/api/v1/configuration/events", data=json.dumps(payload), content_type="application/json", HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.json()["id"], first.json()["id"])
+        centre.is_active = False
+        centre.save(update_fields=["is_active"])
+        readiness = self.client.get("/api/v1/configuration/readiness").json()
+        self.assertFalse(readiness["ready"])
+        self.assertTrue(any("centre" in item for item in readiness["critical_alerts"]))
+
+    def test_paper_numeric_and_subject_session_rules(self):
+        session = ExamSession.objects.first()
+        subject = Subject.objects.first()
+        payload = {"session_id": str(session.id), "subject_id": str(subject.id), "code": "ZERO-TEST", "title": "Zero paper", "max_marks": "0", "pass_marks": "0"}
+        self.assertEqual(self.post("/api/v1/configuration/papers", payload).status_code, 422)
+        subject.session_ids = []
+        subject.save(update_fields=["session_ids"])
+        payload["max_marks"] = "10"
+        self.assertEqual(self.post("/api/v1/configuration/papers", payload).status_code, 422)
+
+    def test_linked_master_validation_and_revision(self):
+        year = AcademicYear.objects.first()
+        session = ExamSession.objects.first()
+        term = Term.objects.filter(academic_year=year).first()
+        self.assertEqual(self.post("/api/v1/configuration/sessions", {"academic_year_id": str(year.id), "term_id": str(term.id), "name": "Out of window", "evaluation_starts_at": "2030-01-01T09:00:00Z", "evaluation_ends_at": "2030-01-02T09:00:00Z"}).status_code, 422)
+        programme = Programme.objects.first()
+        other_regulation = Regulation.objects.create(tenant_id=programme.tenant_id, code="OTHER-REG", title="Other", effective_from="2020-01-01")
+        self.assertEqual(self.post("/api/v1/configuration/courses", {"programme_id": str(programme.id), "regulation_id": str(other_regulation.id), "code": "WRONG-COURSE", "name": "Wrong", "duration_terms": 0}).status_code, 422)
+        centre = EvaluationCentre.objects.create(tenant_id=year.tenant_id, code="EDIT-CENTRE", name="Edit centre")
+        invalid = self.client.patch(f"/api/v1/configuration/masters/centres/{centre.id}", data=json.dumps({"version": 1, "changes": {"network_cidrs": ["not-a-cidr"]}, "reason": "Configure network"}), content_type="application/json")
+        self.assertEqual(invalid.status_code, 422)
+        updated = self.client.patch(f"/api/v1/configuration/masters/centres/{centre.id}", data=json.dumps({"version": 1, "changes": {"network_cidrs": ["10.0.0.0/8"]}, "reason": "Configure network"}), content_type="application/json")
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(ConfigurationRevision.objects.filter(aggregate_id=centre.id, version=2).exists())
+        self.assertEqual(session.term_record_id, term.id)
+
+    def test_post_submission_question_change_reopens_paper(self):
+        source = Paper.objects.first()
+        created = self.post("/api/v1/configuration/papers", {"session_id": str(source.session_id), "subject_id": str(source.subject_id), "code": f"REVISE-{uuid.uuid4().hex[:8]}", "title": "Revision paper", "max_marks": "20", "pass_marks": "8"})
+        self.assertEqual(created.status_code, 200)
+        paper_id = created.json()["id"]
+        added = self.post(f"/api/v1/configuration/papers/{paper_id}/questions", {"number": "Q1", "max_marks": "20"})
+        submitted = self.post(f"/api/v1/configuration/papers/{paper_id}/submit", {"version": added.json()["paper_version"], "note": "Ready for review"})
+        self.assertEqual(submitted.status_code, 200)
+        request = self.post(f"/api/v1/configuration/papers/{paper_id}/changes", {"version": submitted.json()["version"], "kind": "emergency_update", "reason": "Correct the first question before evaluation", "changes": {"questions": [{"number": "Q1", "max_marks": "20", "question_type": "objective", "required": True}]}})
+        self.assertEqual(request.status_code, 200)
+        change = request.json()
+        first = self.authenticated_client("controller@admiezo.local").post(f"/api/v1/configuration/changes/{change['id']}/decision", data=json.dumps({"version": change["version"], "decision": "approved"}), content_type="application/json")
+        self.assertEqual(first.status_code, 200)
+        second = self.authenticated_client("reviewer@admiezo.local").post(f"/api/v1/configuration/changes/{change['id']}/decision", data=json.dumps({"version": first.json()["change"]["version"], "decision": "approved"}), content_type="application/json")
+        self.assertEqual(second.status_code, 200)
+        paper = Paper.objects.get(id=paper_id)
+        self.assertEqual(paper.status, Paper.Status.DRAFT)
+        self.assertIsNone(paper.submitted_by_id)
+        self.assertEqual(paper.questions.get().question_type, "objective")
+
+    def test_session_readiness_requires_independent_approval_and_live_centre(self):
+        session = ExamSession.objects.first()
+        session.status = ExamSession.Status.DRAFT
+        session.save(update_fields=["status"])
+        submitted = self.post(f"/api/v1/configuration/sessions/{session.id}/transition", {"version": session.version, "target": "approval", "reason": "Request readiness review"})
+        self.assertEqual(submitted.status_code, 200)
+        blocked = self.post(f"/api/v1/configuration/sessions/{session.id}/transition", {"version": submitted.json()["version"], "target": "ready", "reason": "Must be independent"})
+        self.assertEqual(blocked.status_code, 409)
+        controller = self.authenticated_client("controller@admiezo.local")
+        missing_centre = controller.post(f"/api/v1/configuration/sessions/{session.id}/transition", data=json.dumps({"version": submitted.json()["version"], "target": "ready", "reason": "Review readiness"}), content_type="application/json")
+        self.assertEqual(missing_centre.status_code, 409)
+        self.assertEqual(self.client.get("/api/v1/configuration/readiness").json()["decision"], "not_ready")
+
+    def test_calendar_overlap_requires_independent_one_use_exception(self):
+        payload = {"label": "2027-calendar-exception", "starts_on": "2027-01-01", "ends_on": "2027-12-31"}
+        self.assertEqual(self.post("/api/v1/configuration/academic-years", payload).status_code, 409)
+        requested = self.post("/api/v1/configuration/calendar-exceptions", {"entity": "academic_year", "starts_on": payload["starts_on"], "ends_on": payload["ends_on"], "reason": "University approved parallel academic calendar"})
+        self.assertEqual(requested.status_code, 200)
+        exception_id = requested.json()["id"]
+        self.assertEqual(self.post(f"/api/v1/configuration/calendar-exceptions/{exception_id}/decision", {"approve": True}).status_code, 409)
+        approved = self.authenticated_client("controller@admiezo.local").post(f"/api/v1/configuration/calendar-exceptions/{exception_id}/decision", data=json.dumps({"approve": True}), content_type="application/json")
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(self.post("/api/v1/configuration/academic-years", payload).status_code, 200)
+        second = {**payload, "label": "same-window-second-use"}
+        self.assertEqual(self.post("/api/v1/configuration/academic-years", second).status_code, 409)
+
+    def test_linked_session_create_retry_is_idempotent(self):
+        year = AcademicYear.objects.first()
+        term = Term.objects.filter(academic_year=year).first()
+        payload = {"academic_year_id": str(year.id), "term_id": str(term.id), "name": "Idempotent linked session", "evaluation_starts_at": "2026-10-01T09:00:00Z", "evaluation_ends_at": "2026-10-10T17:00:00Z"}
+        key = f"session-{uuid.uuid4()}"
+        first = self.client.post("/api/v1/configuration/sessions", data=json.dumps(payload), content_type="application/json", HTTP_IDEMPOTENCY_KEY=key)
+        second = self.client.post("/api/v1/configuration/sessions", data=json.dumps(payload), content_type="application/json", HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["id"], second.json()["id"])
+        self.assertEqual(ExamSession.objects.get(id=first.json()["id"]).term_record_id, term.id)

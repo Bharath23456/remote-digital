@@ -160,6 +160,7 @@ test("evaluator opens a real encrypted page through the signed viewer", async ({
   const open = availableRow.getByTitle("Open secure evaluation");
   await expect(open).toBeVisible();
   await open.click();
+  await expect(page.getByRole("heading", { name: "Identity verification" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Secure evaluation check" })).toBeVisible();
   await page.getByRole("button", { name: "Run security checks" }).click();
   await expect(page.getByText("Ready", { exact: true })).toBeVisible();

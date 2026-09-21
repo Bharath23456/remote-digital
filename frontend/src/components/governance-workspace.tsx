@@ -1,34 +1,54 @@
 "use client";
-/* eslint-disable react-hooks/purity */
 
-import { Check, Clock3, KeyRound, LockKeyhole, RefreshCw, Repeat2, ShieldCheck, UserRoundCheck, X } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
-type Catalog = { policies: { id: string; paper_id: string; paper: string; approval_required: boolean; assignment_expiry_hours: number; lock_minutes: number; require_step_up_for_reassignment: boolean; version: number }[]; evaluators: { id: string; code: string; name: string; status: string }[]; assignments: { id: string; script: string; paper: string; round: number; status: string; due_at: string; version: number; approved: boolean; locked: boolean }[]; reassignments: { id: string; assignment_id: string; script: string; status: string; reason: string; expires_at: string; version: number }[] };
-type WorkflowCatalog = { workflows: { id: string; assignment_id: string; script: string; state: string; last_page: number; expires_at: string | null; version: number }[]; extensions: { id: string; workflow_id: string; status: string; requested_until: string; reason: string; version: number }[] };
-const empty: Catalog = { policies: [], evaluators: [], assignments: [], reassignments: [] }; const emptyWorkflows: WorkflowCatalog = { workflows: [], extensions: [] };
-const title = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-async function api(path: string, options?: RequestInit) { const response = await csrfFetch(path, options); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || "Governance operation failed"); return body; }
+type HistoryRow = {
+  id: string;
+  run_id: string;
+  ran_by: string;
+  ran_at: string;
+  script: string;
+  paper: string;
+  subject: string;
+  round: number;
+  evaluator: string | null;
+  status: string;
+  blockers: string[];
+};
 
 export function GovernanceWorkspace() {
-  const [tab, setTab] = useState<"assignments" | "workflows" | "policies">("assignments"); const [data, setData] = useState<Catalog>(empty); const [workflows, setWorkflows] = useState<WorkflowCatalog>(emptyWorkflows); const [reassign, setReassign] = useState<Catalog["assignments"][number] | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
-  const load = useCallback(async () => { setBusy(true); try { const [catalog, flow] = await Promise.all([api("/api/v1/assignment-governance/catalog"), api("/api/v1/workflow/catalog")]); setData(catalog); setWorkflows(flow); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "Governance data could not be loaded"); } finally { setBusy(false); } }, []);
-  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
-  async function action(path: string, body: object) { setBusy(true); try { await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); setNotice("Decision recorded with audit and outbox evidence"); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Decision failed"); } finally { setBusy(false); } }
-  const locked = data.assignments.filter((item) => item.locked).length; const pendingReassignments = data.reassignments.filter((item) => item.status === "requested").length; const expiring = data.assignments.filter((item) => new Date(item.due_at).getTime() - Date.now() < 24 * 3600_000 && item.status !== "submitted").length;
-  return <div className="config-workspace"><div className="receiving-summary"><div><LockKeyhole /><span>Active locks</span><strong>{locked}</strong></div><div><Repeat2 /><span>Reassignments pending</span><strong>{pendingReassignments}</strong></div><div><Clock3 /><span>Due within 24 hours</span><strong>{expiring}</strong></div></div>
-    <div className="workspace-toolbar"><div className="entity-tabs"><button className={tab === "assignments" ? "active" : ""} onClick={() => setTab("assignments")}>Assignment control</button><button className={tab === "workflows" ? "active" : ""} onClick={() => setTab("workflows")}>Evaluation workflow</button><button className={tab === "policies" ? "active" : ""} onClick={() => setTab("policies")}>Policies</button></div><button className="secondary-button" onClick={load} disabled={busy}><RefreshCw />Refresh</button></div>
-    {notice && <div className="success-banner"><Check />{notice}</div>}{error && <div className="form-error">{error}</div>}
-    {tab === "assignments" && <><section className="panel"><header className="panel-header"><div><h2 className="panel-title">Blind assignment controls</h2><p className="panel-subtitle">Approval, access lock, expiry and secure reassignment</p></div></header><div className="table-wrap"><table><thead><tr><th>Anonymous script</th><th>Paper</th><th>Round</th><th>Due</th><th>Approval</th><th>Lock</th><th>Status</th><th>Control</th></tr></thead><tbody>{data.assignments.map((item) => <tr key={item.id}><td><strong>{item.script}</strong></td><td>{item.paper}</td><td>{item.round}</td><td>{new Date(item.due_at).toLocaleString("en-IN")}</td><td>{item.approved ? <span className="status-pill approved">Approved</span> : <span className="status-pill review">Pending</span>}</td><td>{item.locked ? "In use" : "Available"}</td><td><span className={`status-pill ${item.status}`}>{title(item.status)}</span></td><td><div className="row-actions">{!item.approved && <button title="Approve assignment" onClick={() => action(`/api/v1/assignment-governance/assignments/${item.id}/approval`, { decision: "approved", note: "Allocation and conflicts reviewed." })}><UserRoundCheck /></button>}{item.status !== "submitted" && <button title="Request secure reassignment" onClick={() => setReassign(item)}><Repeat2 /></button>}</div></td></tr>)}</tbody></table></div></section>
-      {data.reassignments.length > 0 && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Reassignment decisions</h2><p className="panel-subtitle">Requester and approver must be different operators</p></div></header><div className="table-wrap"><table><thead><tr><th>Script</th><th>Reason</th><th>Expires</th><th>Status</th><th>Control</th></tr></thead><tbody>{data.reassignments.map((item) => <tr key={item.id}><td><strong>{item.script}</strong></td><td>{item.reason}</td><td>{new Date(item.expires_at).toLocaleString("en-IN")}</td><td><span className={`status-pill ${item.status}`}>{title(item.status)}</span></td><td><div className="row-actions">{item.status === "requested" && <><button title="Approve and execute" onClick={() => action(`/api/v1/assignment-governance/reassignments/${item.id}/decision`, { version: item.version, approve: true })}><Check /></button><button title="Reject" onClick={() => action(`/api/v1/assignment-governance/reassignments/${item.id}/decision`, { version: item.version, approve: false })}><X /></button></>}</div></td></tr>)}</tbody></table></div></section>}</>}
-    {tab === "workflows" && <><section className="panel"><header className="panel-header"><div><h2 className="panel-title">Evaluation workflows</h2><p className="panel-subtitle">Draft, review, submission, moderation, revaluation and finalization state</p></div></header><div className="table-wrap"><table><thead><tr><th>Script</th><th>Last page</th><th>Draft expiry</th><th>State</th><th>Version</th></tr></thead><tbody>{workflows.workflows.map((item) => <tr key={item.id}><td><strong>{item.script}</strong></td><td>{item.last_page}</td><td>{item.expires_at ? new Date(item.expires_at).toLocaleString("en-IN") : "Not started"}</td><td><span className={`status-pill ${item.state}`}>{title(item.state)}</span></td><td>v{item.version}</td></tr>)}</tbody></table></div></section><section className="panel"><header className="panel-header"><div><h2 className="panel-title">Extension decisions</h2><p className="panel-subtitle">Controlled late evaluation windows</p></div></header><div className="table-wrap"><table><thead><tr><th>Requested until</th><th>Reason</th><th>Status</th><th>Control</th></tr></thead><tbody>{workflows.extensions.map((item) => <tr key={item.id}><td>{new Date(item.requested_until).toLocaleString("en-IN")}</td><td>{item.reason}</td><td><span className={`status-pill ${item.status}`}>{title(item.status)}</span></td><td><div className="row-actions">{item.status === "requested" && <button title="Approve extension" onClick={() => action(`/api/v1/workflow/extensions/${item.id}/decision`, { version: item.version, approve: true, note: "Operational extension approved." })}><Check /></button>}</div></td></tr>)}</tbody></table></div></section></>}
-    {tab === "policies" && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Assignment policies</h2><p className="panel-subtitle">Expiry, concurrent session locks and privileged reassignment</p></div></header><div className="control-matrix">{data.policies.map((item) => <div className="control-item" key={item.id}><div className="control-ok"><ShieldCheck /></div><div><strong>{item.paper}</strong><span>{item.lock_minutes} minute lock · {item.assignment_expiry_hours} hour expiry · {item.approval_required ? "Approval required" : "Direct allocation"}</span></div></div>)}</div></section>}
-    {reassign && <ReassignmentModal assignment={reassign} evaluators={data.evaluators} onClose={() => setReassign(null)} onSaved={async () => { setReassign(null); await load(); }} />}
-  </div>;
-}
+  const [rows, setRows] = useState<HistoryRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await csrfFetch(`/api/v1/allocation/history?page=${page}&q=${encodeURIComponent(query.trim())}`);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || "Allocation history could not be loaded");
+      setRows(body.rows || []);
+      setTotal(body.total ?? body.rows?.length ?? 0);
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Allocation history could not be loaded");
+    } finally {
+      setLoading(false);
+    }
+  }, [page, query]);
+  useEffect(() => { const timer = window.setTimeout(() => void load(), query ? 250 : 0); return () => window.clearTimeout(timer); }, [load, query]);
 
-function ReassignmentModal({ assignment, evaluators, onClose, onSaved }: { assignment: Catalog["assignments"][number]; evaluators: Catalog["evaluators"]; onClose: () => void; onSaved: () => Promise<void> }) {
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(""); async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); try { await api(`/api/v1/assignment-governance/assignments/${assignment.id}/reassignments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proposed_evaluator_id: form.get("evaluator") || null, reason: form.get("reason") }) }); await onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Request failed"); } finally { setBusy(false); } }
-  return <div className="modal-backdrop"><form className="modal-panel" onSubmit={submit}><header className="modal-header"><div><h2>Secure reassignment</h2><p>{assignment.script} · privileged step-up and independent approval required</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></header><div className="form-grid one-column"><label className="field"><span>Proposed evaluator</span><select name="evaluator"><option value="">Best conflict-free replacement</option>{evaluators.filter((item) => item.status === "active").map((item) => <option value={item.id} key={item.id}>{item.code} · {item.name}</option>)}</select></label><label className="field"><span>Reason</span><textarea name="reason" required minLength={8} /></label>{error && <div className="form-error">{error}</div>}</div><footer className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy}><KeyRound />Request reassignment</button></footer></form></div>;
+  return <div className="config-workspace">
+    <div className="workspace-toolbar">
+      <label className="search-field"><Search /><input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search script, subject or evaluator" aria-label="Search allocation history" /></label>
+    </div>
+    {error && <div className="form-error" role="alert">{error}</div>}
+    <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Allocation history</h2><p className="panel-subtitle">Simulation operator, subject and proposed evaluator for each anonymous script</p></div></header>
+      {loading ? <div className="empty-state">Loading allocation history…</div> : rows.length ? <><div className="table-wrap"><table><thead><tr><th>Run by</th><th>Time</th><th>Script</th><th>Paper / subject</th><th>Round</th><th>Evaluator</th><th>Status</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.ran_by}</strong></td><td>{new Date(row.ran_at).toLocaleString("en-IN")}</td><td><strong>{row.script}</strong></td><td>{row.paper}<br /><small>{row.subject}</small></td><td>{row.round}</td><td>{row.evaluator || "Not matched"}</td><td>{row.blockers.length ? <span className="allocation-blockers">{row.blockers.join(", ")}</span> : <span className={`status-pill ${row.status}`}>{row.status === "planned" ? "Proposed" : row.status === "completed" ? "Committed" : row.status === "partial" ? "Run partially committed" : "Unallocated"}</span>}</td></tr>)}</tbody></table></div><div className="repository-pagination"><span>{(page - 1) * 50 + 1}–{Math.min(page * 50, total)} of {total}</span><button className="icon-button" title="Previous page" disabled={page === 1} onClick={() => setPage(page - 1)}><ChevronLeft /></button><button className="icon-button" title="Next page" disabled={page * 50 >= total} onClick={() => setPage(page + 1)}><ChevronRight /></button></div></> : <div className="empty-state">{query ? "No matching allocation records." : "No simulations recorded yet."}</div>}
+    </section>
+  </div>;
 }

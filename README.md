@@ -127,6 +127,10 @@ This module records the controlled arrival of physical answer-script consignment
 - Supports acknowledgement and resolution of operational alerts and dual confirmation for sensitive receiving actions.
 - Hands verified packets and bundles to the custody module for script registration.
 
+The guided demo route follows three separate workstations. **Script receiving** prepares a bundle with subject-specific packet manifests and dispatches it (or marks it for on-site scanning). **Chain of custody** scans the arriving bundle and then each packet inside it; on-site bundles skip the transport receipt but still require packet scans. **Digitization** opens a received packet by barcode and uploads one script's front page and answer pages at a time. Each packet has one subject and an expected booklet QR list. Admins can create a **Bundle preparer**, **Bundle and packet receiver**, or **Scan operator** in **Access governance > Access > Add user**. Each role sees only its workstation and is blocked from the others at the API; university administrators retain all three screens.
+
+For the demo, barcode scans are typed into the matching fields and script scanning uses page-image uploads. On upload, the first page is read for a QR and the form's ten-column OMR USN grid (digit-only and letter-only columns). The QR must match the selected packet manifest; that packet determines the paper/subject. The USN is sent only to the isolated encrypted identity service. If recognition fails, the scan operator can enter the QR and USN from a valid cover image when `DEMO_MANUAL_RECOGNITION_ENABLED=true`; a readable QR must still match, packet membership is enforced, and the manual action is audited without exposing the USN. This fallback defaults to disabled outside the Docker demo and is not a production identity-verification method. This reader is calibrated to the supplied cover template; each different university form needs its own validated template before live use. After successful upload, guided scripts automatically mask page 1 and preserve answer pages, then appear in **Anonymization** for preview or one-step return for remasking. There is no separate identity registration or multi-person mask approval in this guided path. Exceptional candidate identity resolution remains separately protected. The guided demo path is enabled by `DEMO_MANUAL_INTAKE_ENABLED=true` in Docker and defaults to disabled outside Docker.
+
 ### Module 09: Script Identification, Barcode and Chain of Custody
 
 This module gives each script an opaque operational identity and records every physical or digital handoff.
@@ -233,10 +237,13 @@ This module guides an assignment from first open to an idempotent, auditable sub
 This module coordinates independent first, second, and third valuations without examiner leakage.
 
 - Locks an immutable valuation result from each submitted evaluation using an idempotent finalize operation.
+- Paper configuration sets one, two, or three required independent rounds. One-round papers propose the first score as the final mark unless an optional score trigger is configured; scores strictly above that trigger require an independent second round.
 - Keeps previous-round examiner identity, marks, totals, and comparison data hidden from later evaluators.
 - Compares question and total differences only after the required rounds are finalized.
 - Applies the paper's configured tolerance to accept aligned valuations or open a discrepancy case.
-- Requests a third valuation through the allocation engine when the configured reconciliation rule requires it.
+- Allows the next round to be allocated only after the prior result is locked. Three-round papers require all three rounds; aligned scores follow the configured final-mark rule, while threshold breaches enter reconciliation.
+- The optional score trigger is separate from the difference threshold: configure it under **Exam configuration → Papers → Round 2 if score exceeds** for a one-round paper. Frozen-paper changes use the existing governed change workflow.
+- For existing one-round submissions made before this policy, preview missing final-mark proposals with `docker compose exec backend python manage.py reconcile_single_round_marks`; add them with `docker compose exec backend python manage.py reconcile_single_round_marks --apply`. The command is idempotent and does not approve or lock marks.
 
 ### Module 25: Discrepancy and Reconciliation Management
 
@@ -454,7 +461,11 @@ Create wildcard DNS and TLS for `*.abc.com`; a university provisioned with slug 
 
 University administrators manage access from **Access governance > User access**. **Add user** creates or reuses an identity, assigns a tenant role, limits the account to selected modules, and displays a temporary password once. An evaluator account is restricted to the Evaluation module. Existing memberships can be edited or suspended from the same screen, and module grants are enforced by both frontend navigation and backend middleware.
 
+For guided intake, assign **Bundle dispatch operator** to Script receiving, **Bundle and packet receiver** to Chain of custody, or **Script scanning operator** to Digitization. Each account is confined to its own desk. **Operations supervisor** can see the intake progress dashboard and work across all three desks, but cannot access evaluation, security, or the separate Live operations module. These role presets are fixed in both the access form and API; supervisors can advance records through the audited workflow, not rewrite completed history.
+
 **Evaluator master > Register evaluator** can create the evaluator profile and linked login together. The issued username and one-time temporary password are shown after the transaction succeeds. New assignment and redistribution events create durable in-app notifications for the linked evaluator; the header notification centre opens the assigned Evaluation desk and records read or acknowledgement state.
+
+For local development only, Docker sets `DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=true`. Evaluators can enter a secure evaluation session without face enrollment or a face-match prompt; webcam preflight, proctoring, session authorization, and assignment locks remain enabled. Set this variable to `false` to restore face verification. The bypass is disabled whenever `DJANGO_DEBUG=false`, regardless of the variable.
 
 Platform administrators configure university-specific fields from **University management > Configure custom form fields**. Field definitions are tenant-scoped, ordered, versioned, audited, and support text, long text, number, date, select, and checkbox inputs. The configured fields are validated and persisted end to end for User Access, Evaluator Profile, Institution, Exam Session, Paper, Dispatch, Answer Script, Evaluator Allocation, Marking Scheme, and Notification creation forms.
 

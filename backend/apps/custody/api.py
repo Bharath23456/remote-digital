@@ -106,7 +106,7 @@ def create_script(request, payload: ScriptRegisterIn):
     membership = require_roles(request, *CUSTODY_INTAKE_ROLES)
     tenant_id = membership.institution.tenant_id
     custom_fields = validate_custom_values(tenant_id=tenant_id, form_key="script", values=payload.custom_fields)
-    packet = Packet.objects.filter(id=payload.packet_id, tenant_id=tenant_id).select_related("dispatch__paper").first()
+    packet = Packet.objects.filter(id=payload.packet_id, tenant_id=tenant_id, dispatch__intake_mode="legacy").select_related("dispatch__paper").first()
     if not packet:
         raise HttpError(404, "Packet not found")
     script = register_script(tenant_id=tenant_id, actor_id=request.auth.id, packet=packet, primary_barcode=payload.primary_barcode, supplements=payload.supplement_barcodes, bundle_barcode=payload.bundle_barcode, centre_barcode=payload.centre_barcode, location=payload.location)
@@ -130,8 +130,13 @@ def validate_barcode(request, payload: BarcodeScanIn):
 
 @router.post("/packets/{packet_id}/reconcile")
 def run_packet_reconciliation(request, packet_id: str, payload: ReconcilePacketIn):
+<<<<<<< HEAD
     membership = require_roles(request, *CUSTODY_INTAKE_ROLES)
     packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id).first()
+=======
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id, dispatch__intake_mode="legacy").first()
+>>>>>>> main
     if not packet:
         raise HttpError(404, "Packet not found")
     run = reconcile_packet(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, packet=packet, manifest_barcodes=payload.manifest_barcodes, observed_barcodes=payload.observed_barcodes)

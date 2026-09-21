@@ -75,6 +75,25 @@ def mask_object(*, source_key: str, destinations: list[dict], regions: list[dict
         return json.loads(response.read())
 
 
+def preview_mask_object(*, source_key: str, regions: list[dict]) -> bytes:
+    body = json.dumps({"source_key": source_key, "regions": regions}, separators=(",", ":")).encode()
+    signature = hmac.new(settings.SCRIPT_STORAGE_SIGNING_KEY.encode(), body, hashlib.sha256).hexdigest()
+    request = Request(
+        f"{settings.SCRIPT_STORAGE_INTERNAL_URL.rstrip('/')}/internal/mask-preview",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json", "X-Storage-Signature": signature},
+    )
+    with urlopen(request, timeout=30) as response:
+        return response.read(20_000_001)
+
+
+def read_object(key: str) -> bytes:
+    url, _ = signed_object_url(method="GET", key=key, public=False)
+    with urlopen(Request(url, method="GET"), timeout=15) as response:
+        return response.read(20_000_001)
+
+
 def process_scan_object(*, source_key: str, destination: dict, configuration: dict):
     body = json.dumps(
         {"source_key": source_key, "destination": destination, "configuration": configuration},
