@@ -1,3 +1,5 @@
+import re
+
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
@@ -61,6 +63,18 @@ class TenantDomainMiddleware:
 class TenantEntitlementMiddleware:
     """Enforce purchased module boundaries at the API edge."""
 
+    evaluator_evaluation_paths = {
+        "/api/v1/allocation/catalog",
+        "/api/v1/evaluator-management/face/status",
+        "/api/v1/evaluator-management/face/verify-access",
+    }
+    evaluator_evaluation_prefixes = (
+        "/api/v1/allocation/assignments/",
+        "/api/v1/assignment-governance/assignments/",
+        "/api/v1/phase4/remote-security/",
+        "/api/v1/valuation/evaluations/",
+    )
+
     module_prefixes = (
         ("/api/v1/configuration/", "configuration"),
         ("/api/v1/evaluator-management", "evaluators"),
@@ -106,14 +120,19 @@ class TenantEntitlementMiddleware:
             module = self._module_for(request)
             if module:
                 active_tenant_id = request.session.get("active_tenant_id")
-                account = TenantAccount.objects.filter(root_institution__tenant_id=active_tenant_id).only("enabled_modules").first()
-                if account and module not in account.enabled_modules:
-                    return JsonResponse({"detail": "This module is not enabled for the university", "code": "module_not_enabled"}, status=403)
                 membership = Membership.objects.filter(
                     user=request.user,
                     institution__tenant_id=active_tenant_id,
                     is_active=True,
-                ).only("enabled_modules").first()
+                ).only("role", "enabled_modules").first()
+                if membership and membership.role == Membership.Role.EVALUATOR and (
+                    request.path in self.evaluator_evaluation_paths
+                    or request.path.startswith(self.evaluator_evaluation_prefixes)
+                ):
+                    module = "evaluation"
+                account = TenantAccount.objects.filter(root_institution__tenant_id=active_tenant_id).only("enabled_modules").first()
+                if account and module not in account.enabled_modules:
+                    return JsonResponse({"detail": "This module is not enabled for the university", "code": "module_not_enabled"}, status=403)
                 if membership and membership.enabled_modules and module not in membership.enabled_modules:
                     return JsonResponse({"detail": "Your administrator has not granted access to this module", "code": "module_access_denied"}, status=403)
         return self.get_response(request)
@@ -121,6 +140,20 @@ class TenantEntitlementMiddleware:
     def _module_for(self, request):
         if request.path == "/api/v1/phase4/catalog":
             return {"assessment": "assessment", "operations": "operations", "services": "services"}.get(request.GET.get("section", ""))
+        if request.path == "/api/v1/receiving/guided/catalog":
+            return None
+        if re.fullmatch(r"/api/v1/receiving/guided/lookup/bundles/[^/]+", request.path):
+            return "custody"
+        if re.fullmatch(r"/api/v1/receiving/guided/lookup/packets/[^/]+", request.path):
+            return "digitization"
+        if request.path in ("/api/v1/receiving/guided/bundles/receive", "/api/v1/receiving/guided/packets/receive"):
+            return "custody"
+        if re.fullmatch(r"/api/v1/receiving/guided/packets/[^/]+/recognize", request.path):
+            return "digitization"
+        if request.path == "/api/v1/repository/manual-scan/uploads" or re.fullmatch(r"/api/v1/repository/(uploads/[^/]+/finalize|scripts/[^/]+/complete-scan)", request.path):
+            return "digitization"
+        if re.fullmatch(r"/api/v1/anonymisation/scripts/[^/]+/auto-mask", request.path):
+            return "digitization"
         for prefix, module in self.module_prefixes + self.phase4_prefixes:
             if request.path.startswith(prefix):
                 return module
@@ -133,6 +166,8 @@ class EvaluatorRoleBoundaryMiddleware:
     allowed_paths = {
         "/api/health",
         "/api/v1/allocation/catalog",
+        "/api/v1/evaluator-management/face/status",
+        "/api/v1/evaluator-management/face/verify-access",
     }
     allowed_prefixes = (
         "/api/v1/auth/",
@@ -180,3 +215,62 @@ class EvaluatorRoleBoundaryMiddleware:
             expires_at__gt=timezone.now(),
             revoked_at__isnull=True,
         ).exists()
+
+
+class IntakeDeskBoundaryMiddleware:
+    """Constrain intake workers to the one desk their role owns, including read routes."""
+
+    desk_paths = {
+        Membership.Role.BUNDLE_PREPARER: {
+            ("GET", "/api/v1/receiving/guided/catalog"),
+            ("GET", "/api/v1/receiving/guided/papers"),
+            ("POST", "/api/v1/receiving/guided/bundles"),
+            ("POST", "/api/v1/receiving/guided/bundles/start"),
+        },
+        Membership.Role.INTAKE_RECEIVER: {
+            ("GET", "/api/v1/receiving/guided/catalog"),
+            ("POST", "/api/v1/receiving/guided/bundles/receive"),
+            ("POST", "/api/v1/receiving/guided/packets/receive"),
+        },
+        Membership.Role.SCAN_OPERATOR: {
+            ("GET", "/api/v1/receiving/guided/catalog"),
+            ("POST", "/api/v1/repository/manual-scan/uploads"),
+        },
+        Membership.Role.OPERATIONS_SUPERVISOR: {
+            ("GET", "/api/v1/receiving/guided/catalog"),
+            ("GET", "/api/v1/receiving/guided/papers"),
+            ("POST", "/api/v1/receiving/guided/bundles"),
+            ("POST", "/api/v1/receiving/guided/bundles/start"),
+            ("POST", "/api/v1/receiving/guided/bundles/receive"),
+            ("POST", "/api/v1/receiving/guided/packets/receive"),
+            ("POST", "/api/v1/repository/manual-scan/uploads"),
+        },
+    }
+    scan_patterns = (
+        re.compile(r"/api/v1/receiving/guided/packets/[^/]+/recognize"),
+        re.compile(r"/api/v1/repository/uploads/[^/]+/finalize"),
+        re.compile(r"/api/v1/repository/scripts/[^/]+/complete-scan"),
+        re.compile(r"/api/v1/anonymisation/scripts/[^/]+/auto-mask"),
+    )
+    receiver_lookup = re.compile(r"/api/v1/receiving/guided/lookup/bundles/[^/]+")
+    scanner_lookup = re.compile(r"/api/v1/receiving/guided/lookup/packets/[^/]+")
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path.startswith("/api/") and request.user.is_authenticated:
+            active_tenant_id = request.session.get("active_tenant_id")
+            membership = Membership.objects.filter(user=request.user, institution__tenant_id=active_tenant_id, is_active=True).only("role").first()
+            if membership and membership.role in self.desk_paths:
+                route = (request.method, request.path)
+                allowed = request.path.startswith("/api/v1/auth/") or route in self.desk_paths[membership.role]
+                if request.method == "GET" and membership.role in (Membership.Role.INTAKE_RECEIVER, Membership.Role.OPERATIONS_SUPERVISOR):
+                    allowed = allowed or bool(self.receiver_lookup.fullmatch(request.path))
+                if request.method == "GET" and membership.role in (Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR):
+                    allowed = allowed or bool(self.scanner_lookup.fullmatch(request.path))
+                if membership.role in (Membership.Role.SCAN_OPERATOR, Membership.Role.OPERATIONS_SUPERVISOR) and request.method == "POST":
+                    allowed = allowed or any(pattern.fullmatch(request.path) for pattern in self.scan_patterns)
+                if not allowed:
+                    return JsonResponse({"detail": "This intake desk cannot access that operation"}, status=403)
+        return self.get_response(request)

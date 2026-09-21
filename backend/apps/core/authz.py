@@ -47,6 +47,16 @@ def require_step_up(request):
 def require_secure_evaluation_session(request, assignment, *, allow_paused=False):
     from apps.phase4.models import SecureEvaluationSession
 
+    other_session = SecureEvaluationSession.objects.select_related("assignment", "assignment__script").filter(
+        tenant_id=assignment.tenant_id,
+        evaluator=assignment.evaluator,
+        status__in=[SecureEvaluationSession.Status.ACTIVE, SecureEvaluationSession.Status.PAUSED],
+    ).exclude(assignment=assignment).order_by("-started_at").first()
+    if other_session:
+        script_code = getattr(other_session.assignment.script, "script_code", "")
+        suffix = f" Current assignment: {script_code}." if script_code else ""
+        raise HttpError(409, f"Finish or exit the current evaluation before opening another paper.{suffix}")
+
     session_id = request.headers.get("X-Secure-Evaluation-Session", "")
     statuses = [SecureEvaluationSession.Status.ACTIVE]
     if allow_paused:

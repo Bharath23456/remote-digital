@@ -4,8 +4,9 @@ from decimal import Decimal
 from django.contrib.auth.models import User
 from django.core.management import call_command
 import json
+from unittest.mock import patch
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -14,6 +15,8 @@ from apps.configuration.models import ExamSession, Paper
 from apps.core.models import OutboxEvent
 from apps.custody.models import Script
 from apps.evaluators.models import Evaluator
+from apps.evaluators.services import enroll_face_template, verify_evaluator_access
+from apps.identity_auth.models import AccessSession
 from apps.marking.models import Evaluation
 from apps.repository.models import ScriptAsset
 from apps.valuation.models import FinalMark, ValuationResult
@@ -70,6 +73,46 @@ class RemainingModulesTests(TestCase):
         cls.session = ExamSession.objects.get(id=cls.paper.session_id)
         cls.evaluator = Evaluator.objects.filter(tenant_id=cls.tenant_id, status=Evaluator.Status.ACTIVE).first()
 
+    def face_capture(self):
+        return {
+            "image_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2w==",
+            "liveness_passed": True,
+            "face_count": 1,
+            "quality": {"score": 0.95, "lighting": 0.88},
+            "model_version": "opencv-sface-v1",
+            "device_fingerprint": "f" * 64,
+        }
+
+    def verify_identity_for_secure_session(self, evaluator, assignment):
+        enroll_face_template(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator_id=evaluator.id, capture=self.face_capture())
+        access_session = AccessSession.objects.filter(user_id=evaluator.user_id, tenant_id=self.tenant_id, revoked_at__isnull=True).latest("created_at")
+        verify_evaluator_access(tenant_id=self.tenant_id, actor_id=evaluator.user_id, evaluator=evaluator, assignment=assignment, access_session=access_session, capture=self.face_capture())
+
+    def test_demo_face_bypass_requires_explicit_setting_and_keeps_secure_session(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        login = client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "face-bypass-test"}), content_type="application/json")
+        self.assertEqual(login.status_code, 200)
+        payload = {
+            "assignment_id": str(assignment.id),
+            "session_fingerprint": "a" * 64,
+            "device_fingerprint": "b" * 64,
+            "consent": True,
+            "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
+            "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
+        }
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=False):
+            self.assertTrue(client.get("/api/v1/phase4/remote-security/policy").json()["identity_verification_required"])
+            blocked = client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(blocked.status_code, 428)
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            self.assertFalse(client.get("/api/v1/phase4/remote-security/policy").json()["identity_verification_required"])
+            started = client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(started.status_code, 200)
+            self.assertEqual(started.json()["policy"]["identity_verification_required"], False)
+            self.assertEqual(SecureEvaluationSession.objects.get(id=started.json()["id"]).evaluator_id, evaluator.id)
+
     def test_workload_actions_require_independent_approval(self):
         item = create_workload_action(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator=self.evaluator, action="rebalance", reason="Deadline capacity requires redistribution.", metrics={"remaining": 28})
         with self.assertRaises(HttpError):
@@ -80,7 +123,8 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(item.status, WorkloadAction.Status.EXECUTED)
         self.assertTrue(OutboxEvent.objects.filter(topic="workload.action.executed", aggregate_id=str(item.id)).exists())
 
-    def test_secure_evaluation_session_pauses_and_creates_human_review(self):
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_secure_evaluation_session_pauses_and_creates_human_review(self, _extract_embedding):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
         client = Client()
@@ -90,6 +134,7 @@ class RemainingModulesTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(login.status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
             data=json.dumps({
@@ -123,11 +168,13 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(resumed.status_code, 200)
         self.assertEqual(resumed.json()["status"], "active")
 
-    def test_submit_recovers_previous_permission_failure_and_locks_result(self):
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_submit_recovers_previous_permission_failure_and_locks_result(self, _extract_embedding):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
         client = Client()
         self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "submit-recovery-test"}), content_type="application/json").status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
             data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "f" * 64}}),

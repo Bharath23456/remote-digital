@@ -26,6 +26,7 @@ class Script(TenantModel):
 
     script_code = models.CharField(max_length=48, unique=True)
     primary_barcode = models.CharField(max_length=64, unique=True)
+    recognized_cover_sha256 = models.CharField(max_length=64, blank=True)
     packet = models.ForeignKey(Packet, on_delete=models.PROTECT, related_name="scripts")
     paper = models.ForeignKey(Paper, on_delete=models.PROTECT, related_name="scripts")
     supplement_barcodes = models.JSONField(default=list, blank=True)

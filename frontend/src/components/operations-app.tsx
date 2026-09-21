@@ -12,13 +12,12 @@ import { ConfigurationWorkspace } from "@/components/configuration-workspace";
 import { EnterpriseWorkspace } from "@/components/enterprise-workspace";
 import { EvaluatorWorkspace } from "@/components/evaluator-workspace";
 import { SecurityWorkspace } from "@/components/security-workspace";
-import { ReceivingWorkspace } from "@/components/receiving-workspace";
-import { CustodyWorkspace } from "@/components/custody-workspace";
+import { GuidedIntakeWorkspace } from "@/components/guided-intake-workspace";
+import { IntakeOperationsDashboard } from "@/components/intake-operations-dashboard";
 import { RepositoryWorkspace } from "@/components/repository-workspace";
-import { AnonymisationWorkspace } from "@/components/anonymisation-workspace";
+import { GuidedMaskingWorkspace } from "@/components/guided-masking-workspace";
 import { AllocationWorkspace } from "@/components/allocation-workspace";
 import { EvaluationWorkspace } from "@/components/evaluation-workspace";
-import { DigitizationWorkspace } from "@/components/digitization-workspace";
 import { RubricWorkspace } from "@/components/rubric-workspace";
 import { GovernanceWorkspace } from "@/components/governance-workspace";
 import { ValuationWorkspace } from "@/components/valuation-workspace";
@@ -70,7 +69,7 @@ const navGroups: { label: string; items: { key: ViewKey; label: string; icon: ty
     { key: "configuration", label: "Exam configuration", icon: SlidersHorizontal },
     { key: "evaluators", label: "Evaluator master", icon: Users },
     { key: "allocation", label: "Allocation engine", icon: Network },
-    { key: "assignmentGovernance", label: "Assignment control", icon: Workflow },
+    { key: "assignmentGovernance", label: "Allocation history", icon: Workflow },
     { key: "serviceControl", label: "Results & services", icon: FileCheck2 },
   ]},
   { label: "Evaluation", items: [
@@ -90,6 +89,9 @@ const navGroups: { label: string; items: { key: ViewKey; label: string; icon: ty
 ];
 
 const evaluatorViews = new Set<ViewKey>(["evaluation"]);
+const intakeDeskViews: Record<string, ViewKey> = { bundle_preparer: "receiving", intake_receiver: "custody", scan_operator: "digitization" };
+const supervisorViews = new Set<ViewKey>(["dashboard", "receiving", "custody", "digitization"]);
+const guidedRefreshViews = new Set<ViewKey>(["receiving", "custody", "digitization", "anonymisation", "allocation", "assignmentGovernance"]);
 const platformViews = new Set<ViewKey>(["platformAdmin", "platformControl", "audit"]);
 const platformHashToView: Record<string, ViewKey> = { universities: "platformAdmin", operations: "platformControl", audit: "audit" };
 const platformViewToHash: Partial<Record<ViewKey, string>> = { platformAdmin: "universities", platformControl: "operations", audit: "audit" };
@@ -111,6 +113,8 @@ function navigationFor(role: string, platformMode: boolean, enabledModules: stri
   const allowed = (item: { key: ViewKey }) => !viewModule[item.key] || enabledModules.includes(viewModule[item.key]!);
   const entitledTenantNavigation = tenantNavigation.map((group) => ({ ...group, items: group.items.filter(allowed) })).filter((group) => group.items.length);
   if (role === "platform_admin") return platformMode ? platformNavigation : [{ label: "Platform", items: [{ key: "platformAdmin" as ViewKey, label: "Back to control plane", icon: Network }] }, ...entitledTenantNavigation];
+  if (intakeDeskViews[role]) return entitledTenantNavigation.map((group) => ({ ...group, items: group.items.filter((item) => item.key === intakeDeskViews[role]) })).filter((group) => group.items.length);
+  if (role === "operations_supervisor") return entitledTenantNavigation.map((group) => ({ ...group, items: group.items.filter((item) => supervisorViews.has(item.key)) })).filter((group) => group.items.length);
   if (role !== "evaluator") return entitledTenantNavigation;
   return tenantNavigation
     .map((group) => ({ ...group, items: group.items.filter((item) => evaluatorViews.has(item.key) && allowed(item)) }))
@@ -126,14 +130,14 @@ const viewMeta: Record<ViewKey, { eyebrow: string; title: string; description: s
   dashboard: { eyebrow: "Live operations", title: "Evaluation operations", description: "Script movement, allocation and evaluation readiness.", controls: [] },
   configuration: { eyebrow: "Module 01", title: "Exam configuration", description: "Versioned paper rules, marks and readiness state.", endpoint: "/api/v1/config/papers", countKey: "configuration", controls: ["Optimistic locking", "Configuration freeze", "Readiness validation"] },
   evaluators: { eyebrow: "Module 02", title: "Evaluator master", description: "Verified profiles, capacity and lifecycle controls.", endpoint: "/api/v1/evaluators", countKey: "evaluators", controls: ["Unique evaluator IDs", "Subject expertise", "Status history"] },
-  receiving: { eyebrow: "Module 08", title: "Script receiving", description: "Dispatch intake, counts, reconciliation and exceptions.", endpoint: "/api/v1/receiving/dispatches", countKey: "receiving", controls: ["Count reconciliation", "Exception routing", "Receiver confirmation"] },
-  custody: { eyebrow: "Module 09", title: "Chain of custody", description: "Opaque script identities and controlled movement history.", endpoint: "/api/v1/custody/scripts", countKey: "custody", controls: ["Collision-safe barcode", "State machine", "Append-only events"] },
-  digitization: { eyebrow: "Modules 10, 11 & 41", title: "Digitization control", description: "Scanner fleet, image quality processing and signed integrity evidence.", controls: ["Distributed scan queue", "Deterministic enhancement", "Scheduled tamper detection"] },
+  receiving: { eyebrow: "Module 08", title: "Script receiving", description: "Prepare bundle and packet manifests for dispatch or on-site scanning.", endpoint: "/api/v1/receiving/dispatches", countKey: "receiving", controls: ["Count reconciliation", "Exception routing", "Receiver confirmation"] },
+  custody: { eyebrow: "Module 09", title: "Chain of custody", description: "Receive bundles, then scan and reconcile their packets.", endpoint: "/api/v1/custody/scripts", countKey: "custody", controls: ["Collision-safe barcode", "State machine", "Append-only events"] },
+  digitization: { eyebrow: "Modules 10, 11 & 41", title: "Digitization control", description: "Open a received packet and upload each answer script.", controls: ["Distributed scan queue", "Deterministic enhancement", "Scheduled tamper detection"] },
   repository: { eyebrow: "Module 13", title: "Script repository", description: "Immutable asset metadata, integrity and retention.", endpoint: "/api/v1/repository/assets", countKey: "repository", controls: ["SHA-256 integrity", "Legal hold", "Signed media URLs"] },
   anonymisation: { eyebrow: "Module 12", title: "Candidate anonymization", description: "PII isolation, irreversible masking and dual-authorized resolution.", controls: ["Separate identity boundary", "Independent mask verification", "Two-person identity resolution"] },
   allocation: { eyebrow: "Module 06", title: "Allocation engine", description: "Blind assignments constrained by capacity and valuation round.", endpoint: "/api/v1/allocation/assignments", countKey: "allocation", controls: ["Blind allocation", "Capacity hard stop", "Conflict prevention"] },
   rubrics: { eyebrow: "Module 17", title: "Marking schemes", description: "Versioned criteria, guidance, approvals, freeze and clarifications.", controls: ["Two-person approval", "Content hashing", "Mandatory acknowledgement"] },
-  assignmentGovernance: { eyebrow: "Modules 07 & 18", title: "Assignment governance", description: "Blind access, concurrent locks, expiry and controlled workflow routing.", controls: ["Authorization before fetch", "Secure reassignment", "Workflow state machine"] },
+  assignmentGovernance: { eyebrow: "", title: "Allocation history", description: "Read-only record of allocation simulations and evaluator matches.", controls: [] },
   evaluation: { eyebrow: "Modules 14, 15 & 16", title: "Evaluation desk", description: "Secure script review, digital annotations and question-wise marking.", endpoint: "/api/v1/allocation/assignments", countKey: "allocation", controls: ["Five-minute media URLs", "Append-only mark revisions", "Previous valuations hidden"] },
   valuation: { eyebrow: "Modules 23 & 25", title: "Valuation review", description: "Independent round comparison, discrepancy reconciliation and final mark control.", controls: ["Blind valuations", "Threshold-based routing", "Immutable final mark lock"] },
   assessmentControl: { eyebrow: "Modules 24, 27 & 28", title: "Assessment control", description: "Moderation, revaluation and signed completion workflows.", controls: ["Independent decisions", "Final-mark checks", "Controlled release"] },
@@ -352,27 +356,36 @@ export function OperationsApp() {
   const load = useCallback(async () => {
     try {
       const meResponse = await csrfFetch("/api/v1/auth/me");
-      if (meResponse.status === 401) { endSession(); return; }
+      if (meResponse.status === 401) { endSession(); return false; }
       if (!meResponse.ok) throw new Error("The identity service is unavailable");
       const current = await meResponse.json() as UserContext;
-      if (endingSession.current) return;
+      if (endingSession.current) return false;
       if (current.must_change_password) {
         setContext(current); setOverview(emptyOverview()); setGlobalError("");
-        return;
+        return true;
       }
       if (current.role === "platform_admin" && platformMode) {
         setContext(current); setOverview(emptyOverview()); setView((currentView) => platformViews.has(currentView) ? currentView : "platformAdmin"); setGlobalError("");
-        return;
+        return true;
       }
       if (current.role === "evaluator") {
         setContext(current); setOverview(emptyOverview()); setView("evaluation"); setGlobalError("");
-        return;
+        return true;
+      }
+      if (intakeDeskViews[current.role]) {
+        setContext(current); setOverview(emptyOverview()); setView(intakeDeskViews[current.role]); setGlobalError("");
+        return true;
+      }
+      if (current.role === "operations_supervisor") {
+        setContext(current); setOverview(emptyOverview()); setView((currentView) => supervisorViews.has(currentView) ? currentView : "dashboard"); setGlobalError("");
+        return true;
       }
       const overviewResponse = await csrfFetch("/api/v1/operations/overview");
       if (!overviewResponse.ok) throw new Error("The operations API is unavailable");
-      if (endingSession.current) return;
+      if (endingSession.current) return false;
       setContext(current); setOverview(await overviewResponse.json()); setGlobalError("");
-    } catch (reason) { setGlobalError(reason instanceof Error ? reason.message : "Unable to load ADMIEZO"); }
+      return true;
+    } catch (reason) { setGlobalError(reason instanceof Error ? reason.message : "Unable to load ADMIEZO"); return false; }
     finally { setChecking(false); }
   }, [endSession, platformMode]);
   useEffect(() => {
@@ -454,20 +467,21 @@ export function OperationsApp() {
     if (window.location.hash !== `#${hash}`) window.history.replaceState(null, "", `#${hash}`);
   }
   function navigate(next: ViewKey) {
+    if (context?.role === "operations_supervisor" && !supervisorViews.has(next)) return;
     if (context?.role === "platform_admin" && platformViews.has(next)) rememberPlatformView(next);
     if (next === "platformAdmin" && context?.role === "platform_admin" && !platformMode) {
       setChecking(true); setPlatformMode(true);
     }
-    setView(next); setMenuOpen(false);
+    setView(next); setMenuOpen(false); setToast("");
   }
   if (checking) return <div className="loading-state"><div className="spinner" aria-label="Loading ADMIEZO" /></div>;
   if (!context || !overview) return <Login onSuccess={() => { endingSession.current = false; setLoginNotice(""); void load(); }} notice={loginNotice} />;
   if (context.must_change_password) return <PasswordSetup onComplete={async () => { setChecking(true); await load(); }} onSignOut={signOut} />;
   const role = context.role;
   const visibleNavigation = navigationFor(role, platformMode, context.enabled_modules);
-  const activeView = role === "evaluator" && !evaluatorViews.has(view) ? "evaluation" : view;
+  const activeView = intakeDeskViews[role] || (role === "evaluator" && !evaluatorViews.has(view) ? "evaluation" : role === "operations_supervisor" && !supervisorViews.has(view) ? "dashboard" : view);
   const isPlatformAdmin = role === "platform_admin";
-  const meta = viewMeta[activeView];
+  const meta = role === "operations_supervisor" && activeView === "dashboard" ? { ...viewMeta.dashboard, title: "Intake operations", description: "Bundle, packet and script intake status." } : viewMeta[activeView];
   const initials = context.user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   async function refreshCurrentView(event?: MouseEvent<HTMLButtonElement>) {
     event?.preventDefault();
@@ -483,16 +497,19 @@ export function OperationsApp() {
         setToast("Audit trail reloaded and updated with the most recent immutable actions.");
         return;
       }
-      await load();
-      setToast("Dashboard refreshed with the latest platform operations data.");
+      if (!await load()) return;
+      if (guidedRefreshViews.has(activeView) || (activeView === "dashboard" && role === "operations_supervisor")) setWorkspaceRefreshToken((value) => value + 1);
+      setToast(activeView === "dashboard" ? "Dashboard refreshed with the latest operations data." : "Latest records loaded.");
     } finally {
       setRefreshing(false);
     }
   }
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? "open" : ""}`}><div className="brand"><span className="brand-mark">A</span><div><div className="brand-name">ADMIEZO</div><div className="brand-label">Evaluation cloud</div></div></div><nav className="nav-scroll" aria-label="Primary navigation">{visibleNavigation.map((group) => <div className="nav-group" key={group.label}><div className="nav-label">{group.label}</div>{group.items.map((item) => <button className={`nav-item ${activeView === item.key ? "active" : ""}`} onClick={() => navigate(item.key)} key={item.key}><item.icon /><span>{item.label}</span></button>)}</div>)}</nav><div className="sidebar-footer"><div className="environment"><span className="environment-dot" />Evaluation core healthy</div></div></aside>
-    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? "Close navigation" : "Open navigation"} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <>{context.tenants.length > 1 ? <select aria-label="Active university" value={context.tenant.id} onChange={(event) => switchTenant(event.target.value)}>{context.tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}</select> : <div className="tenant-name">{context.tenant.name}</div>}<div className="session-name">{overview.session?.name || "No active examination session"}</div></>}</div><div className="top-actions">{!(platformMode && context.role === "platform_admin") && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} />}<button className="icon-button" title="Sign out" onClick={signOut}><LogOut /></button><button className="avatar" title="Account settings" aria-label="Account settings" onClick={() => setAccountOpen(true)}>{initials}</button></div></header>
-      <main className="content"><header className="page-heading"><div><p className="eyebrow">{meta.eyebrow}</p><h1>{meta.title}</h1><p className="heading-note">{meta.description}</p></div><button className="secondary-button" onClick={refreshCurrentView} disabled={refreshing}>{refreshing ? <RefreshCw className="spin" /> : <History />}{refreshing ? "Refreshing..." : "Refresh"}</button></header>{toast && <div className="toast-stack" aria-live="polite"><div className="app-toast"><Check />{toast}</div></div>}{globalError && <div className="form-error" role="alert">{globalError}</div>}{activeView === "platformAdmin" ? <PlatformAdminWorkspace key={`platform-admin-${workspaceRefreshToken}`} onOpenTenant={switchTenant} /> : activeView === "audit" && platformMode && isPlatformAdmin ? <PlatformAuditWorkspace refreshToken={auditRefreshToken} /> : activeView === "dashboard" ? <Dashboard overview={overview} navigate={navigate} /> : activeView === "configuration" ? <ConfigurationWorkspace /> : activeView === "evaluators" ? <EvaluatorWorkspace /> : activeView === "receiving" ? <ReceivingWorkspace /> : activeView === "custody" ? <CustodyWorkspace /> : activeView === "digitization" ? <DigitizationWorkspace /> : activeView === "anonymisation" ? <AnonymisationWorkspace /> : activeView === "repository" ? <RepositoryWorkspace /> : activeView === "allocation" ? <AllocationWorkspace /> : activeView === "rubrics" ? <RubricWorkspace /> : activeView === "assignmentGovernance" ? <GovernanceWorkspace /> : activeView === "evaluation" ? <EvaluationWorkspace role={role} /> : activeView === "valuation" ? <ValuationWorkspace /> : activeView === "assessmentControl" ? <AdvancedOperationsWorkspace section="assessment" /> : activeView === "liveControl" ? <AdvancedOperationsWorkspace section="operations" /> : activeView === "serviceControl" ? <AdvancedOperationsWorkspace section="services" /> : activeView === "platformControl" ? <AdvancedOperationsWorkspace key={`platform-control-${workspaceRefreshToken}`} section="platform" /> : activeView === "security" ? <SecurityWorkspace /> : activeView === "tenancy" ? <EnterpriseWorkspace role={role} onTenantChange={() => load()} /> : <ModuleWorkspace key={activeView} view={activeView} overview={overview} />}</main>
+    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? "Close navigation" : "Open navigation"} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <>{context.tenants.length > 1 ? <select aria-label="Active university" value={context.tenant.id} onChange={(event) => switchTenant(event.target.value)}>{context.tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}</select> : <div className="tenant-name">{context.tenant.name}</div>}<div className="session-name">{role === "operations_supervisor" ? "Intake workflow" : overview.session?.name || "No active examination session"}</div></>}</div><div className="top-actions">{!(platformMode && context.role === "platform_admin") && !intakeDeskViews[role] && role !== "operations_supervisor" && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} />}<button className="icon-button" title="Sign out" onClick={signOut}><LogOut /></button><button className="avatar" title="Account settings" aria-label="Account settings" onClick={() => setAccountOpen(true)}>{initials}</button></div></header>
+      <main className="content"><header className="page-heading"><div>{!/^Modules?\s+\d/.test(meta.eyebrow) && <p className="eyebrow">{meta.eyebrow}</p>}<h1>{meta.title}</h1><p className="heading-note">{meta.description}</p></div>
+        {activeView !== "valuation" && <button className="secondary-button" onClick={refreshCurrentView} disabled={refreshing}><RefreshCw className={refreshing ? "spin" : undefined} />{refreshing ? "Refreshing..." : "Refresh"}</button>}
+      </header>{toast && <div className="toast-stack" aria-live="polite"><div className="app-toast"><Check />{toast}</div></div>}{globalError && <div className="form-error" role="alert">{globalError}</div>}{activeView === "platformAdmin" ? <PlatformAdminWorkspace key={`platform-admin-${workspaceRefreshToken}`} onOpenTenant={switchTenant} /> : activeView === "audit" && platformMode && isPlatformAdmin ? <PlatformAuditWorkspace refreshToken={auditRefreshToken} /> : activeView === "dashboard" ? (role === "operations_supervisor" ? <IntakeOperationsDashboard key={workspaceRefreshToken} onNavigate={navigate} /> : <Dashboard overview={overview} navigate={navigate} />) : activeView === "configuration" ? <ConfigurationWorkspace /> : activeView === "evaluators" ? <EvaluatorWorkspace /> : activeView === "receiving" ? <GuidedIntakeWorkspace key={`receiving-${workspaceRefreshToken}`} stage="receiving" /> : activeView === "custody" ? <GuidedIntakeWorkspace key={`custody-${workspaceRefreshToken}`} stage="custody" /> : activeView === "digitization" ? <GuidedIntakeWorkspace key={`digitization-${workspaceRefreshToken}`} stage="digitization" /> : activeView === "anonymisation" ? <GuidedMaskingWorkspace key={`anonymisation-${workspaceRefreshToken}`} /> : activeView === "repository" ? <RepositoryWorkspace /> : activeView === "allocation" ? <AllocationWorkspace key={`allocation-${workspaceRefreshToken}`} /> : activeView === "rubrics" ? <RubricWorkspace /> : activeView === "assignmentGovernance" ? <GovernanceWorkspace key={`allocation-history-${workspaceRefreshToken}`} /> : activeView === "evaluation" ? <EvaluationWorkspace role={role} /> : activeView === "valuation" ? <ValuationWorkspace /> : activeView === "assessmentControl" ? <AdvancedOperationsWorkspace section="assessment" /> : activeView === "liveControl" ? <AdvancedOperationsWorkspace section="operations" /> : activeView === "serviceControl" ? <AdvancedOperationsWorkspace section="services" /> : activeView === "platformControl" ? <AdvancedOperationsWorkspace key={`platform-control-${workspaceRefreshToken}`} section="platform" /> : activeView === "security" ? <SecurityWorkspace /> : activeView === "tenancy" ? <EnterpriseWorkspace role={role} onTenantChange={async () => { await load(); }} /> : <ModuleWorkspace key={activeView} view={activeView} overview={overview} />}</main>
       {accountOpen && <AccountSettings email={context.user.email} onClose={() => setAccountOpen(false)} />}
     </div>
   </div>;

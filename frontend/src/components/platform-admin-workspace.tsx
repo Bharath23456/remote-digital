@@ -15,7 +15,7 @@ type Modal = "university" | "settings" | "domain" | "fields" | null;
 const MODULES = [
   ["configuration", "Exam configuration"], ["evaluators", "Evaluator management"], ["receiving", "Script receiving"],
   ["custody", "Chain of custody"], ["digitization", "Digitization"], ["anonymisation", "Anonymization"],
-  ["repository", "Script repository"], ["allocation", "Allocation"], ["assignment_governance", "Assignment control"],
+  ["repository", "Script repository"], ["allocation", "Allocation"], ["assignment_governance", "Allocation history"],
   ["rubrics", "Marking schemes"], ["evaluation", "Evaluation"], ["valuation", "Valuation"],
   ["assessment", "Assessment control"], ["operations", "Live operations"], ["services", "Results and services"],
   ["security", "Security governance"], ["audit", "Audit and forensics"], ["enterprise", "University hierarchy"],

@@ -240,6 +240,15 @@ def _validate_membership_access(actor_membership, role, enabled_modules):
         raise HttpError(422, "One or more selected modules are not enabled for this university")
     if role == Membership.Role.EVALUATOR and requested != {"evaluation"}:
         raise HttpError(422, "Evaluator accounts can access only the Evaluation module")
+    desk_modules = {
+        Membership.Role.BUNDLE_PREPARER: "receiving",
+        Membership.Role.INTAKE_RECEIVER: "custody",
+        Membership.Role.SCAN_OPERATOR: "digitization",
+    }
+    if role in desk_modules and requested != {desk_modules[role]}:
+        raise HttpError(422, "Select only the assigned intake desk module for this role")
+    if role == Membership.Role.OPERATIONS_SUPERVISOR and requested != {"receiving", "custody", "digitization"}:
+        raise HttpError(422, "Operations supervisors require exactly the receiving, custody and digitization modules")
     return sorted(requested)
 
 
@@ -253,6 +262,8 @@ def create_membership(request, payload: MembershipCreateIn):
     except ValidationError as exc:
         raise HttpError(422, "Enter a valid email address") from exc
     modules = _validate_membership_access(actor_membership, payload.role, payload.enabled_modules)
+    if payload.role == Membership.Role.OPERATIONS_SUPERVISOR and payload.permissions:
+        raise HttpError(422, "Operations supervisors cannot receive additional permissions")
     custom_fields = validate_custom_values(
         tenant_id=actor_membership.institution.tenant_id,
         form_key="user_access",
@@ -507,6 +518,8 @@ def update_membership_access(request, membership_id: str, payload: MembershipAcc
     actor_membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
     require_step_up(request)
     modules = _validate_membership_access(actor_membership, payload.role, payload.enabled_modules)
+    if payload.role == Membership.Role.OPERATIONS_SUPERVISOR and payload.permissions:
+        raise HttpError(422, "Operations supervisors cannot receive additional permissions")
     with transaction.atomic():
         target = Membership.objects.select_for_update().filter(
             id=membership_id, institution__tenant_id=actor_membership.institution.tenant_id

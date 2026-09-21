@@ -1,5 +1,4 @@
-from datetime import timedelta
-
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
@@ -15,12 +14,11 @@ from apps.assignment.models import AssignmentLock
 from apps.repository.models import ScriptAsset
 from apps.repository.storage import signed_object_url
 from apps.core.services import record_event
-from apps.tenancy.custom_fields import persist_custom_values, validate_custom_values
 from apps.tenancy.models import Membership
 
-from .models import AllocationPolicy, AllocationRun, Assignment
-from .schemas import AssignmentActionIn, ManualAssignmentIn, PolicyIn, RedistributionIn, SimulationIn
-from .services import build_plan, create_assignment, execute_plan, redistribute_assignment, save_policy
+from .models import AllocationPolicy, AllocationProposal, AllocationRun, Assignment
+from .schemas import AssignmentActionIn, PolicyIn, RedistributionIn, SimulationIn
+from .services import build_plan, execute_plan, next_valuation_round, redistribute_assignment, save_policy
 
 
 router = Router(tags=["Evaluator assignment and allocation"])
@@ -73,12 +71,12 @@ def allocation_catalog(request):
             "policies": [],
             "runs": [],
         }
-    papers = Paper.objects.filter(tenant_id=tenant_id).annotate(stored_count=Count("scripts", filter=Q(scripts__state=Script.State.STORED), distinct=True)).order_by("code")
+    papers = Paper.objects.filter(tenant_id=tenant_id).select_related("subject").annotate(stored_count=Count("scripts", filter=Q(scripts__state=Script.State.STORED), distinct=True)).order_by("code")
     evaluators = Evaluator.objects.filter(tenant_id=tenant_id).annotate(active_load=Count("assignments", filter=Q(assignments__status__in=[Assignment.Status.ASSIGNED, Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS])))
     policies = AllocationPolicy.objects.filter(tenant_id=tenant_id).select_related("paper")
     runs = AllocationRun.objects.filter(tenant_id=tenant_id).select_related("paper").order_by("-created_at")[:100]
-    scripts = Script.objects.filter(tenant_id=tenant_id, state__in=[Script.State.STORED, Script.State.ASSIGNED]).select_related("paper").prefetch_related("assignments").order_by("script_code")[:1000]
-    return {"assignments": [assignment_data(item) for item in assignments.order_by("-priority", "due_at")[:1000]], "scripts": [{"id": str(item.id), "script_code": item.script_code, "paper_id": str(item.paper_id), "paper": item.paper.code, "state": item.state, "version": item.version, "assigned_rounds": [assignment.valuation_round for assignment in item.assignments.all()]} for item in scripts], "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "valuation_rounds": item.valuation_rounds, "stored_scripts": item.stored_count, "status": item.status} for item in papers], "evaluators": [{"id": str(item.id), "code": item.evaluator_code, "name": item.display_name, "status": item.status, "daily_capacity": item.daily_capacity, "active_load": item.active_load} for item in evaluators.order_by("display_name")], "policies": [{"id": str(item.id), "paper_id": str(item.paper_id), "paper": item.paper.code, "algorithm": item.algorithm, "minimum_experience_years": item.minimum_experience_years, "minimum_expertise_level": item.minimum_expertise_level, "maximum_active_assignments": item.maximum_active_assignments, "assignment_due_hours": item.assignment_due_hours, "backup_required": item.backup_required, "allow_same_institution": item.allow_same_institution, "weights": item.weights, "version": item.version} for item in policies], "runs": [{"id": str(item.id), "paper": item.paper.code, "mode": item.mode, "algorithm": item.algorithm, "status": item.status, "requested_scripts": item.requested_scripts, "planned_scripts": item.planned_scripts, "allocated_scripts": item.allocated_scripts, "unallocated_scripts": item.unallocated_scripts, "average_quality_score": float(item.average_quality_score), "forecast": item.forecast, "created_at": item.created_at.isoformat()} for item in runs]}
+    scripts = Script.objects.filter(tenant_id=tenant_id, state__in=[Script.State.STORED, Script.State.ASSIGNED, Script.State.SUBMITTED]).select_related("paper").prefetch_related("assignments", "valuation_results", "final_mark").order_by("script_code")[:1000]
+    return {"assignments": [assignment_data(item) for item in assignments.order_by("-priority", "due_at")[:1000]], "scripts": [{"id": str(item.id), "script_code": item.script_code, "paper_id": str(item.paper_id), "paper": item.paper.code, "state": item.state, "version": item.version, "assigned_rounds": [assignment.valuation_round for assignment in item.assignments.all()], "next_round": next_valuation_round(item)} for item in scripts], "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "subject_code": item.subject.code, "subject_name": item.subject.name, "valuation_rounds": item.valuation_rounds, "second_valuation_mark_threshold": item.rules.get("second_valuation_mark_threshold"), "stored_scripts": item.stored_count, "status": item.status} for item in papers], "evaluators": [{"id": str(item.id), "code": item.evaluator_code, "name": item.display_name, "status": item.status, "daily_capacity": item.daily_capacity, "active_load": item.active_load} for item in evaluators.order_by("display_name")], "policies": [{"id": str(item.id), "paper_id": str(item.paper_id), "paper": item.paper.code, "algorithm": item.algorithm, "minimum_experience_years": item.minimum_experience_years, "minimum_expertise_level": item.minimum_expertise_level, "maximum_active_assignments": item.maximum_active_assignments, "assignment_due_hours": item.assignment_due_hours, "backup_required": item.backup_required, "allow_same_institution": item.allow_same_institution, "weights": item.weights, "version": item.version} for item in policies], "runs": [{"id": str(item.id), "paper": item.paper.code, "mode": item.mode, "algorithm": item.algorithm, "status": item.status, "requested_scripts": item.requested_scripts, "planned_scripts": item.planned_scripts, "allocated_scripts": item.allocated_scripts, "unallocated_scripts": item.unallocated_scripts, "average_quality_score": float(item.average_quality_score), "forecast": item.forecast, "created_at": item.created_at.isoformat()} for item in runs]}
 
 
 @router.post("/policies")
@@ -92,20 +90,43 @@ def update_policy(request, payload: PolicyIn):
 
 
 @router.post("/assignments")
-def manual_assignment(request, payload: ManualAssignmentIn):
+def manual_assignment(request):
+    require_roles(request, *ADMIN_ROLES)
+    raise HttpError(410, "Manual allocation is disabled; simulate and commit an eligible run")
+
+
+@router.get("/history")
+def allocation_history(request, page: int = 1, q: str = ""):
     membership = require_roles(request, *ADMIN_ROLES)
-    tenant_id = membership.institution.tenant_id
-    custom_fields = validate_custom_values(tenant_id=tenant_id, form_key="allocation", values=payload.custom_fields)
-    script = Script.objects.filter(id=payload.script_id, tenant_id=tenant_id).select_related("paper__subject", "packet__dispatch").first()
-    evaluator = Evaluator.objects.filter(id=payload.evaluator_id, tenant_id=tenant_id).first()
-    backup = Evaluator.objects.filter(id=payload.backup_evaluator_id, tenant_id=tenant_id).first() if payload.backup_evaluator_id else None
-    if not script or not evaluator:
-        raise HttpError(404, "Script or evaluator not found")
-    if not 1 <= payload.valuation_round <= script.paper.valuation_rounds or not 1 <= payload.priority <= 5:
-        raise HttpError(422, "Valuation round or priority is invalid")
-    assignment = create_assignment(tenant_id=tenant_id, actor_id=request.auth.id, script=script, evaluator=evaluator, backup_evaluator=backup, valuation_round=payload.valuation_round, due_at=timezone.now() + timedelta(hours=payload.due_in_hours), source="manual", quality_score=None, score_breakdown=None, priority=payload.priority)
-    persist_custom_values(tenant_id=tenant_id, actor_id=request.auth.id, form_key="allocation", record_id=assignment.id, values=custom_fields)
-    return assignment_data(Assignment.objects.select_related("script__paper", "evaluator", "backup_evaluator").get(id=assignment.id))
+    if page < 1 or len(q) > 100:
+        raise HttpError(422, "Invalid allocation history filter")
+    proposals = AllocationProposal.objects.filter(tenant_id=membership.institution.tenant_id).select_related("run__paper__subject", "script", "evaluator")
+    if q.strip():
+        term = q.strip()
+        actor_ids = get_user_model().objects.filter(Q(username__icontains=term) | Q(first_name__icontains=term) | Q(last_name__icontains=term)).values_list("id", flat=True)
+        proposals = proposals.filter(Q(script__script_code__icontains=term) | Q(run__paper__code__icontains=term) | Q(run__paper__subject__code__icontains=term) | Q(evaluator__display_name__icontains=term) | Q(run__created_by_id__in=actor_ids))
+    total = proposals.count()
+    page_size = 50
+    proposals = list(proposals.order_by("-run__created_at", "script__script_code", "id")[(page - 1) * page_size:page * page_size])
+    actors = get_user_model().objects.in_bulk({proposal.run.created_by_id for proposal in proposals})
+    rows = []
+    for proposal in proposals:
+        run = proposal.run
+        actor = actors.get(run.created_by_id)
+        rows.append({
+            "id": str(proposal.id),
+            "run_id": str(run.id),
+            "ran_by": (actor.get_full_name() or actor.get_username()) if actor else "Unknown operator",
+            "ran_at": run.created_at.isoformat(),
+            "script": proposal.script.script_code,
+            "paper": run.paper.code,
+            "subject": run.paper.subject.code,
+            "round": proposal.valuation_round,
+            "evaluator": proposal.evaluator.display_name if proposal.evaluator else None,
+            "status": "unallocated" if not proposal.evaluator_id else run.status,
+            "blockers": proposal.blockers,
+        })
+    return {"total": total, "page": page, "page_size": page_size, "rows": rows}
 
 
 @router.post("/simulate")

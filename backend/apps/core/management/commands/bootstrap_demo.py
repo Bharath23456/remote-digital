@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from apps.allocation.models import Assignment
 from apps.assignment.models import AssignmentGovernancePolicy
-from apps.configuration.models import AcademicYear, ExamSession, Paper, Programme, Question, Subject
+from apps.configuration.models import AcademicYear, ExamSession, Paper, Programme, Question, Subject, Term, Regulation
 from apps.custody.models import CustodyEvent, Script
 from apps.evaluators.models import Evaluator, Expertise
 from apps.eligibility.models import EligibilityRecord, VerificationApproval, VerificationCase
@@ -80,13 +80,21 @@ class Command(BaseCommand):
             Membership.objects.get_or_create(user=operator, institution=institution, defaults={"role": role})
             operators[account_email] = operator
         year, _ = AcademicYear.objects.get_or_create(tenant_id=tenant_id, label="2026-27", defaults={"starts_on": date(2026, 7, 1), "ends_on": date(2027, 6, 30)})
+        term, _ = Term.objects.get_or_create(tenant_id=tenant_id, academic_year=year, name="Odd semester", defaults={"sequence": 1, "starts_on": year.starts_on, "ends_on": year.ends_on})
         session, _ = ExamSession.objects.get_or_create(
             tenant_id=tenant_id,
             academic_year=year,
             name="November 2026 End Semester",
-            defaults={"term": "Odd semester", "evaluation_starts_at": timezone.now() - timedelta(days=2), "evaluation_ends_at": timezone.now() + timedelta(days=18), "status": ExamSession.Status.ACTIVE},
+            defaults={"term": "Odd semester", "term_record": term, "evaluation_starts_at": timezone.now() - timedelta(days=2), "evaluation_ends_at": timezone.now() + timedelta(days=18), "status": ExamSession.Status.ACTIVE},
         )
-        programme, _ = Programme.objects.get_or_create(tenant_id=tenant_id, code="BTECH-CSE", defaults={"name": "B.Tech Computer Science", "regulation": "R-2025"})
+        if session.term_record_id != term.id:
+            session.term_record = term
+            session.save(update_fields=["term_record", "updated_at"])
+        regulation, _ = Regulation.objects.get_or_create(tenant_id=tenant_id, code="R-2025", defaults={"title": "Regulation 2025", "effective_from": date(2025, 1, 1)})
+        programme, _ = Programme.objects.get_or_create(tenant_id=tenant_id, code="BTECH-CSE", defaults={"name": "B.Tech Computer Science", "regulation": "R-2025", "regulation_record": regulation})
+        if programme.regulation_record_id != regulation.id:
+            programme.regulation_record = regulation
+            programme.save(update_fields=["regulation_record", "updated_at"])
         subjects = [
             ("CS401", "Distributed Systems", 7),
             ("CS402", "Applied Machine Learning", 7),
@@ -96,6 +104,9 @@ class Command(BaseCommand):
         papers = []
         for index, (code, name, semester) in enumerate(subjects):
             subject, _ = Subject.objects.get_or_create(tenant_id=tenant_id, programme=programme, code=code, defaults={"name": name, "semester": semester})
+            if str(session.id) not in subject.session_ids:
+                subject.session_ids = [*subject.session_ids, str(session.id)]
+                subject.save(update_fields=["session_ids", "updated_at"])
             paper, _ = Paper.objects.get_or_create(
                 tenant_id=tenant_id,
                 session=session,
@@ -109,9 +120,33 @@ class Command(BaseCommand):
                     "discrepancy_threshold": Decimal("15"),
                     "moderation_required": index == 0,
                     "status": Paper.Status.FROZEN if index < 3 else Paper.Status.REVIEW,
+                    "submitted_by_id": user.id,
+                    "submitted_at": timezone.now() - timedelta(days=5),
+                    "approved_by_id": operators["controller@admiezo.local"].id if index < 3 else None,
+                    "frozen_by_id": operators["reviewer@admiezo.local"].id if index < 3 else None,
                     "frozen_at": timezone.now() if index < 3 else None,
                 },
             )
+            actor_updates = []
+            if paper.status in {Paper.Status.REVIEW, Paper.Status.APPROVED, Paper.Status.FROZEN}:
+                if paper.submitted_by_id is None:
+                    paper.submitted_by_id = user.id
+                    actor_updates.append("submitted_by_id")
+                if paper.submitted_at is None:
+                    paper.submitted_at = timezone.now() - timedelta(days=5)
+                    actor_updates.append("submitted_at")
+            if paper.status in {Paper.Status.APPROVED, Paper.Status.FROZEN} and paper.approved_by_id is None:
+                paper.approved_by_id = operators["controller@admiezo.local"].id
+                actor_updates.append("approved_by_id")
+            if paper.status == Paper.Status.FROZEN:
+                if paper.frozen_by_id is None:
+                    paper.frozen_by_id = operators["reviewer@admiezo.local"].id
+                    actor_updates.append("frozen_by_id")
+                if paper.frozen_at is None:
+                    paper.frozen_at = timezone.now()
+                    actor_updates.append("frozen_at")
+            if actor_updates:
+                paper.save(update_fields=[*actor_updates, "updated_at"])
             if not paper.questions.exists():
                 for position in range(1, 6):
                     Question.objects.create(tenant_id=tenant_id, paper=paper, number=f"Q{position}", max_marks=Decimal("20"), position=position)
