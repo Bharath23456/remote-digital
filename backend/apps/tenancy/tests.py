@@ -1,9 +1,14 @@
 import json
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 
 from apps.core.models import AuditEvent, OutboxEvent
+from apps.ai_evaluation.models import AIProviderConfiguration
+from apps.evaluators.models import Evaluator
+from apps.security.crypto import decrypt_secret
+from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Institution, Membership, TenantAccount, TenantDomain
 
 
@@ -127,6 +132,61 @@ class InstitutionHierarchyTests(TestCase):
             HTTP_HOST="domain.localhost",
         )
         self.assertEqual(denied.status_code, 403)
+
+    def test_platform_ai_policy_uses_a_verified_key_per_university_and_controls_system_evaluator(self):
+        platform = Client()
+        self.assertEqual(platform.post("/api/v1/auth/login", data=json.dumps({"email": "platform@admiezo.local", "password": "ChangeMe123!"}), content_type="application/json").status_code, 200)
+        payload = {
+            "name": "AI University",
+            "code": "ai-university",
+            "subdomain": "ai-university",
+            "admin_email": "admin@ai-university.example",
+            "admin_first_name": "AI",
+            "admin_last_name": "Admin",
+            "policy": {"timezone": "Asia/Kolkata"},
+            "ai_evaluation_mode": "autonomous",
+            "ai_confidence_threshold": 88,
+            "ai_model_name": "admiezo-ai-v1",
+        }
+        denied = platform.post("/api/v1/enterprise/tenants", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(denied.status_code, 422)
+        self.assertFalse(Institution.objects.filter(code="ai-university").exists())
+
+        payload["ai_api_key"] = "university-provider-key"
+        with patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"):
+            created = platform.post("/api/v1/enterprise/tenants", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(created.status_code, 200)
+        tenant_id = created.json()["id"]
+        stored_provider = AIProviderConfiguration.objects.get(tenant_id=tenant_id)
+        self.assertNotIn("university-provider-key", stored_provider.api_key_ciphertext)
+        self.assertEqual(decrypt_secret(stored_provider.api_key_ciphertext), "university-provider-key")
+        self.assertFalse(AIProviderConfiguration.objects.exclude(tenant_id=tenant_id).exists())
+        policy = SecurityPolicy.objects.get(tenant_id=tenant_id)
+        account = TenantAccount.objects.get(root_institution__tenant_id=tenant_id)
+        admin_membership = Membership.objects.get(user__username=payload["admin_email"], institution__tenant_id=tenant_id)
+        system_evaluator = Evaluator.objects.get(tenant_id=tenant_id, evaluator_code="AI-ADMIEZO")
+        self.assertEqual(policy.ai_evaluation_mode, SecurityPolicy.AIEvaluationMode.AUTONOMOUS)
+        self.assertEqual(float(policy.ai_confidence_threshold), 88)
+        self.assertIn("ai_evaluation", account.enabled_modules)
+        self.assertIn("ai_evaluation", admin_membership.enabled_modules)
+        self.assertTrue(system_evaluator.is_system_ai)
+        self.assertEqual(system_evaluator.status, Evaluator.Status.ACTIVE)
+        university_row = next(item for item in platform.get("/api/v1/enterprise/control-plane").json()["universities"] if item["id"] == tenant_id)
+        self.assertTrue(university_row["ai_provider"]["configured"])
+        self.assertNotIn("api_key", university_row["ai_provider"])
+
+        disabled = platform.patch(
+            f"/api/v1/enterprise/tenants/{tenant_id}",
+            data=json.dumps({"version": account.version, "ai_evaluation_mode": "disabled"}),
+            content_type="application/json",
+        )
+        self.assertEqual(disabled.status_code, 200)
+        account.refresh_from_db()
+        admin_membership.refresh_from_db()
+        system_evaluator.refresh_from_db()
+        self.assertNotIn("ai_evaluation", account.enabled_modules)
+        self.assertNotIn("ai_evaluation", admin_membership.enabled_modules)
+        self.assertEqual(system_evaluator.status, Evaluator.Status.INACTIVE)
 
     def test_platform_controls_lifecycle_and_custom_domain_request(self):
         platform = Client()

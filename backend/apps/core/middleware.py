@@ -89,6 +89,7 @@ class TenantEntitlementMiddleware:
         ("/api/v1/allocation/", "allocation"),
         ("/api/v1/assignment-governance/", "assignment_governance"),
         ("/api/v1/rubrics/", "rubrics"),
+        ("/api/v1/ai-evaluation/", "ai_evaluation"),
         ("/api/v1/marking/", "evaluation"),
         ("/api/v1/workflow/", "evaluation"),
         ("/api/v1/valuation/", "valuation"),

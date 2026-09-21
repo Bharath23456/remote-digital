@@ -39,6 +39,7 @@ from apps.valuation.api import router as valuation_router
 from apps.discrepancy.api import router as discrepancy_router
 from apps.integrity.api import router as integrity_router
 from apps.phase4.api import router as phase4_router
+from apps.ai_evaluation.api import router as ai_evaluation_router
 
 
 api = NinjaAPI(
@@ -69,6 +70,7 @@ api.add_router("/v1/valuation", valuation_router)
 api.add_router("/v1/discrepancy", discrepancy_router)
 api.add_router("/v1/integrity", integrity_router)
 api.add_router("/v1/phase4", phase4_router)
+api.add_router("/v1/ai-evaluation", ai_evaluation_router)
 
 
 class EvaluatorIn(Schema):

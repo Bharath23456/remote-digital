@@ -7,7 +7,7 @@ import { DynamicFieldDefinition, DynamicFields, readDynamicFields } from "@/comp
 import { IdentityStatusBadge, IdentityVerificationModal } from "@/components/evaluator-identity-verification";
 
 type Expertise = { id: string; subject_id: string; subject_code: string; subject_name: string; level: number; years_experience: number; verified: boolean };
-type Evaluator = { id: string; evaluator_code: string; display_name: string; email: string; mobile: string; employee_id: string; institution_name: string; department: string; designation: string; qualification: string; employment_type: string; years_experience: number; grade: string; status: string; daily_capacity: number; available_from: string | null; available_to: string | null; version: number; expertise: Expertise[]; availability: unknown[]; custom_fields: Record<string, unknown>; login_enabled: boolean; face_status?: string; face_enrolled?: boolean; face_enrolled_at?: string | null; face_model_version?: string; last_identity_verified_at?: string | null };
+type Evaluator = { id: string; evaluator_code: string; display_name: string; email: string; mobile: string; employee_id: string; institution_name: string; department: string; designation: string; qualification: string; employment_type: string; years_experience: number; grade: string; status: string; daily_capacity: number; available_from: string | null; available_to: string | null; version: number; expertise: Expertise[]; availability: unknown[]; custom_fields: Record<string, unknown>; login_enabled: boolean; is_system_ai: boolean; face_status?: string; face_enrolled?: boolean; face_enrolled_at?: string | null; face_model_version?: string; last_identity_verified_at?: string | null };
 type Verification = { id: string; evaluator_id: string; evaluator: string; status: string; checks: Record<string, boolean>; expires_on: string | null; revalidation_due_on: string | null; revalidation_due: boolean; approval_count: number; required_approvals: number; fraud_signals: string[]; documents: { id: string; kind: string; status: string; sha256: string; byte_size: number; version: number }[]; version: number };
 type Eligibility = { id: string; evaluator_id: string; evaluator: string; subject_id: string; subject: string; status: string; risk_reasons: string[]; expires_on: string | null; version: number };
 type GovernanceHistory = { id: string; actor_id: string; action: string; aggregate_type: string; aggregate_id: string; payload: Record<string, unknown>; occurred_at: string };
@@ -92,6 +92,7 @@ export function EvaluatorWorkspace() {
           availability: [],
           custom_fields: readDynamicFields(data, customFields),
           login_enabled: Boolean(result.login_enabled),
+          is_system_ai: false,
           face_status: "not_enrolled",
           face_enrolled: false,
           face_enrolled_at: null,
@@ -219,6 +220,7 @@ function EvaluatorHistory({ history, work, error }: { history: HistoryRow[]; wor
 }
 
 function EvaluatorActions({ evaluator, verifications, open, history }: { evaluator: Evaluator; verifications: Verification[]; open: (type: "edit" | "expertise" | "availability" | "lifecycle" | "verification" | "eligibility" | "face") => void; history: () => void }) {
+  if (evaluator.is_system_ai) return <span className="locked-label">Policy controlled</span>;
   const verification = verifications.find((item) => item.evaluator_id === evaluator.id);
   return <details className="row-menu"><summary title="Evaluator actions"><Ellipsis /></summary><div><button onClick={() => open("edit")}><Pencil />Edit profile</button><button onClick={history}><History />Work history</button><button onClick={() => open("expertise")}><BadgeCheck />Subjects</button><button onClick={() => open("availability")}><CalendarDays />Availability</button><button onClick={() => open("lifecycle")}><CircleSlash2 />Lifecycle</button><button onClick={() => open("face")}><ScanFace />Face enrollment</button>{!verification && <button onClick={() => open("verification")}><ShieldCheck />Verification</button>}{verification?.status === "approved" && <button onClick={() => open("eligibility")}><ShieldCheck />Eligibility</button>}</div></details>;
 }

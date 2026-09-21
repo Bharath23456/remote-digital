@@ -187,7 +187,7 @@ def build_plan(*, tenant_id, actor_id, paper, algorithm, valuation_round, maximu
             scripts.append(script)
             if len(scripts) == maximum_scripts:
                 break
-    evaluators = list(Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE).order_by("evaluator_code"))
+    evaluators = list(Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE, is_system_ai=False).order_by("evaluator_code"))
     active_loads = defaultdict(int, dict(Assignment.objects.filter(tenant_id=tenant_id, status__in=ACTIVE_STATUSES).values_list("evaluator_id").annotate(count=Count("id"))))
     rows = []
     randomizer = secrets.SystemRandom()
@@ -334,7 +334,7 @@ def redistribute_assignment(*, tenant_id, actor_id, assignment_id, expected_vers
                 replacement = None
         if not replacement:
             candidates = []
-            for evaluator in Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE).exclude(id=previous.id):
+            for evaluator in Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE, is_system_ai=False).exclude(id=previous.id):
                 score, breakdown, blockers = score_evaluator(tenant_id=tenant_id, evaluator=evaluator, script=assignment.script, policy=_policy_for(tenant_id, assignment.script.paper), projected_load=Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator, status__in=ACTIVE_STATUSES).count(), round_evaluator_ids={previous.id})
                 if not blockers:
                     candidates.append((score, evaluator, breakdown))

@@ -227,6 +227,9 @@ def policy_for(tenant_id):
         allowed_countries=[],
         vpn_risk_threshold=70,
         alert_risk_threshold=50,
+        ai_evaluation_mode=SecurityPolicy.AIEvaluationMode.DISABLED,
+        ai_confidence_threshold=85,
+        ai_model_name="admiezo-ai-v1",
     )
 
 

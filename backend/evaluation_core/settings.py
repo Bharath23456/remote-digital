@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     "apps.scan_processing",
     "apps.rubrics",
     "apps.marking",
+    "apps.ai_evaluation",
     "apps.workflow",
     "apps.valuation",
     "apps.discrepancy",
@@ -126,6 +127,9 @@ APPLICATION_ENCRYPTION_KEY = os.getenv("APPLICATION_ENCRYPTION_KEY", "")
 EVALUATOR_FACE_MATCH_THRESHOLD = os.getenv("EVALUATOR_FACE_MATCH_THRESHOLD", "0.82")
 EVALUATOR_FACE_MIN_QUALITY = os.getenv("EVALUATOR_FACE_MIN_QUALITY", "0.45")
 EVALUATOR_FACE_VERIFICATION_TTL_MINUTES = int(os.getenv("EVALUATOR_FACE_VERIFICATION_TTL_MINUTES", "10"))
+ADMIEZO_AI_PROVIDER_BASE = os.getenv("ADMIEZO_AI_PROVIDER_BASE", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+ADMIEZO_AI_PROVIDER_MODEL = os.getenv("ADMIEZO_AI_PROVIDER_MODEL", "gemini-2.5-flash")
+ADMIEZO_AI_REQUEST_TIMEOUT_SECONDS = int(os.getenv("ADMIEZO_AI_REQUEST_TIMEOUT_SECONDS", "120"))
 TRUST_PROXY_RISK_HEADERS = os.getenv("TRUST_PROXY_RISK_HEADERS", "false").lower() == "true"
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "")
 DEMO_MANUAL_INTAKE_ENABLED = os.getenv("DEMO_MANUAL_INTAKE_ENABLED", "false").lower() == "true"

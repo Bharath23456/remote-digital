@@ -58,6 +58,9 @@ def _policy_data(policy):
         "evaluation_heartbeat_seconds": policy.evaluation_heartbeat_seconds if policy else 15,
         "evaluation_no_face_seconds": policy.evaluation_no_face_seconds if policy else 30,
         "evaluation_retention_days": policy.evaluation_retention_days if policy else 30,
+        "ai_evaluation_mode": policy.ai_evaluation_mode if policy else SecurityPolicy.AIEvaluationMode.DISABLED,
+        "ai_confidence_threshold": float(policy.ai_confidence_threshold) if policy else 85,
+        "ai_model_name": policy.ai_model_name if policy else "admiezo-ai-v1",
     }
 
 
@@ -87,8 +90,12 @@ def security_catalog(request):
     providers = OidcProvider.objects.filter(tenant_id=tenant_id).order_by("name")
     devices = DeviceAuthorization.objects.filter(tenant_id=tenant_id).select_related("device__user", "approved_by").order_by("-created_at")[:100]
     keys = EncryptionKeyMetadata.objects.order_by("purpose")
+    from apps.ai_evaluation.services import provider_status
+
+    ai_provider = provider_status(tenant_id, policy.ai_model_name if policy else "admiezo-ai-v1")
     return {
         "policy": _policy_data(policy),
+        "ai_provider": ai_provider,
         "devices": [
             {
                 "id": str(item.device_id),

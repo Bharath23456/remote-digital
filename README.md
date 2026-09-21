@@ -46,6 +46,10 @@ ADMIEZO is a multi-university answer-script evaluation operations platform. It r
 
 These are working workflows, not static screens. Writes are tenant-scoped and authorized, workflow transitions are validated, audit and outbox records share the domain transaction, submit/finalize calls are idempotent, candidate PII stays in the isolated encrypted identity service, and script bytes travel directly between the browser and five-minute signed storage URLs.
 
+## AI evaluation
+
+The university-wide **ADMIEZO AI Assistant** policy supports **No AI**, evaluator-only **AI assisted evaluation**, and background **Autonomous AI evaluation** modes. A Super Admin configures each university's mode, confidence threshold, and encrypted provider credential while provisioning the university or from its settings. University Access Governance displays this platform-managed policy without allowing tenant administrators to replace it. Autonomous evaluation requires one question paper, three reference answers, question guidance, and a frozen marking scheme. Only masked evaluation assets are processed; a result at or above the configured confidence threshold enters the existing valuation/final-mark workflow, while a lower-confidence result is assigned to an eligible human without creating AI marks.
+
 ## What each module does
 
 ### Module 01: Digital Evaluation Administration and Configuration

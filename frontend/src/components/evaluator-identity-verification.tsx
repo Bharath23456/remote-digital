@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
 type FaceStatus = { enrolled?: boolean; status?: string; evaluator_id?: string };
-type IdentityEvaluator = { id: string; display_name: string; evaluator_code?: string; face_status?: string; face_enrolled?: boolean };
+type IdentityEvaluator = { id: string; display_name: string; evaluator_code?: string; is_system_ai?: boolean; face_status?: string; face_enrolled?: boolean };
 type IdentityAssignment = { id: string; script: string; paper?: string };
 type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
 type FaceDetectorLike = { detect(source: CanvasImageSource): Promise<unknown[]> };
@@ -51,6 +51,7 @@ function frameDelta(left: Uint8ClampedArray, right: Uint8ClampedArray) {
 }
 
 export function IdentityStatusBadge({ evaluator }: { evaluator: IdentityEvaluator }) {
+  if (evaluator.is_system_ai) return <span className="status-pill active">System managed</span>;
   const status = evaluator.face_status || (evaluator.face_enrolled ? "active" : "not_enrolled");
   return <span className={`status-pill ${status === "active" ? "active" : "attention"}`}>{status === "active" ? "Face enrolled" : "Face pending"}</span>;
 }
