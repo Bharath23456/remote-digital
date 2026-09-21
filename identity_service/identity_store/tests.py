@@ -47,6 +47,20 @@ class IdentityBoundaryTests(TestCase):
         self.assertEqual(replayed_resolution.status_code, 409)
         self.assertEqual(IdentityAccessLog.objects.filter(identity_reference=self.identity_reference).count(), 2)
 
+    def test_automated_omr_accepts_usn_without_inventing_candidate_name(self):
+        create_token = token("identity.create", self.tenant_id, self.identity_reference, self.script_id, purpose="Automated OMR intake", institution_name="Northbridge University")
+        response = self.client.post("/v1/candidates", data=json.dumps({"candidate_name": "", "register_number": "4UB22CS032", "usn": "4UB22CS032"}), content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {create_token}")
+        self.assertEqual(response.status_code, 201)
+        stored = CandidateIdentity.objects.get(identity_reference=self.identity_reference)
+        self.assertNotIn("4UB22CS032", stored.pii_ciphertext)
+        retry_token = token("identity.create", self.tenant_id, self.identity_reference, self.script_id, purpose="Automated OMR intake", institution_name="Northbridge University")
+        retried = self.client.post("/v1/candidates", data=json.dumps({"candidate_name": "", "register_number": "4UB22CS032", "usn": "4UB22CS032"}), content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {retry_token}")
+        self.assertEqual(retried.status_code, 200)
+        self.assertIn("receipt", retried.json())
+        wrong_token = token("identity.create", self.tenant_id, self.identity_reference, self.script_id, purpose="Automated OMR intake", institution_name="Northbridge University")
+        wrong = self.client.post("/v1/candidates", data=json.dumps({"candidate_name": "", "register_number": "4UB22CS033", "usn": "4UB22CS033"}), content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {wrong_token}")
+        self.assertEqual(wrong.status_code, 409)
+
     def test_optional_images_are_sanitized_encrypted_and_only_returned_on_resolution(self):
         raw = BytesIO()
         Image.new("RGB", (60, 40), "red").save(raw, format="PNG")

@@ -83,7 +83,7 @@ export function ConfigurationWorkspace() {
     courses: [{ name: "programme_id", label: "Programme", type: "select", required: true, options: options("programmes", "code", "name") }, { name: "regulation_id", label: "Regulation", type: "select", required: true, options: options("regulations", "code", "title") }, { name: "code", label: "Course code", required: true }, { name: "name", label: "Course name", required: true }, { name: "duration_terms", label: "Duration in terms", type: "number", required: true }],
     subjects: [{ name: "programme_id", label: "Programme", type: "select", required: true, options: options("programmes", "code", "name") }, { name: "course_id", label: "Course", type: "select", required: true, options: options("courses", "code", "name") }, { name: "session_ids", label: "Available exam sessions", type: "multiselect", required: true, options: options("sessions", "name", "term") }, { name: "related_subject_ids", label: "Related subjects", type: "multiselect", options: options("subjects", "code", "name") }, { name: "code", label: "Subject code", required: true }, { name: "name", label: "Subject name", required: true }, { name: "semester", label: "Semester", type: "number", required: true }],
     centres: [{ name: "code", label: "Centre code", required: true }, { name: "name", label: "Centre name", required: true }, { name: "address", label: "Address" }, { name: "network_cidrs", label: "Approved networks (comma separated)" }],
-    papers: [{ name: "session_id", label: "Exam session", type: "select", required: true, options: options("sessions", "name", "term") }, { name: "subject_id", label: "Subject", type: "select", required: true, options: options("subjects", "code", "name") }, { name: "code", label: "Paper code", required: true }, { name: "title", label: "Paper title", required: true }, { name: "max_marks", label: "Maximum marks", type: "number", required: true }, { name: "pass_marks", label: "Passing marks", type: "number", required: true }, { name: "valuation_rounds", label: "Valuation rounds", type: "number", required: true }, { name: "discrepancy_threshold", label: "Discrepancy threshold", type: "number", required: true }, { name: "moderation_required", label: "Moderation required", type: "checkbox" }, { name: "critical_change", label: "Require dual approval", type: "checkbox" }],
+    papers: [{ name: "session_id", label: "Exam session", type: "select", required: true, options: options("sessions", "name", "term") }, { name: "subject_id", label: "Subject", type: "select", required: true, options: options("subjects", "code", "name") }, { name: "code", label: "Paper code", required: true }, { name: "title", label: "Paper title", required: true }, { name: "max_marks", label: "Maximum marks", type: "number", required: true }, { name: "pass_marks", label: "Passing marks", type: "number", required: true }, { name: "valuation_rounds", label: "Valuation rounds", type: "number", required: true }, { name: "second_valuation_mark_threshold", label: "Round 2 if score exceeds (one-round papers only)", type: "number" }, { name: "discrepancy_threshold", label: "Difference threshold between rounds", type: "number", required: true }, { name: "moderation_required", label: "Moderation required", type: "checkbox" }, { name: "critical_change", label: "Require dual approval", type: "checkbox" }],
   }), [options]);
 
   async function createEntity(event: FormEvent<HTMLFormElement>) {
@@ -99,8 +99,9 @@ export function ConfigurationWorkspace() {
       else if (data.get(field.name)) payload[field.name] = data.get(field.name);
     }
     if (active === "papers") {
-      payload.rules = { critical_change: payload.critical_change, revaluation: true };
+      payload.rules = { critical_change: payload.critical_change, revaluation: true, second_valuation_mark_threshold: data.get("second_valuation_mark_threshold") || null };
       delete payload.critical_change;
+      delete payload.second_valuation_mark_threshold;
     }
     if (active === "sessions") payload.custom_fields = readDynamicFields(data, sessionFields);
     if (active === "papers") payload.custom_fields = readDynamicFields(data, paperCustomFields);
@@ -152,7 +153,7 @@ export function ConfigurationWorkspace() {
       valuation_rounds: Number(data.get("valuation_rounds")),
       discrepancy_threshold: data.get("discrepancy_threshold"),
       moderation_required: data.get("moderation_required") === "on",
-      rules: { ...(selectedPaper.rules as object || {}), critical_change: data.get("critical_change") === "on" },
+      rules: { ...(selectedPaper.rules as object || {}), critical_change: data.get("critical_change") === "on", second_valuation_mark_threshold: data.get("second_valuation_mark_threshold") || null },
     };
     try {
       await apiRequest(`/api/v1/configuration/papers/${selectedPaper.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -168,6 +169,7 @@ export function ConfigurationWorkspace() {
       title: data.get("title"), max_marks: data.get("max_marks"), pass_marks: data.get("pass_marks"),
       valuation_rounds: Number(data.get("valuation_rounds")), discrepancy_threshold: data.get("discrepancy_threshold"),
       moderation_required: data.get("moderation_required") === "on",
+      rules: { ...(selectedPaper.rules as object || {}), second_valuation_mark_threshold: data.get("second_valuation_mark_threshold") || null },
     } as Record<string, unknown> : {};
     const questionText = String(data.get("questions_json") || "").trim();
     if (kind === "emergency_update" && questionText) {
@@ -308,8 +310,8 @@ export function ConfigurationWorkspace() {
 }
 
 function PaperFields({ paper }: { paper: Record<string, unknown> }) {
-  const rules = paper.rules as { critical_change?: boolean } | undefined;
-  return <div className="form-grid"><label className="field full-field"><span>Paper title</span><input name="title" defaultValue={String(paper.title)} required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0.01" step="0.01" defaultValue={String(paper.max_marks)} required /></label><label className="field"><span>Passing marks</span><input name="pass_marks" type="number" min="0" step="0.01" defaultValue={String(paper.pass_marks)} required /></label><label className="field"><span>Valuation rounds</span><input name="valuation_rounds" type="number" min="1" max="3" defaultValue={String(paper.valuation_rounds)} required /></label><label className="field"><span>Discrepancy threshold</span><input name="discrepancy_threshold" type="number" min="0" step="0.01" defaultValue={String(paper.discrepancy_threshold)} required /></label><label className="field check-field"><input name="moderation_required" type="checkbox" defaultChecked={Boolean(paper.moderation_required)} /><span>Moderation required</span></label><label className="field check-field"><input name="critical_change" type="checkbox" defaultChecked={Boolean(rules?.critical_change)} /><span>Critical changes need dual approval</span></label></div>;
+  const rules = paper.rules as { critical_change?: boolean; second_valuation_mark_threshold?: string | null } | undefined;
+  return <div className="form-grid"><label className="field full-field"><span>Paper title</span><input name="title" defaultValue={String(paper.title)} required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0.01" step="0.01" defaultValue={String(paper.max_marks)} required /></label><label className="field"><span>Passing marks</span><input name="pass_marks" type="number" min="0" step="0.01" defaultValue={String(paper.pass_marks)} required /></label><label className="field"><span>Valuation rounds</span><input name="valuation_rounds" type="number" min="1" max="3" defaultValue={String(paper.valuation_rounds)} required /></label><label className="field"><span>Round 2 if score exceeds (one-round papers only)</span><input name="second_valuation_mark_threshold" type="number" min="0" step="0.01" defaultValue={rules?.second_valuation_mark_threshold == null ? "" : String(rules.second_valuation_mark_threshold)} /></label><label className="field"><span>Difference threshold between rounds</span><input name="discrepancy_threshold" type="number" min="0" step="0.01" defaultValue={String(paper.discrepancy_threshold)} required /></label><label className="field check-field"><input name="moderation_required" type="checkbox" defaultChecked={Boolean(paper.moderation_required)} /><span>Moderation required</span></label><label className="field check-field"><input name="critical_change" type="checkbox" defaultChecked={Boolean(rules?.critical_change)} /><span>Critical changes need dual approval</span></label></div>;
 }
 
 type PaperAction = "submit" | "approve" | "freeze";
@@ -350,8 +352,8 @@ function PaperRecord({ paper, expanded, saving, onToggle, onAddQuestion, onViewQ
       <div className="paper-record-metrics" aria-label={`${String(paper.code)} paper details`}>
         <div><span>Maximum marks</span><strong>{String(paper.max_marks)}</strong></div>
         <div><span>Passing marks</span><strong>{String(paper.pass_marks)}</strong></div>
-        <div><span>Valuation rounds</span><strong>{String(paper.valuation_rounds)}</strong></div>
-        <div><span>Discrepancy threshold</span><strong>{String(paper.discrepancy_threshold)}</strong></div>
+        <div><span>Valuation rounds</span><strong>{String(paper.valuation_rounds)}{(paper.rules as Record<string, unknown> | undefined)?.second_valuation_mark_threshold != null ? `, second above ${String((paper.rules as Record<string, unknown>).second_valuation_mark_threshold)}` : ""}</strong></div>
+        <div><span>Difference threshold</span><strong>{String(paper.discrepancy_threshold)}</strong></div>
       </div>
     </div>
 

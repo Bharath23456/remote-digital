@@ -97,6 +97,8 @@ def paper_snapshot(paper):
         "rules": paper.rules,
         "status": paper.status,
         "submitted_by_id": paper.submitted_by_id,
+        "approved_by_id": paper.approved_by_id,
+        "frozen_by_id": paper.frozen_by_id,
         "effective_from": paper.effective_from.isoformat() if paper.effective_from else None,
         "questions": [
             {"number": question.number, "sub_question": question.sub_question, "max_marks": str(question.max_marks), "question_type": question.question_type, "required": question.required, "position": question.position}
@@ -120,6 +122,10 @@ def paper_readiness(paper):
         issues.append("Valuation rounds must be one, two or three")
     if paper.discrepancy_threshold < 0 or paper.discrepancy_threshold > paper.max_marks:
         issues.append("Discrepancy threshold is outside the valid range")
+    try:
+        _validate_second_valuation_threshold(paper.valuation_rounds, paper.max_marks, paper.rules)
+    except ConfigurationError as exc:
+        issues.append(str(exc))
     if paper.session.evaluation_starts_at >= paper.session.evaluation_ends_at:
         issues.append("Evaluation window must end after it starts")
     return {"ready": not issues, "issues": issues}
@@ -128,7 +134,7 @@ def paper_readiness(paper):
 def paper_detail(paper):
     readiness = paper_readiness(paper)
     return {
-        **_row(paper, ("session_id", "subject_id", "code", "title", "max_marks", "pass_marks", "valuation_rounds", "discrepancy_threshold", "moderation_required", "rules", "status", "version", "effective_from", "frozen_at", "submitted_by_id")),
+        **_row(paper, ("session_id", "subject_id", "code", "title", "max_marks", "pass_marks", "valuation_rounds", "discrepancy_threshold", "moderation_required", "rules", "status", "version", "effective_from", "submitted_by_id", "approved_by_id", "frozen_by_id", "frozen_at")),
         "session": paper.session.name,
         "subject": paper.subject.code,
         "questions": [question_detail(item) for item in paper.questions.all()],
@@ -672,10 +678,13 @@ def submit_paper(*, tenant_id, actor_id, paper_id, version, note, idempotency_ke
     paper.status = Paper.Status.REVIEW
     paper.submitted_by_id = actor_id
     paper.submitted_at = timezone.now()
+    paper.approved_by_id = None
+    paper.frozen_by_id = None
+    paper.frozen_at = None
     paper.version += 1
-    paper.save(update_fields=["status", "submitted_by_id", "submitted_at", "version", "updated_at"])
+    paper.save(update_fields=["status", "submitted_by_id", "submitted_at", "approved_by_id", "frozen_by_id", "frozen_at", "version", "updated_at"])
     ConfigurationRevision.objects.create(tenant_id=tenant_id, aggregate_type="Paper", aggregate_id=paper.id, version=paper.version, change_type=ConfigurationRevision.ChangeType.UPDATE, snapshot=paper_snapshot(paper), actor_id=actor_id, reason=note or "Submitted for approval")
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.paper.submitted", aggregate="Paper", aggregate_id=paper.id, payload={"version": paper.version})
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.paper.submitted", aggregate="Paper", aggregate_id=paper.id, payload={"version": paper.version, "submitted_by_id": actor_id})
     complete_idempotent(record, paper.id)
     return paper
 
@@ -703,13 +712,13 @@ def approve_paper(*, tenant_id, actor_id, paper_id, version, note):
     paper.version += 1
     paper.save(update_fields=["status", "approved_by_id", "version", "updated_at"])
     ConfigurationRevision.objects.create(tenant_id=tenant_id, aggregate_type="Paper", aggregate_id=paper.id, version=paper.version, change_type=ConfigurationRevision.ChangeType.APPROVE, snapshot=paper_snapshot(paper), actor_id=actor_id, reason=note)
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.paper.approved", aggregate="Paper", aggregate_id=paper.id, payload={"stage": stage, "required": required, "version": paper.version})
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.paper.approved", aggregate="Paper", aggregate_id=paper.id, payload={"stage": stage, "required": required, "version": paper.version, "submitted_by_id": paper.submitted_by_id, "approved_by_id": actor_id})
     return paper
 
 
 @transaction.atomic
 def freeze_paper(*, tenant_id, actor_id, paper_id, version, note):
-    paper = Paper.objects.select_for_update().prefetch_related("questions").filter(id=paper_id, tenant_id=tenant_id).first()
+    paper = Paper.objects.select_for_update().prefetch_related("questions", "approvals").filter(id=paper_id, tenant_id=tenant_id).first()
     if not paper:
         raise ConfigurationError("Paper was not found")
     if paper.version != version:
@@ -718,12 +727,16 @@ def freeze_paper(*, tenant_id, actor_id, paper_id, version, note):
         raise ConfigurationConflict("Only approved papers can be frozen")
     if paper.submitted_by_id == actor_id:
         raise ConfigurationConflict("The submitting administrator cannot freeze this paper")
+    current_approvals = paper.approvals.filter(created_at__gte=paper.submitted_at) if paper.submitted_at else paper.approvals.all()
+    if current_approvals.filter(actor_id=actor_id, decision=ConfigurationApproval.Decision.APPROVED).exists():
+        raise ConfigurationConflict("The approving administrator cannot freeze the same paper")
     paper.status = Paper.Status.FROZEN
+    paper.frozen_by_id = actor_id
     paper.frozen_at = timezone.now()
     paper.version += 1
-    paper.save(update_fields=["status", "frozen_at", "version", "updated_at"])
+    paper.save(update_fields=["status", "frozen_by_id", "frozen_at", "version", "updated_at"])
     ConfigurationRevision.objects.create(tenant_id=tenant_id, aggregate_type="Paper", aggregate_id=paper.id, version=paper.version, change_type=ConfigurationRevision.ChangeType.FREEZE, snapshot=paper_snapshot(paper), actor_id=actor_id, reason=note)
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.paper.frozen", aggregate="Paper", aggregate_id=paper.id, payload={"version": paper.version})
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="config.paper.frozen", aggregate="Paper", aggregate_id=paper.id, payload={"version": paper.version, "submitted_by_id": paper.submitted_by_id, "approved_by_id": paper.approved_by_id, "frozen_by_id": actor_id})
     return paper
 
 
@@ -784,9 +797,22 @@ def _validate_snapshot(snapshot):
         raise ConfigurationError("Valuation rounds must be one, two or three")
     if discrepancy < 0 or discrepancy > maximum:
         raise ConfigurationError("Discrepancy threshold is outside the valid range")
+    _validate_second_valuation_threshold(int(snapshot["valuation_rounds"]), maximum, snapshot.get("rules") or {})
     questions = snapshot.get("questions", [])
     if questions and sum((Decimal(str(item["max_marks"])) for item in questions), Decimal("0")) != maximum:
         raise ConfigurationError("Question marks must equal the paper maximum")
+
+
+def _validate_second_valuation_threshold(rounds, maximum, rules):
+    value = rules.get("second_valuation_mark_threshold")
+    if value is None or value == "":
+        return
+    try:
+        threshold = Decimal(str(value))
+    except (ValueError, ArithmeticError) as exc:
+        raise ConfigurationError("Round 2 score threshold must be a valid mark") from exc
+    if rounds != 1 or not threshold.is_finite() or threshold < 0 or threshold >= maximum:
+        raise ConfigurationError("Round 2 score threshold is only valid for one-round papers and must be below maximum marks")
 
 
 def _paper_field_value(field, value):
@@ -948,9 +974,10 @@ def _apply_change(request, actor_id):
         paper.submitted_by_id = None
         paper.submitted_at = None
         paper.approved_by_id = None
+        paper.frozen_by_id = None
         paper.frozen_at = None
     paper.version += 1
-    paper.save(update_fields=[*PAPER_MUTABLE_FIELDS, "status", "submitted_by_id", "submitted_at", "approved_by_id", "frozen_at", "version", "updated_at"])
+    paper.save(update_fields=[*PAPER_MUTABLE_FIELDS, "status", "submitted_by_id", "submitted_at", "approved_by_id", "frozen_by_id", "frozen_at", "version", "updated_at"])
     ConfigurationRevision.objects.create(
         tenant_id=request.tenant_id,
         aggregate_type="Paper",

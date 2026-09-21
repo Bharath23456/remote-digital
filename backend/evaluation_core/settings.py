@@ -13,6 +13,7 @@ DEMO_PASSWORD_ONLY_LOGIN = (
     and os.getenv("LOAD_DEMO_DATA", "false").lower() == "true"
     and os.getenv("DEMO_PASSWORD_ONLY_LOGIN", "false").lower() == "true"
 )
+DEMO_SKIP_EVALUATOR_FACE_VERIFICATION = DEBUG and os.getenv("DEMO_SKIP_EVALUATOR_FACE_VERIFICATION", "false").lower() == "true"
 ALLOWED_HOSTS = [item.strip() for item in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")]
 
 INSTALLED_APPS = [
@@ -57,6 +58,7 @@ MIDDLEWARE = [
     "apps.identity_auth.middleware.IdentitySessionMiddleware",
     "apps.core.middleware.TenantEntitlementMiddleware",
     "apps.core.middleware.EvaluatorRoleBoundaryMiddleware",
+    "apps.core.middleware.IntakeDeskBoundaryMiddleware",
     "apps.security.middleware.DlpInspectionMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -105,6 +107,7 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_SIZE", "6291456"))
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
@@ -121,8 +124,12 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
 X_FRAME_OPTIONS = "DENY"
 APPLICATION_ENCRYPTION_KEY = os.getenv("APPLICATION_ENCRYPTION_KEY", "")
+EVALUATOR_FACE_MATCH_THRESHOLD = os.getenv("EVALUATOR_FACE_MATCH_THRESHOLD", "0.82")
+EVALUATOR_FACE_MIN_QUALITY = os.getenv("EVALUATOR_FACE_MIN_QUALITY", "0.45")
+EVALUATOR_FACE_VERIFICATION_TTL_MINUTES = int(os.getenv("EVALUATOR_FACE_VERIFICATION_TTL_MINUTES", "10"))
 TRUST_PROXY_RISK_HEADERS = os.getenv("TRUST_PROXY_RISK_HEADERS", "false").lower() == "true"
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "")
+DEMO_MANUAL_INTAKE_ENABLED = os.getenv("DEMO_MANUAL_INTAKE_ENABLED", "false").lower() == "true"
 IDENTITY_AUTHORIZATION_KEY = os.getenv("IDENTITY_AUTHORIZATION_KEY", "local-identity-authorization-key-change-me")
 SCRIPT_STORAGE_URL = os.getenv("SCRIPT_STORAGE_URL", "")
 SCRIPT_STORAGE_INTERNAL_URL = os.getenv("SCRIPT_STORAGE_INTERNAL_URL", "http://127.0.0.1:9000")

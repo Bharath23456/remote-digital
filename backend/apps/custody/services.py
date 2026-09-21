@@ -64,10 +64,11 @@ def transition_script(*, tenant_id, actor_id, script_id, expected_version, to_st
     return script
 
 
-def return_script_for_remasking(*, tenant_id, actor_id, script_id, expected_version, job_id, reason):
+def return_script_for_remasking(*, tenant_id, actor_id, script_id, expected_version, job_id, reason, allow_stored=False):
     with transaction.atomic():
         script = Script.objects.select_for_update().filter(id=script_id, tenant_id=tenant_id).first()
-        if not script or script.version != expected_version or script.state not in (Script.State.VALIDATED, Script.State.MASKED):
+        allowed_states = (Script.State.VALIDATED, Script.State.MASKED, Script.State.STORED) if allow_stored else (Script.State.VALIDATED, Script.State.MASKED)
+        if not script or script.version != expected_version or script.state not in allowed_states:
             raise HttpError(409, "Script is no longer in a masking review state")
         previous = script.state
         script.state = Script.State.SCANNED
@@ -91,7 +92,7 @@ def register_script(*, tenant_id, actor_id, packet, primary_barcode, supplements
                 script_code=script_code,
                 primary_barcode=normalized[0],
                 packet=packet,
-                paper=packet.dispatch.paper,
+                paper=packet.paper or packet.dispatch.paper,
                 supplement_barcodes=normalized[1:],
                 bundle_barcode=bundle_barcode.strip(),
                 centre_barcode=centre_barcode.strip(),

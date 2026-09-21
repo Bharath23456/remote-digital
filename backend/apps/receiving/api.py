@@ -20,11 +20,11 @@ router = Router(tags=["Physical answer script receiving"])
 @router.get("/catalog")
 def receiving_catalog(request):
     tenant_id = membership_for(request).institution.tenant_id
-    dispatches = Dispatch.objects.filter(tenant_id=tenant_id).select_related("paper").order_by("-created_at")
-    packets = Packet.objects.filter(tenant_id=tenant_id).select_related("dispatch").order_by("-created_at")
-    bundles = Bundle.objects.filter(tenant_id=tenant_id).select_related("packet").order_by("-created_at")
-    exceptions = ReceivingException.objects.filter(tenant_id=tenant_id).select_related("dispatch", "packet", "bundle").order_by("-created_at")
-    alerts = ReceivingAlert.objects.filter(tenant_id=tenant_id).select_related("dispatch", "packet").order_by("-detected_at")
+    dispatches = Dispatch.objects.filter(tenant_id=tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).select_related("paper").order_by("-created_at")
+    packets = Packet.objects.filter(tenant_id=tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("dispatch").order_by("-created_at")
+    bundles = Bundle.objects.filter(tenant_id=tenant_id, packet__dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("packet").order_by("-created_at")
+    exceptions = ReceivingException.objects.filter(tenant_id=tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("dispatch", "packet", "bundle").order_by("-created_at")
+    alerts = ReceivingAlert.objects.filter(tenant_id=tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).select_related("dispatch", "packet").order_by("-detected_at")
     return {
         "dispatches": [{"id": str(item.id), "reference": item.reference, "paper": item.paper.code, "source_centre": item.source_centre, "expected_packets": item.expected_packets, "received_packets": item.received_packets, "expected_scripts": item.expected_scripts, "received_scripts": item.received_scripts, "manifest_reference": item.manifest_reference, "carrier": item.carrier, "expected_arrival_at": item.expected_arrival_at.isoformat() if item.expected_arrival_at else None, "status": item.status, "version": item.version} for item in dispatches],
         "packets": [{"id": str(item.id), "dispatch_id": str(item.dispatch_id), "dispatch": item.dispatch.reference, "barcode": item.barcode, "seal_number": item.seal_number, "expected_scripts": item.expected_scripts, "received_scripts": item.received_scripts, "condition": item.condition, "status": item.status, "version": item.version} for item in packets],
@@ -57,7 +57,7 @@ def dispatch_verify(request, dispatch_id: str, payload: DispatchVerifyIn):
 @router.post("/dispatches/{dispatch_id}/packets")
 def register_packet(request, dispatch_id: str, payload: PacketCreateIn):
     membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
-    dispatch = Dispatch.objects.filter(id=dispatch_id, tenant_id=membership.institution.tenant_id).first()
+    dispatch = Dispatch.objects.filter(id=dispatch_id, tenant_id=membership.institution.tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
     if not dispatch:
         raise HttpError(404, "Dispatch not found")
     if dispatch.status != Dispatch.Status.REGISTERED or dispatch.packets.count() >= dispatch.expected_packets:
@@ -81,7 +81,7 @@ def packet_receive(request, packet_id: str, payload: PacketReceiveIn):
 @router.post("/packets/{packet_id}/bundles")
 def register_bundle(request, packet_id: str, payload: BundleCreateIn):
     membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.RECEIVING_OFFICER)
-    packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id).first()
+    packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).first()
     if not packet:
         raise HttpError(404, "Packet not found")
     try:
@@ -110,7 +110,7 @@ def dispatch_reconcile(request, dispatch_id: str, payload: VersionIn):
 @router.post("/dispatches/{dispatch_id}/confirm")
 def dispatch_confirm(request, dispatch_id: str, payload: ConfirmationIn):
     membership = membership_for(request)
-    dispatch = Dispatch.objects.filter(id=dispatch_id, tenant_id=membership.institution.tenant_id).first()
+    dispatch = Dispatch.objects.filter(id=dispatch_id, tenant_id=membership.institution.tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
     if not dispatch:
         raise HttpError(404, "Dispatch not found")
     confirmation = confirm_receipt(tenant_id=membership.institution.tenant_id, actor=request.auth, dispatch=dispatch, confirmation_type=payload.confirmation_type, notes=payload.notes)

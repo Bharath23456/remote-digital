@@ -23,6 +23,13 @@ from .storage import signed_object_url
 router = Router(tags=["Digital script repository"])
 
 
+def _require_guided_scan_script(membership, script):
+    if membership.role == Membership.Role.SCAN_OPERATOR and (
+        script.packet.dispatch.intake_mode == "legacy" or script.packet.status not in ("received", "scanning", "complete")
+    ):
+        raise HttpError(403, "Scan operators can upload only scripts from received guided packets")
+
+
 def _asset_data(item):
     return {"id": str(item.id), "script_id": str(item.script_id), "script": item.script.script_code, "kind": item.kind, "page_number": item.page_number, "sha256": item.sha256, "byte_size": item.byte_size, "mime_type": item.mime_type, "version": item.version, "retention_until": item.retention_until.isoformat() if item.retention_until else None, "legal_hold": item.legal_hold, "integrity_checked_at": item.integrity_checked_at.isoformat() if item.integrity_checked_at else None, "archived_at": item.archived_at.isoformat() if item.archived_at else None, "backup_status": item.backup_status, "replication_status": item.replication_status}
 
@@ -70,11 +77,12 @@ def issue_upload(request, payload: UploadIntentIn):
 @router.post("/manual-scan/uploads")
 @transaction.atomic
 def issue_manual_scan_upload(request, payload: ManualScanUploadIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.SCAN_OPERATOR)
     tenant_id = membership.institution.tenant_id
     script = Script.objects.select_for_update().filter(id=payload.script_id, tenant_id=tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
+    _require_guided_scan_script(membership, script)
     latest_version = UploadIntent.objects.filter(
         tenant_id=tenant_id,
         script=script,
@@ -134,7 +142,12 @@ def manual_scan_catalog(request, page: int = 1, page_size: int = 20, q: str = ""
 
 @router.post("/uploads/{intent_id}/finalize")
 def complete_upload(request, intent_id: str, payload: FinalizeUploadIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.SCAN_OPERATOR)
+    if membership.role == Membership.Role.SCAN_OPERATOR:
+        scan_intent = UploadIntent.objects.filter(id=intent_id, tenant_id=membership.institution.tenant_id).select_related("script__packet__dispatch").first()
+        if not scan_intent:
+            raise HttpError(404, "Upload not found")
+        _require_guided_scan_script(membership, scan_intent.script)
     if UploadIntent.objects.filter(id=intent_id, tenant_id=membership.institution.tenant_id).exclude(kind=UploadIntent.Kind.RAW_SCAN).exists():
         raise HttpError(403, "Derived copies cannot be finalized through a manual upload")
     intent, asset = finalize_upload(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, intent_id=intent_id, expected_version=payload.version, idempotency_key=request.headers.get("Idempotency-Key", ""))
@@ -143,11 +156,12 @@ def complete_upload(request, intent_id: str, payload: FinalizeUploadIn):
 
 @router.post("/scripts/{script_id}/complete-scan")
 def complete_scan(request, script_id: str, payload: CompleteScanIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.SCAN_OPERATOR)
     tenant_id = membership.institution.tenant_id
     script = Script.objects.filter(id=script_id, tenant_id=tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
+    _require_guided_scan_script(membership, script)
     pages = set(UploadIntent.objects.filter(tenant_id=tenant_id, script=script, kind=UploadIntent.Kind.RAW_SCAN, status=UploadIntent.Status.COMPLETED).values_list("page_number", flat=True))
     if pages != set(range(1, payload.page_count + 1)):
         raise HttpError(409, "Every page from 1 through the declared page count must be uploaded")
@@ -155,6 +169,16 @@ def complete_scan(request, script_id: str, payload: CompleteScanIn):
         script = transition_script(tenant_id=tenant_id, actor_id=request.auth.id, script_id=script.id, expected_version=payload.version, to_state=Script.State.SCANNED, location=payload.location, metadata={"page_count": payload.page_count})
         script.page_count = payload.page_count
         script.save(update_fields=["page_count", "updated_at"])
+        if script.packet.dispatch.intake_mode != "legacy":
+            packet = script.packet
+            packet.received_scripts = Script.objects.filter(packet=packet).exclude(state=Script.State.REGISTERED).count()
+            packet.status = "complete" if packet.received_scripts == packet.expected_scripts else "scanning"
+            packet.version += 1
+            packet.save(update_fields=["received_scripts", "status", "version", "updated_at"])
+            bundle = packet.dispatch
+            bundle.received_scripts = Script.objects.filter(packet__dispatch=bundle).exclude(state=Script.State.REGISTERED).count()
+            bundle.version += 1
+            bundle.save(update_fields=["received_scripts", "version", "updated_at"])
     return {"id": str(script.id), "state": script.state, "page_count": script.page_count, "version": script.version}
 
 

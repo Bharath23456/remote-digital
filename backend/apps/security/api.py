@@ -240,6 +240,13 @@ def _validate_membership_access(actor_membership, role, enabled_modules):
         raise HttpError(422, "One or more selected modules are not enabled for this university")
     if role == Membership.Role.EVALUATOR and requested != {"evaluation"}:
         raise HttpError(422, "Evaluator accounts can access only the Evaluation module")
+    desk_modules = {
+        Membership.Role.BUNDLE_PREPARER: "receiving",
+        Membership.Role.INTAKE_RECEIVER: "custody",
+        Membership.Role.SCAN_OPERATOR: "digitization",
+    }
+    if role in desk_modules and requested != {desk_modules[role]}:
+        raise HttpError(422, "Select only the assigned intake desk module for this role")
     return sorted(requested)
 
 

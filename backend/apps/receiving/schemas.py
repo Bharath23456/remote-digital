@@ -16,6 +16,28 @@ class DispatchCreateIn(Schema):
     custom_fields: dict = Field(default_factory=dict)
 
 
+class GuidedPacketIn(Schema):
+    barcode: str
+    paper_id: str
+    script_barcodes: list[str]
+
+
+class GuidedBundleIn(Schema):
+    barcode: str
+    source_centre: str
+    mode: str
+    packets: list[GuidedPacketIn]
+
+
+class GuidedScanIn(Schema):
+    barcode: str
+
+
+class GuidedPacketScanIn(Schema):
+    barcode: str
+    bundle_barcode: str
+
+
 class DispatchVerifyIn(Schema):
     version: int
     dispatched_at: datetime | None = None

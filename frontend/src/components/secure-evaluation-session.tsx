@@ -4,13 +4,16 @@ import { Camera, Check, LockKeyhole, Monitor, RefreshCw, ShieldAlert, Video, X }
 import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
-type Policy = { camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
+type Policy = { identity_verification_required?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
 type Preflight = { camera_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
 type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; digest: string };
 type BufferedChunk = { blob: Blob; startedAt: Date; endedAt: Date };
+type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
 type FaceDetectorLike = { detect(source: CanvasImageSource): Promise<unknown[]> };
 type FaceDetectorConstructor = new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => FaceDetectorLike;
+const modelVersion = "opencv-sface-v1";
+const identityPauseReasons = new Set(["identity_mismatch", "face_absent", "multiple_faces", "camera_obstructed", "camera_stopped"]);
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -60,6 +63,64 @@ async function availableScreens() {
 
 function cameraIsActive(stream: MediaStream | null) {
   return Boolean(stream?.getVideoTracks().some((track) => track.readyState === "live" && track.enabled && !track.muted));
+}
+
+function frameDelta(left: Uint8ClampedArray, right: Uint8ClampedArray) {
+  let total = 0;
+  const step = 16;
+  for (let index = 0; index < Math.min(left.length, right.length); index += step) total += Math.abs(left[index] - right[index]);
+  return total / Math.max(1, Math.min(left.length, right.length) / step);
+}
+
+function qualityFromFrame(data: Uint8ClampedArray, delta: number) {
+  let luminance = 0;
+  for (let index = 0; index < data.length; index += 4) luminance += (data[index] + data[index + 1] + data[index + 2]) / 3;
+  luminance /= data.length / 4;
+  const lightScore = Math.max(0, Math.min(1, 1 - Math.abs(luminance - 128) / 128));
+  const motionScore = Math.max(0, Math.min(1, delta / 18));
+  const score = Math.max(0, Math.min(0.99, lightScore * 0.68 + motionScore * 0.32));
+  return { score: Number(score.toFixed(2)), luminance: Math.round(luminance), frame_delta: Number(delta.toFixed(2)) };
+}
+
+async function captureIdentityPayload(stream: MediaStream, deviceSeed = "", trigger = "periodic"): Promise<FacePayload> {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  await video.play();
+  if (video.readyState < 2) await new Promise((resolve) => window.setTimeout(resolve, 300));
+  if (video.readyState < 2) throw new Error("Camera preview is not ready for identity verification");
+  const canvas = document.createElement("canvas");
+  canvas.width = 640; canvas.height = 480;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Camera capture is unavailable");
+  const snapshot = async () => {
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return context.getImageData(0, 0, canvas.width, canvas.height).data;
+  };
+  const first = await snapshot();
+  await new Promise((resolve) => window.setTimeout(resolve, 650));
+  const second = await snapshot();
+  const delta = frameDelta(first, second);
+  const quality = qualityFromFrame(second, delta);
+  const Detector = (window as typeof window & { FaceDetector?: FaceDetectorConstructor }).FaceDetector;
+  let faceCount = 1;
+  let faceSupported = false;
+  if (Detector) {
+    faceSupported = true;
+    try { faceCount = (await new Detector({ fastMode: true, maxDetectedFaces: 2 }).detect(video)).length; } catch { faceCount = 1; }
+  }
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const imageBase64 = canvas.toDataURL("image/jpeg", 0.88);
+  video.srcObject = null;
+  return {
+    image_base64: imageBase64,
+    liveness_passed: delta > 0.8 && faceCount === 1,
+    face_count: faceCount,
+    quality: { ...quality, face_detection_supported: faceSupported, source: "secure_evaluation_session", trigger },
+    model_version: modelVersion,
+    device_fingerprint: await digest([navigator.userAgent, screen.width, screen.height, Intl.DateTimeFormat().resolvedOptions().timeZone, deviceSeed].join("|")),
+  };
 }
 
 export function useSecureEvaluationSession() {
@@ -124,7 +185,7 @@ export function useSecureEvaluationSession() {
   const report = useCallback(async (category: string, severity: "low" | "medium" | "high" | "critical", details: Record<string, unknown> = {}) => {
     const current = sessionRef.current;
     if (!current || closingRef.current || eventInFlightRef.current.has(category)) return;
-    const shouldPause = severity === "critical" || ["viewer_hidden", "fullscreen_exited", "camera_stopped", "external_media_device", "multiple_screens", "multiple_faces", "camera_obstructed"].includes(category);
+    const shouldPause = severity === "critical" || ["viewer_hidden", "fullscreen_exited", "camera_stopped", "external_media_device", "multiple_screens", "multiple_faces", "camera_obstructed", "identity_mismatch"].includes(category);
     if (shouldPause) pause(category);
     eventInFlightRef.current.add(category);
     try {
@@ -182,6 +243,16 @@ export function useSecureEvaluationSession() {
     } finally { setChecking(false); }
   }, [policy, updateSession]);
 
+  const verifyLiveIdentity = useCallback(async (assignmentId: string, trigger: string) => {
+    if (policy?.identity_verification_required === false) return { access_granted: true };
+    const camera = streamRef.current;
+    if (!camera || !cameraIsActive(camera)) throw new Error("Camera is required for evaluator identity verification");
+    const payload = await captureIdentityPayload(camera, preflightRef.current?.inventory_digest || "", trigger);
+    const body = await request("/api/v1/evaluator-management/face/verify-access", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, ...payload }) });
+    if (!body.access_granted) throw new Error(body.failure_reason || "Evaluator face does not match the enrolled template");
+    return body;
+  }, [policy?.identity_verification_required]);
+
   const resume = useCallback(async (password = "") => {
     const current = sessionRef.current;
     if (!current) return false;
@@ -192,6 +263,14 @@ export function useSecureEvaluationSession() {
         streamRef.current = replacement; setStream(replacement);
       }
       if (current.policy.fullscreen_required && !document.fullscreenElement) await document.documentElement.requestFullscreen();
+      if (current.policy.identity_verification_required !== false && identityPauseReasons.has(current.pause_reason)) {
+        try { await verifyLiveIdentity(current.assignment_id, "resume"); }
+        catch (reason) {
+          const message = reason instanceof Error ? reason.message : "Evaluator identity could not be verified";
+          void report("identity_mismatch", "critical", { trigger: "resume", reason: message });
+          throw new Error(message);
+        }
+      }
       if (password) await request("/api/v1/auth/step-up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password, code: "" }) });
       const next = await request(`/api/v1/phase4/remote-security/sessions/${current.id}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ posture: await posture(false) }) }) as Session;
       updateSession(next); setNeedsReauthentication(false); return true;
@@ -199,7 +278,7 @@ export function useSecureEvaluationSession() {
       if (reason instanceof ApiError && reason.status === 428) setNeedsReauthentication(true);
       setError(reason instanceof Error ? reason.message : "Secure session could not resume"); return false;
     } finally { setChecking(false); }
-  }, [needsReauthentication, posture, updateSession]);
+  }, [posture, report, updateSession, verifyLiveIdentity]);
 
   const finish = useCallback(async (completed: boolean) => {
     const current = sessionRef.current;
@@ -268,7 +347,21 @@ export function useSecureEvaluationSession() {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     const Detector = (window as typeof window & { FaceDetector?: FaceDetectorConstructor }).FaceDetector;
     const detector = Detector ? new Detector({ fastMode: true, maxDetectedFaces: 3 }) : null;
-    let darkFrames = 0; let noFaceChecks = 0; let multipleFaceChecks = 0; let noFaceWarned = false;
+    let darkFrames = 0; let noFaceChecks = 0; let multipleFaceChecks = 0; let noFaceWarned = false; let identityCheckInFlight = false; let lastIdentityCheckAt = Date.now();
+    const identityCheckIntervalMs = Math.max(30_000, current.policy.heartbeat_seconds * 3 * 1000);
+    const verifySessionIdentity = async (trigger: string) => {
+      if (identityCheckInFlight || closingRef.current || paused) return;
+      identityCheckInFlight = true;
+      try {
+        await verifyLiveIdentity(current.assignment_id, trigger);
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : "Evaluator identity could not be verified";
+        setError("The live evaluator face no longer matches the enrolled face template.");
+        void report("identity_mismatch", "critical", { trigger, reason: message });
+      } finally {
+        identityCheckInFlight = false;
+      }
+    };
     const analyze = window.setInterval(async () => {
       if (cancelled || analysisVideo.readyState < 2 || !context || paused) return;
       context.drawImage(analysisVideo, 0, 0, canvas.width, canvas.height);
@@ -277,18 +370,24 @@ export function useSecureEvaluationSession() {
       luminance /= pixels.length / 4;
       darkFrames = luminance < 12 ? darkFrames + 1 : 0;
       if (darkFrames >= 3) { darkFrames = 0; void report("camera_obstructed", "critical", { mean_luminance: Math.round(luminance) }); return; }
-      if (!detector) return;
-      try {
-        const faces = await detector.detect(analysisVideo);
-        noFaceChecks = faces.length === 0 ? noFaceChecks + 1 : 0;
-        multipleFaceChecks = faces.length > 1 ? multipleFaceChecks + 1 : 0;
-        if (faces.length > 0) noFaceWarned = false;
-        const warnChecks = Math.max(1, Math.floor(current.policy.no_face_seconds / 10));
-        const pauseChecks = Math.max(2, Math.ceil(current.policy.no_face_seconds / 5));
-        if (noFaceChecks >= warnChecks && !noFaceWarned) { noFaceWarned = true; void report("face_absent_warning", "medium", { duration_seconds: noFaceChecks * 5 }); }
-        if (noFaceChecks >= pauseChecks) { noFaceChecks = 0; void report("face_absent", "critical", { duration_seconds: current.policy.no_face_seconds }); }
-        if (multipleFaceChecks >= 2) { multipleFaceChecks = 0; void report("multiple_faces", "critical", { sustained_seconds: 10 }); }
-      } catch { /* Native face detection is a progressive signal; camera continuity still applies. */ }
+      if (detector) {
+        try {
+          const faces = await detector.detect(analysisVideo);
+          noFaceChecks = faces.length === 0 ? noFaceChecks + 1 : 0;
+          multipleFaceChecks = faces.length > 1 ? multipleFaceChecks + 1 : 0;
+          if (faces.length > 0) noFaceWarned = false;
+          const warnChecks = Math.max(1, Math.floor(current.policy.no_face_seconds / 10));
+          const pauseChecks = Math.max(2, Math.ceil(current.policy.no_face_seconds / 5));
+          if (noFaceChecks >= warnChecks && !noFaceWarned) { noFaceWarned = true; void report("face_absent_warning", "medium", { duration_seconds: noFaceChecks * 5 }); }
+          if (noFaceChecks >= pauseChecks) { noFaceChecks = 0; void report("face_absent", "critical", { duration_seconds: current.policy.no_face_seconds }); }
+          if (multipleFaceChecks >= 2) { multipleFaceChecks = 0; void report("multiple_faces", "critical", { sustained_seconds: 10 }); }
+        } catch { /* Native face detection is a progressive signal; camera continuity still applies. */ }
+      }
+      const now = Date.now();
+      if (current.policy.identity_verification_required !== false && now - lastIdentityCheckAt >= identityCheckIntervalMs) {
+        lastIdentityCheckAt = now;
+        void verifySessionIdentity("periodic");
+      }
     }, 5000);
 
     return () => {
@@ -298,7 +397,7 @@ export function useSecureEvaluationSession() {
       analysisVideo.srcObject = null;
       if (recorder && recorder.state !== "inactive") recorder.stop();
     };
-  }, [paused, posture, report, session?.id, stream, updateSession, uploadEvidence]);
+  }, [paused, posture, report, session?.id, stream, updateSession, uploadEvidence, verifyLiveIdentity]);
 
   return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, prepare, start, resume, finish, report, pause };
 }

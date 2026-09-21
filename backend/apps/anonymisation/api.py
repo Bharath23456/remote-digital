@@ -24,11 +24,13 @@ from .schemas import (
 from .services import (
     add_mask_region,
     apply_masking_job,
+    auto_mask_guided_script,
     confirm_identity_storage,
     decide_identity_resolution,
     issue_resolution_authorization,
     prepare_identity_link,
     reject_masking_job,
+    return_guided_mask_for_remasking,
     request_identity_resolution,
     review_masking_job,
     start_masking_job,
@@ -56,6 +58,7 @@ def _job_data(item):
         "id": str(item.id),
         "script_id": str(item.script_id),
         "script": item.script.script_code,
+        "intake_mode": item.script.packet.dispatch.intake_mode,
         "page_count": item.script.page_count,
         "profile": item.profile,
         "status": item.status,
@@ -83,18 +86,27 @@ def _job_data(item):
     }
 
 
+def _require_legacy_masking_job(tenant_id, job_id):
+    job = MaskingJob.objects.filter(id=job_id, tenant_id=tenant_id).select_related("script__packet__dispatch").first()
+    if not job:
+        raise HttpError(404, "Masking job not found")
+    if job.script.packet.dispatch.intake_mode != "legacy":
+        raise HttpError(409, "Guided scripts use automatic masking and a single return-for-remasking action")
+    return job
+
+
 @router.get("/catalog")
 def anonymisation_catalog(request):
     tenant_id = membership_for(request).institution.tenant_id
     links = IdentityLink.objects.filter(tenant_id=tenant_id).select_related("script").order_by("-created_at")[:500]
-    jobs = MaskingJob.objects.filter(tenant_id=tenant_id).select_related("script").prefetch_related("regions").order_by("-created_at")[:200]
+    jobs = MaskingJob.objects.filter(tenant_id=tenant_id).select_related("script__packet__dispatch").prefetch_related("regions").order_by("-created_at")[:200]
     resolutions = IdentityResolutionRequest.objects.filter(tenant_id=tenant_id).select_related("identity_link__script").prefetch_related("approvals").order_by("-created_at")[:200]
-    available_scripts = Script.objects.filter(tenant_id=tenant_id, state__in=[Script.State.REGISTERED, Script.State.SCANNED, Script.State.VALIDATED, Script.State.MASKED]).order_by("script_code")[:500]
+    available_scripts = Script.objects.filter(tenant_id=tenant_id, state__in=[Script.State.REGISTERED, Script.State.SCANNED, Script.State.VALIDATED, Script.State.MASKED, Script.State.STORED]).select_related("packet__dispatch").order_by("script_code")[:500]
     return {
         "links": [{"id": str(item.id), "script_id": str(item.script_id), "script": item.script.script_code, "identity_reference": str(item.identity_reference), "stored": bool(item.stored_at), "stored_at": item.stored_at.isoformat() if item.stored_at else None, "version": item.version} for item in links],
         "jobs": [_job_data(item) for item in jobs],
         "resolutions": [{"id": str(item.id), "script": item.identity_link.script.script_code, "identity_reference": str(item.identity_link.identity_reference), "purpose": item.purpose, "emergency": item.emergency, "status": item.status, "requested_by_id": item.requested_by_id, "expires_at": item.expires_at.isoformat(), "approvals": [{"approver_id": approval.approver_id, "approved": approval.approved, "note": approval.note} for approval in item.approvals.all()], "version": item.version} for item in resolutions],
-        "scripts": [{"id": str(item.id), "script_code": item.script_code, "state": item.state, "page_count": item.page_count, "version": item.version} for item in available_scripts],
+        "scripts": [{"id": str(item.id), "script_code": item.script_code, "state": item.state, "page_count": item.page_count, "version": item.version, "intake_mode": item.packet.dispatch.intake_mode} for item in available_scripts],
         "institutions": list(Institution.objects.filter(tenant_id=tenant_id, is_active=True, kind__in=[Institution.Kind.UNIVERSITY, Institution.Kind.CAMPUS, Institution.Kind.COLLEGE]).order_by("kind", "name").values("id", "name", "code", "kind", "parent_id")),
         "current_user_id": request.auth.id,
         "current_role": membership_for(request).role,
@@ -109,6 +121,8 @@ def authorize_identity_storage(request, script_id: str, payload: IdentityLinkIn)
     script = Script.objects.filter(id=script_id, tenant_id=membership.institution.tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
+    if script.packet.dispatch.intake_mode != "legacy":
+        raise HttpError(403, "Guided intake stores identity automatically from the scanned OMR cover")
     tenant_id = membership.institution.tenant_id
     institution = Institution.objects.filter(id=payload.institution_id, tenant_id=tenant_id, is_active=True, kind__in=[Institution.Kind.UNIVERSITY, Institution.Kind.CAMPUS]).first()
     if not institution:
@@ -153,13 +167,26 @@ def create_masking_job(request, script_id: str, payload: StartMaskingIn):
     script = Script.objects.filter(id=script_id, tenant_id=membership.institution.tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
+    if script.packet.dispatch.intake_mode != "legacy":
+        raise HttpError(409, "Guided scripts are masked automatically after upload")
     job = start_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, script=script, script_version=payload.script_version, profile=payload.profile)
     return _job_data(MaskingJob.objects.select_related("script").prefetch_related("regions").get(id=job.id))
+
+
+@router.post("/scripts/{script_id}/auto-mask")
+def auto_mask_script(request, script_id: str):
+    membership = require_roles(request, *OPERATIONS_ROLES, Membership.Role.SCAN_OPERATOR)
+    script = Script.objects.filter(id=script_id, tenant_id=membership.institution.tenant_id).select_related("packet__dispatch").first()
+    if not script:
+        raise HttpError(404, "Script not found")
+    job = auto_mask_guided_script(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, script=script)
+    return {"id": str(job.id), "status": job.status, "script_state": Script.State.STORED}
 
 
 @router.post("/masking-jobs/{job_id}/regions")
 def create_region(request, job_id: str, payload: MaskRegionIn):
     membership = require_roles(request, *OPERATIONS_ROLES)
+    _require_legacy_masking_job(membership.institution.tenant_id, job_id)
     job, region = add_mask_region(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, page_number=payload.page_number, category=payload.category, x=payload.x, y=payload.y, width=payload.width, height=payload.height)
     return {"id": str(region.id), "job_version": job.version}
 
@@ -211,13 +238,22 @@ def masking_preview(request, job_id: str, page_number: int, version: int):
 @router.post("/masking-jobs/{job_id}/review")
 def review_job(request, job_id: str, payload: MaskingDecisionIn):
     membership = require_roles(request, *OPERATIONS_ROLES)
+    _require_legacy_masking_job(membership.institution.tenant_id, job_id)
     job = review_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version)
+    return {"id": str(job.id), "status": job.status, "version": job.version}
+
+
+@router.post("/masking-jobs/{job_id}/return-for-remasking")
+def return_guided_job(request, job_id: str, payload: MaskingDecisionIn):
+    membership = require_roles(request, *OPERATIONS_ROLES)
+    job = return_guided_mask_for_remasking(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, notes=payload.notes)
     return {"id": str(job.id), "status": job.status, "version": job.version}
 
 
 @router.post("/masking-jobs/{job_id}/apply")
 def apply_job(request, job_id: str, payload: MaskingDecisionIn):
     membership = require_roles(request, *OPERATIONS_ROLES)
+    _require_legacy_masking_job(membership.institution.tenant_id, job_id)
     job = apply_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version)
     return {"id": str(job.id), "status": job.status, "version": job.version}
 
@@ -225,6 +261,7 @@ def apply_job(request, job_id: str, payload: MaskingDecisionIn):
 @router.post("/masking-jobs/{job_id}/verify")
 def verify_job(request, job_id: str, payload: MaskingDecisionIn):
     membership = require_roles(request, *APPROVER_ROLES)
+    _require_legacy_masking_job(membership.institution.tenant_id, job_id)
     job = verify_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, passed=payload.passed, notes=payload.notes)
     return {"id": str(job.id), "status": job.status, "version": job.version}
 
@@ -232,9 +269,7 @@ def verify_job(request, job_id: str, payload: MaskingDecisionIn):
 @router.post("/masking-jobs/{job_id}/reject")
 def reject_job(request, job_id: str, payload: MaskingDecisionIn):
     membership = require_roles(request, *set(OPERATIONS_ROLES + APPROVER_ROLES))
-    job = MaskingJob.objects.filter(id=job_id, tenant_id=membership.institution.tenant_id).first()
-    if not job:
-        raise HttpError(404, "Masking job not found")
+    job = _require_legacy_masking_job(membership.institution.tenant_id, job_id)
     require_roles(request, *(APPROVER_ROLES if job.status == MaskingJob.Status.APPLIED else OPERATIONS_ROLES))
     job = reject_masking_job(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, job_id=job_id, expected_version=payload.version, notes=payload.notes)
     return {"id": str(job.id), "status": job.status, "version": job.version}

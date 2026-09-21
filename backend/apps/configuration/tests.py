@@ -1,6 +1,7 @@
 import json
 import uuid
 
+from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import Client, TestCase
 
@@ -34,6 +35,23 @@ class ConfigurationWorkflowTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return client
+
+    def test_one_round_score_trigger_is_validated_separately_from_difference_threshold(self):
+        session = ExamSession.objects.first()
+        subject = Subject.objects.first()
+        payload = {
+            "session_id": str(session.id), "subject_id": str(subject.id), "code": "SCORE-TRIGGER-101",
+            "title": "Conditional second valuation", "max_marks": "100.00", "pass_marks": "40.00",
+            "valuation_rounds": 1, "discrepancy_threshold": "10.00",
+            "rules": {"second_valuation_mark_threshold": "75.00"},
+        }
+        created = self.post("/api/v1/configuration/papers", payload)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["rules"]["second_valuation_mark_threshold"], "75.00")
+        invalid_rounds = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-102", "valuation_rounds": 2})
+        self.assertEqual(invalid_rounds.status_code, 422)
+        invalid_score = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-103", "rules": {"second_valuation_mark_threshold": "100.00"}})
+        self.assertEqual(invalid_score.status_code, 422)
 
     def test_complete_paper_configuration_lifecycle(self):
         session = ExamSession.objects.first()
@@ -88,14 +106,27 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertEqual(approved.json()["status"], "approved")
 
         self.assertEqual(self.post(f"/api/v1/configuration/papers/{paper['id']}/freeze", {"version": approved.json()["version"], "note": "Must be rejected"}).status_code, 409)
-        frozen = self.authenticated_client("controller@admiezo.local").post(
+        approver_freeze = self.authenticated_client("controller@admiezo.local").post(
+            f"/api/v1/configuration/papers/{paper['id']}/freeze",
+            data=json.dumps({"version": approved.json()["version"], "note": "Must be rejected"}), content_type="application/json",
+        )
+        self.assertEqual(approver_freeze.status_code, 409)
+
+        frozen = self.authenticated_client("reviewer@admiezo.local").post(
             f"/api/v1/configuration/papers/{paper['id']}/freeze",
             data=json.dumps({"version": approved.json()["version"], "note": "Go-live configuration"}), content_type="application/json",
         )
         self.assertEqual(frozen.status_code, 200)
         self.assertEqual(frozen.json()["status"], "frozen")
         self.assertEqual(ConfigurationRevision.objects.filter(aggregate_id=paper["id"]).count(), 6)
-        self.assertTrue(AuditEvent.objects.filter(action="config.paper.frozen", aggregate_id=paper["id"]).exists())
+        stored = Paper.objects.get(id=paper["id"])
+        self.assertEqual(stored.submitted_by_id, User.objects.get(username="admin@admiezo.local").id)
+        self.assertEqual(stored.approved_by_id, User.objects.get(username="controller@admiezo.local").id)
+        self.assertEqual(stored.frozen_by_id, User.objects.get(username="reviewer@admiezo.local").id)
+        frozen_audit = AuditEvent.objects.get(action="config.paper.frozen", aggregate_id=paper["id"])
+        self.assertEqual(frozen_audit.payload["submitted_by_id"], stored.submitted_by_id)
+        self.assertEqual(frozen_audit.payload["approved_by_id"], stored.approved_by_id)
+        self.assertEqual(frozen_audit.payload["frozen_by_id"], stored.frozen_by_id)
         self.assertTrue(OutboxEvent.objects.filter(topic="config.paper.frozen", aggregate_id=paper["id"]).exists())
 
     def test_cross_tenant_related_record_is_rejected(self):

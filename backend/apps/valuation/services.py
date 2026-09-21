@@ -52,11 +52,22 @@ def _differences(results):
     return differences, max(totals) - min(totals)
 
 
-def _propose_final_mark(*, tenant_id, actor_id, comparison, results):
-    existing = FinalMark.objects.filter(script=comparison.script).first()
+def required_valuation_rounds(script, first_result=None):
+    if script.paper.valuation_rounds != 1:
+        return script.paper.valuation_rounds
+    threshold = script.paper.rules.get("second_valuation_mark_threshold")
+    if threshold is None or threshold == "":
+        return 1
+    if first_result is None:
+        first_result = ValuationResult.objects.filter(script=script, valuation_round=1, is_locked=True).first()
+    return 2 if first_result and first_result.total_marks > Decimal(str(threshold)) else 1
+
+
+def _propose_final_mark(*, tenant_id, actor_id, script, comparison, results):
+    existing = FinalMark.objects.filter(script=script).first()
     if existing:
         return existing
-    rule = comparison.script.paper.rules.get("final_mark_rule", FinalMark.Rule.AVERAGE)
+    rule = script.paper.rules.get("final_mark_rule", FinalMark.Rule.AVERAGE)
     totals = [item.total_marks for item in results]
     if rule == FinalMark.Rule.BEST:
         mark = max(totals)
@@ -68,19 +79,23 @@ def _propose_final_mark(*, tenant_id, actor_id, comparison, results):
         mark = sum(totals, Decimal("0")) / Decimal(len(totals))
     item = FinalMark.objects.create(
         tenant_id=tenant_id,
-        script=comparison.script,
+        script=script,
         comparison=comparison,
         rule=rule,
         mark=mark.quantize(Decimal("0.01")),
         calculation={"valuation_result_ids": [str(result.id) for result in results], "totals": [str(value) for value in totals]},
         proposed_by_id=actor_id,
     )
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="valuation.final_mark.proposed", aggregate="FinalMark", aggregate_id=item.id, payload={"script_id": str(comparison.script_id), "rule": rule, "mark": str(item.mark)})
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="valuation.final_mark.proposed", aggregate="FinalMark", aggregate_id=item.id, payload={"script_id": str(script.id), "rule": rule, "mark": str(item.mark)})
     return item
 
 
 def _compare_after_result(*, tenant_id, actor_id, result):
     results = list(ValuationResult.objects.filter(script=result.script, is_locked=True).order_by("valuation_round"))
+    required_rounds = required_valuation_rounds(result.script, results[0] if results else None)
+    if len(results) == 1 and required_rounds == 1:
+        _propose_final_mark(tenant_id=tenant_id, actor_id=actor_id, script=result.script, comparison=None, results=results)
+        return None
     if len(results) < 2:
         return None
     first, second = results[:2]
@@ -88,7 +103,7 @@ def _compare_after_result(*, tenant_id, actor_id, result):
     if not comparison:
         differences, total_difference = _differences([first, second])
         threshold = result.script.paper.discrepancy_threshold
-        requires_third = total_difference > threshold and result.script.paper.valuation_rounds >= 3
+        requires_third = required_rounds == 3
         status = ValuationComparison.Status.THIRD_REQUIRED if requires_third else (ValuationComparison.Status.DISCREPANCY if total_difference > threshold else ValuationComparison.Status.WITHIN_THRESHOLD)
         comparison = ValuationComparison.objects.create(
             tenant_id=tenant_id,
@@ -104,8 +119,8 @@ def _compare_after_result(*, tenant_id, actor_id, result):
         )
         record_event(tenant_id=tenant_id, actor_id=actor_id, action="valuation.comparison.created", aggregate="ValuationComparison", aggregate_id=comparison.id, payload={"script_id": str(result.script_id), "difference": str(total_difference), "threshold": str(threshold), "status": status})
         if status == ValuationComparison.Status.WITHIN_THRESHOLD:
-            _propose_final_mark(tenant_id=tenant_id, actor_id=actor_id, comparison=comparison, results=[first, second])
-        else:
+            _propose_final_mark(tenant_id=tenant_id, actor_id=actor_id, script=result.script, comparison=comparison, results=[first, second])
+        elif total_difference > threshold:
             from apps.discrepancy.services import create_case
 
             create_case(tenant_id=tenant_id, actor_id=actor_id, comparison=comparison)
@@ -116,25 +131,49 @@ def _compare_after_result(*, tenant_id, actor_id, result):
         comparison.question_differences = differences
         comparison.total_difference = total_difference
         comparison.percentage_difference = (total_difference * Decimal("100") / max(result.script.paper.max_marks, Decimal("1"))).quantize(Decimal("0.001"))
-        comparison.status = ValuationComparison.Status.RECONCILED
+        has_case = hasattr(comparison, "discrepancy_case")
+        comparison.status = ValuationComparison.Status.RECONCILED if has_case else (ValuationComparison.Status.DISCREPANCY if total_difference > comparison.threshold else ValuationComparison.Status.WITHIN_THRESHOLD)
         comparison.requires_third_valuation = False
         comparison.save()
         record_event(tenant_id=tenant_id, actor_id=actor_id, action="valuation.comparison.third_completed", aggregate="ValuationComparison", aggregate_id=comparison.id, payload={"third_result_id": str(third.id), "difference": str(total_difference)})
-        from apps.discrepancy.services import resolve_case
+        if has_case:
+            from apps.discrepancy.services import resolve_case
 
-        case = comparison.discrepancy_case
-        ordered = sorted(item.total_marks for item in (first, second, third))
-        resolve_case(
-            tenant_id=tenant_id,
-            actor_id=actor_id,
-            case_id=case.id,
-            expected_version=case.version,
-            method="third_valuation",
-            final_mark=ordered[1],
-            reason="Third valuation completed; median valuation selected by configured reconciliation rule.",
-            calculation={"valuation_result_ids": [str(first.id), str(second.id), str(third.id)], "totals": [str(item.total_marks) for item in (first, second, third)]},
-        )
+            case = comparison.discrepancy_case
+            ordered = sorted(item.total_marks for item in (first, second, third))
+            resolve_case(
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                case_id=case.id,
+                expected_version=case.version,
+                method="third_valuation",
+                final_mark=ordered[1],
+                reason="Third valuation completed; median valuation selected by configured reconciliation rule.",
+                calculation={"valuation_result_ids": [str(first.id), str(second.id), str(third.id)], "totals": [str(item.total_marks) for item in (first, second, third)]},
+            )
+        elif total_difference > comparison.threshold:
+            from apps.discrepancy.services import create_case
+
+            create_case(tenant_id=tenant_id, actor_id=actor_id, comparison=comparison)
+        else:
+            _propose_final_mark(tenant_id=tenant_id, actor_id=actor_id, script=result.script, comparison=comparison, results=[first, second, third])
     return comparison
+
+
+def reconcile_single_round_results(*, apply=False):
+    eligible = []
+    for result in ValuationResult.objects.filter(is_locked=True, valuation_round=1, script__paper__valuation_rounds=1).select_related("script__paper").order_by("created_at"):
+        if required_valuation_rounds(result.script, result) != 1:
+            continue
+        if not FinalMark.objects.filter(script=result.script).exists():
+            eligible.append(result)
+    if apply:
+        for result in eligible:
+            with transaction.atomic():
+                script = Script.objects.select_for_update().select_related("paper").get(id=result.script_id)
+                if not FinalMark.objects.filter(script=script).exists() and required_valuation_rounds(script, result) == 1:
+                    _propose_final_mark(tenant_id=script.tenant_id, actor_id=result.locked_by_id, script=script, comparison=None, results=[result])
+    return len(eligible)
 
 
 def finalize_valuation(*, tenant_id, actor_id, evaluation_id, evaluator, idempotency_key):
