@@ -2441,16 +2441,6 @@ function MarkingPanel({
             <span>
               {complete.size}/{required} questions evaluated
             </span>
-            {!readOnly && (
-              <button
-                className="viewer-submit"
-                onClick={onSubmit}
-                disabled={busy || complete.size < required}
-              >
-                <SquareCheckBig />
-                Submit valuation
-              </button>
-            )}
             {marking.evaluation.status === "submitted" && (
               <button
                 className="viewer-submit"
