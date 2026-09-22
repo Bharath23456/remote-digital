@@ -83,6 +83,5 @@ def final_mark_approval(request, final_mark_id: str, payload: VersionIn):
 @router.post("/final-marks/{final_mark_id}/lock")
 def final_mark_lock(request, final_mark_id: str, payload: VersionIn):
     membership = require_roles(request, *ADMIN_ROLES)
-    require_step_up(request)
     item, replayed = lock_final_mark(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, final_mark_id=final_mark_id, expected_version=payload.version, idempotency_key=request.headers.get("Idempotency-Key", ""))
     return {"id": str(item.id), "status": item.status, "checksum": item.checksum, "version": item.version, "replayed": replayed}
