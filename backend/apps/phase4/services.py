@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -190,68 +190,330 @@ def transition_moderation(*, tenant_id, actor_id, case_id, expected_version, tar
 
 
 @transaction.atomic
-def create_revaluation(*, tenant_id, actor_id, script, identity_reference, scope, question_ids, reason, rule):
-    final = FinalMark.objects.filter(tenant_id=tenant_id, script=script, status=FinalMark.Status.LOCKED).first()
+def create_revaluation(
+    *,
+    tenant_id,
+    actor_id,
+    script,
+    identity_reference,
+    scope,
+    question_ids,
+    reason,
+    rule,
+    source_system="admiezo",
+    external_application_id="",
+    external_payload=None,
+    integration_endpoint=None,
+):
+    final = (
+        FinalMark.objects
+        .select_for_update()
+        .filter(
+            tenant_id=tenant_id,
+            script=script,
+            status=FinalMark.Status.LOCKED,
+        )
+        .first()
+    )
+
     if not final:
-        raise HttpError(409, "Only a script with a locked final mark is eligible for revaluation")
-    if RevaluationRequest.objects.filter(tenant_id=tenant_id, script=script).exclude(status__in=[RevaluationRequest.Status.CLOSED, RevaluationRequest.Status.REJECTED]).exists():
+        raise HttpError(
+            409,
+            "Only a script with a locked final mark is eligible for revaluation",
+        )
+
+    if scope not in {"full", "questions"}:
+        raise HttpError(422, "Revaluation scope must be full or questions")
+
+    question_ids = question_ids or []
+    if scope == "questions" and not question_ids:
+        raise HttpError(422, "Selected-question revaluation requires question IDs")
+
+    reason = (reason or "").strip()
+    if len(reason) < 5:
+        raise HttpError(422, "A revaluation reason is required")
+
+    if rule not in RevaluationRequest.Rule.values:
+        raise HttpError(422, "Unsupported revaluation rule")
+
+    source_system = (source_system or "admiezo").strip().lower()
+    external_application_id = (external_application_id or "").strip()
+
+    if external_application_id:
+        existing_external = (
+            RevaluationRequest.objects
+            .filter(
+                tenant_id=tenant_id,
+                source_system=source_system,
+                external_application_id=external_application_id,
+            )
+            .first()
+        )
+        if existing_external:
+            return existing_external
+
+    active_request = (
+        RevaluationRequest.objects
+        .filter(tenant_id=tenant_id, script=script)
+        .exclude(
+            status__in=[
+                RevaluationRequest.Status.CLOSED,
+                RevaluationRequest.Status.REJECTED,
+            ]
+        )
+        .first()
+    )
+    if active_request:
         raise HttpError(409, "An active revaluation request already exists")
+
     item = RevaluationRequest.objects.create(
         tenant_id=tenant_id,
         script=script,
         identity_reference=identity_reference,
         scope=scope,
         question_ids=question_ids,
-        reason=reason.strip(),
+        reason=reason,
         rule=rule,
-        eligibility_snapshot={"final_mark_status": final.status, "script_state": script.state, "checked_at": timezone.now().isoformat()},
+        eligibility_snapshot={
+            "final_mark_id": str(final.id),
+            "final_mark_status": final.status,
+            "original_mark": str(final.mark),
+            "script_state": script.state,
+            "checked_at": timezone.now().isoformat(),
+        },
         original_final_mark=final,
         original_mark_snapshot=final.mark,
         requested_by_id=actor_id,
+        source_system=source_system,
+        external_application_id=external_application_id,
+        external_payload=external_payload or {},
+        received_at=timezone.now() if external_application_id else None,
+        integration_endpoint=integration_endpoint,
     )
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="revaluation.requested", aggregate="RevaluationRequest", aggregate_id=item.id, payload={"script_id": str(script.id), "scope": scope})
+
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="revaluation.requested",
+        aggregate="RevaluationRequest",
+        aggregate_id=item.id,
+        payload={
+            "script_id": str(script.id),
+            "script_code": script.script_code,
+            "scope": scope,
+            "rule": rule,
+            "source_system": source_system,
+            "external_application_id": external_application_id or None,
+        },
+    )
     return item
 
 
 @transaction.atomic
-def transition_revaluation(*, tenant_id, actor_id, request_id, expected_version, target, evaluator=None, new_result=None):
-    item = RevaluationRequest.objects.select_for_update().filter(id=request_id, tenant_id=tenant_id).first()
+def transition_revaluation(
+    *,
+    tenant_id,
+    actor_id,
+    request_id,
+    expected_version,
+    target,
+    evaluator=None,
+    new_result=None,
+):
+    item = (
+        RevaluationRequest.objects
+        .select_for_update()
+        .select_related(
+            "script__paper",
+            "assigned_evaluator",
+            "assignment",
+            "original_final_mark",
+            "new_result",
+            "integration_endpoint",
+        )
+        .filter(id=request_id, tenant_id=tenant_id)
+        .first()
+    )
+
     if not item:
         raise HttpError(404, "Revaluation request not found")
-    previous = _transition(item, target, REVALUATION_TRANSITIONS, expected_version)
+
+    previous = _transition(
+        item,
+        target,
+        REVALUATION_TRANSITIONS,
+        expected_version,
+    )
+
     if target == RevaluationRequest.Status.APPROVED:
         if item.requested_by_id == actor_id:
             raise HttpError(409, "Requester cannot approve the revaluation")
         item.approved_by_id = actor_id
+
     elif target == RevaluationRequest.Status.ASSIGNED:
         if not evaluator:
             raise HttpError(422, "An independent evaluator is required")
-        if ValuationResult.objects.filter(script=item.script, evaluation__assignment__evaluator=evaluator).exists():
-            raise HttpError(409, "The revaluation evaluator must be independent")
+
+        if getattr(evaluator, "status", None) != "active":
+            raise HttpError(409, "Only an active evaluator can receive revaluation work")
+
+        if item.assignment_id:
+            raise HttpError(409, "This revaluation request is already assigned")
+
+        previous_evaluator_ids = set(
+            ValuationResult.objects
+            .filter(tenant_id=tenant_id, script=item.script)
+            .values_list("evaluation__assignment__evaluator_id", flat=True)
+        )
+        previous_evaluator_ids.discard(None)
+
+        if evaluator.id in previous_evaluator_ids:
+            raise HttpError(
+                409,
+                "The revaluation evaluator must be independent from previous evaluators",
+            )
+
+        maximum_round = (
+            Assignment.objects
+            .filter(tenant_id=tenant_id, script=item.script)
+            .aggregate(maximum=Max("valuation_round"))
+            .get("maximum")
+            or 0
+        )
+        next_round = maximum_round + 1
+        due_at = timezone.now() + timedelta(hours=72)
+
+        assignment = Assignment.objects.create(
+            tenant_id=tenant_id,
+            script=item.script,
+            evaluator=evaluator,
+            backup_evaluator=None,
+            valuation_round=next_round,
+            status=Assignment.Status.ASSIGNED,
+            quality_score=Decimal("100.00"),
+            source="revaluation",
+            score_breakdown={
+                "assignment_type": "revaluation",
+                "reason": "independent_revaluation",
+                "revaluation_request_id": str(item.id),
+                "original_final_mark_id": str(item.original_final_mark_id),
+                "original_mark": str(item.original_mark_snapshot),
+                "previous_evaluator_ids": [
+                    str(evaluator_id) for evaluator_id in previous_evaluator_ids
+                ],
+            },
+            priority=4,
+            is_flagged=False,
+            flag_reason="",
+            due_at=due_at,
+        )
+
         item.assigned_evaluator = evaluator
+        item.assignment = assignment
+
+        record_event(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            action="revaluation.assignment.created",
+            aggregate="Assignment",
+            aggregate_id=assignment.id,
+            payload={
+                "revaluation_request_id": str(item.id),
+                "script_id": str(item.script_id),
+                "script_code": item.script.script_code,
+                "evaluator_id": str(evaluator.id),
+                "valuation_round": next_round,
+                "source": "revaluation",
+                "due_at": due_at.isoformat(),
+            },
+        )
+
     elif target == RevaluationRequest.Status.EVALUATED:
-        if not new_result or new_result.script_id != item.script_id:
+        if not item.assignment_id:
+            raise HttpError(409, "Revaluation has no evaluator assignment")
+
+        if not new_result:
             raise HttpError(422, "A locked revaluation result is required")
+
+        if new_result.tenant_id != tenant_id:
+            raise HttpError(409, "Revaluation result belongs to another tenant")
+
+        if new_result.script_id != item.script_id:
+            raise HttpError(409, "Revaluation result belongs to another script")
+
+        if not new_result.is_locked:
+            raise HttpError(409, "Revaluation result must be locked")
+
+        if new_result.evaluation.assignment_id != item.assignment_id:
+            raise HttpError(
+                409,
+                "Result does not belong to this revaluation assignment",
+            )
+
         item.new_result = new_result
         item.new_mark = new_result.total_marks
         item.mark_difference = new_result.total_marks - item.original_mark_snapshot
+
     elif target == RevaluationRequest.Status.DECIDED:
         if item.new_mark is None:
             raise HttpError(409, "Revaluation has no new result")
+
         if item.rule == RevaluationRequest.Rule.BEST:
             item.final_mark = max(item.original_mark_snapshot, item.new_mark)
         elif item.rule == RevaluationRequest.Rule.AVERAGE:
-            item.final_mark = ((item.original_mark_snapshot + item.new_mark) / 2).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        else:
+            item.final_mark = (
+                (item.original_mark_snapshot + item.new_mark) / Decimal("2")
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        elif item.rule == RevaluationRequest.Rule.REGULATION:
             threshold = item.script.paper.discrepancy_threshold
-            item.final_mark = item.new_mark if abs(item.mark_difference) >= threshold else item.original_mark_snapshot
+            item.final_mark = (
+                item.new_mark
+                if abs(item.mark_difference) >= threshold
+                else item.original_mark_snapshot
+            )
+        else:
+            raise HttpError(409, "Unsupported revaluation decision rule")
+
     elif target == RevaluationRequest.Status.CLOSED:
+        if item.final_mark is None:
+            raise HttpError(
+                409,
+                "Revaluation must have a final mark before closing",
+            )
         item.closed_by_id = actor_id
+
+    elif target == RevaluationRequest.Status.REJECTED:
+        pass
+
     item.save()
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action=f"revaluation.{target}", aggregate="RevaluationRequest", aggregate_id=item.id, payload={"from": previous, "original_mark": str(item.original_mark_snapshot), "new_mark": str(item.new_mark) if item.new_mark is not None else None, "final_mark": str(item.final_mark) if item.final_mark is not None else None})
+
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action=f"revaluation.{target}",
+        aggregate="RevaluationRequest",
+        aggregate_id=item.id,
+        payload={
+            "from": previous,
+            "to": item.status,
+            "script_id": str(item.script_id),
+            "assignment_id": str(item.assignment_id) if item.assignment_id else None,
+            "assigned_evaluator_id": (
+                str(item.assigned_evaluator_id) if item.assigned_evaluator_id else None
+            ),
+            "original_mark": str(item.original_mark_snapshot),
+            "new_mark": str(item.new_mark) if item.new_mark is not None else None,
+            "mark_difference": (
+                str(item.mark_difference) if item.mark_difference is not None else None
+            ),
+            "final_mark": (
+                str(item.final_mark) if item.final_mark is not None else None
+            ),
+            "source_system": item.source_system,
+            "external_application_id": item.external_application_id or None,
+        },
+    )
     return item
-
-
 def completion_checks(*, tenant_id, final_mark):
     script = final_mark.script
     evaluations = Evaluation.objects.filter(tenant_id=tenant_id, assignment__script=script)

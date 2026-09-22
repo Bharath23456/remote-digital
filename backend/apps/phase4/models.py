@@ -58,28 +58,195 @@ class RevaluationRequest(TenantModel):
         AVERAGE = "average", "Average mark"
         REGULATION = "regulation", "Regulation based"
 
-    script = models.ForeignKey(Script, on_delete=models.PROTECT, related_name="revaluation_requests")
-    identity_reference = models.CharField(max_length=128, db_index=True)
-    scope = models.CharField(max_length=16, choices=[("full", "Full script"), ("questions", "Selected questions")], default="full")
-    question_ids = models.JSONField(default=list)
+    script = models.ForeignKey(
+        Script,
+        on_delete=models.PROTECT,
+        related_name="revaluation_requests",
+    )
+
+    identity_reference = models.CharField(
+        max_length=128,
+        db_index=True,
+    )
+
+    scope = models.CharField(
+        max_length=16,
+        choices=[
+            ("full", "Full script"),
+            ("questions", "Selected questions"),
+        ],
+        default="full",
+    )
+
+    question_ids = models.JSONField(
+        default=list,
+    )
+
     reason = models.TextField()
-    eligibility_snapshot = models.JSONField(default=dict)
-    original_final_mark = models.ForeignKey(FinalMark, on_delete=models.PROTECT, related_name="revaluation_requests")
-    original_mark_snapshot = models.DecimalField(max_digits=8, decimal_places=2)
-    assigned_evaluator = models.ForeignKey(Evaluator, null=True, blank=True, on_delete=models.PROTECT, related_name="revaluation_work")
-    assignment = models.ForeignKey(Assignment, null=True, blank=True, on_delete=models.PROTECT, related_name="revaluation_request")
-    new_result = models.ForeignKey(ValuationResult, null=True, blank=True, on_delete=models.PROTECT, related_name="revaluation_requests")
-    new_mark = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
-    mark_difference = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
-    rule = models.CharField(max_length=16, choices=Rule.choices, default=Rule.BEST)
-    final_mark = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.REQUESTED)
+
+    eligibility_snapshot = models.JSONField(
+        default=dict,
+    )
+
+    original_final_mark = models.ForeignKey(
+        FinalMark,
+        on_delete=models.PROTECT,
+        related_name="revaluation_requests",
+    )
+
+    original_mark_snapshot = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+    )
+
+    assigned_evaluator = models.ForeignKey(
+        Evaluator,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="revaluation_work",
+    )
+
+    assignment = models.ForeignKey(
+        Assignment,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="revaluation_request",
+    )
+
+    new_result = models.ForeignKey(
+        ValuationResult,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="revaluation_requests",
+    )
+
+    new_mark = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    mark_difference = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    rule = models.CharField(
+        max_length=16,
+        choices=Rule.choices,
+        default=Rule.BEST,
+    )
+
+    final_mark = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.REQUESTED,
+        db_index=True,
+    )
+
     requested_by_id = models.PositiveBigIntegerField()
-    approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
-    closed_by_id = models.PositiveBigIntegerField(null=True, blank=True)
-    version = models.PositiveIntegerField(default=1)
 
+    approved_by_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+    )
 
+    closed_by_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+    )
+
+    # External university / UUCMS integration
+    source_system = models.CharField(
+        max_length=50,
+        default="admiezo",
+        db_index=True,
+    )
+
+    external_application_id = models.CharField(
+        max_length=128,
+        blank=True,
+        db_index=True,
+    )
+
+    external_payload = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    received_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    integration_endpoint = models.ForeignKey(
+        "IntegrationEndpoint",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="revaluation_requests",
+    )
+
+    version = models.PositiveIntegerField(
+        default=1,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "tenant_id",
+                    "source_system",
+                    "external_application_id",
+                ],
+                condition=~models.Q(
+                    external_application_id=""
+                ),
+                name="unique_external_revaluation_application",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=[
+                    "tenant_id",
+                    "status",
+                ],
+                name="reval_tenant_status_idx",
+            ),
+            models.Index(
+                fields=[
+                    "tenant_id",
+                    "source_system",
+                    "external_application_id",
+                ],
+                name="reval_external_app_idx",
+            ),
+        ]
+
+    def __str__(self):
+        if self.external_application_id:
+            return (
+                f"{self.source_system}:"
+                f"{self.external_application_id}"
+            )
+
+        return (
+            f"Revaluation {self.id} - "
+            f"{self.script.script_code}"
+        )
 class CompletionRecord(TenantModel):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
