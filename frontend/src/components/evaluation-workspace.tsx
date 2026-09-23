@@ -1485,23 +1485,6 @@ export function EvaluationWorkspace({
       /* Dashboard width preference is optional. */
     }
   }, [dashboardWidth]);
-  useEffect(() => {
-    const diag = (e: KeyboardEvent) => {
-      console.log(
-        "[DIAG]",
-        e.type,
-        "key=" + e.key,
-        "code=" + e.code,
-        "keyCode=" + e.keyCode,
-      );
-    };
-    window.addEventListener("keydown", diag, true);
-    window.addEventListener("keyup", diag, true);
-    return () => {
-      window.removeEventListener("keydown", diag, true);
-      window.removeEventListener("keyup", diag, true);
-    };
-  }, []);
   if (manifest)
     return (
       <div
@@ -1876,7 +1859,7 @@ export function EvaluationWorkspace({
             disabled={!marking || saving || security.paused}
           >
             <SquareCheckBig />
-            Submit Evaluation
+            Submit valuation
           </button>
         </footer>
       </div>
