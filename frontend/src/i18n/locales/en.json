@@ -4,7 +4,7 @@
     "groups": { "operations": "Operations", "administration": "Administration", "evaluation": "Evaluation", "governance": "Governance", "platform": "Platform" },
     "items": {
       "dashboard": "Command centre", "receiving": "Script receiving", "custody": "Chain of custody", "digitization": "Digitization", "liveControl": "Live operations",
-      "configuration": "Exam configuration", "evaluators": "Evaluator master", "allocation": "Allocation engine", "assignmentGovernance": "Allocation history", "serviceControl": "Results & services",
+      "configuration": "Exam configuration", "evaluators": "Evaluator master", "allocation": "Allocation engine", "assignmentGovernance": "Allocation history",
       "anonymisation": "Anonymization", "repository": "Script repository", "rubrics": "Marking schemes", "evaluation": "Evaluation desk", "valuation": "Valuation review", "assessmentControl": "Assessment control",
       "security": "Access governance", "tenancy": "Enterprise settings", "audit": "Audit trail", "platformControl": "Platform operations", "platformAdmin": "Universities", "backToControlPlane": "Back to control plane"
     }
@@ -38,7 +38,6 @@
     "valuation": { "title": "Valuation review", "description": "Independent round comparison, discrepancy reconciliation and final mark control." },
     "assessmentControl": { "title": "Assessment control", "description": "Moderation, revaluation and signed completion workflows." },
     "liveControl": { "title": "Live operations", "description": "Secure remote evaluation, monitoring, recovery and centre operations." },
-    "serviceControl": { "title": "Results & student services", "description": "Remuneration and protected student script services." },
     "platformControl": { "title": "Platform operations", "description": "Forensics, integrations, interface languages and recovery drills." },
     "security": { "title": "Access governance", "description": "Authentication sessions, least privilege and protected operations." },
     "tenancy": { "title": "Enterprise settings", "description": "University hierarchy, institution policies and isolated records." },

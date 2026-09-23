@@ -191,13 +191,23 @@ function translateInputValue(input: HTMLInputElement, language: LanguageCode) {
   const original = originalInputs.get(input)!;
   const originalType = original.type || "text";
   const localizable = !["checkbox", "radio", "file", "hidden", "password", "email", "url"].includes(originalType);
-  if (language === "en") {
-    if (original.type === null) input.removeAttribute("type"); else input.setAttribute("type", original.type);
-    if (original.inputMode === null) input.removeAttribute("inputmode"); else input.setAttribute("inputmode", original.inputMode);
-    if (localizable && input.value) input.value = original.source;
+ if (language === "en") {
+  if (original.type === null) input.removeAttribute("type");
+  else input.setAttribute("type", original.type);
+
+  if (original.inputMode === null) input.removeAttribute("inputmode");
+  else input.setAttribute("inputmode", original.inputMode);
+
+  if (localizable) {
+    if (input.value !== original.output && input.value !== original.source) {
+      original.source = input.value;
+    }
+
     original.output = input.value;
-    return;
   }
+
+  return;
+}
   if (originalType === "number") {
     input.setAttribute("type", "text");
     input.setAttribute("inputmode", "decimal");
