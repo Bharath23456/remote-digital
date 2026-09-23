@@ -1790,7 +1790,7 @@ export function EvaluationWorkspace({
           <SecurityPauseOverlay controller={security} onClose={closeViewer} />
         )}
         <div className="security-watermark" aria-hidden="true">
-          ADMIEZO · {manifest.assignment.script} · {securityCode || "SECURE"}
+          ADMIEZO Â· {manifest.assignment.script} Â· {securityCode || "SECURE"}
         </div>
         <header className="viewer-header evaluation-desk-header">
           <button
@@ -2172,15 +2172,22 @@ export function EvaluationWorkspace({
           <button
             className="secondary-button"
             onClick={() => security.pause("manual_pause")}
+            disabled={manifest.assignment.status === "submitted"}
           >
             <Pause />
             Pause Evaluation
           </button>
           <button
-            className="viewer-submit"
-            onClick={submitEvaluation}
-            disabled={!marking || saving || security.paused || visitedPages.size < manifest.pages.length}
-          >
+  className="viewer-submit"
+  onClick={submitEvaluation}
+  disabled={
+    !marking ||
+    saving ||
+    security.paused ||
+    visitedPages.size < manifest.pages.length ||
+    new Set(marking.marks.map((item) => item.question_id)).size < marking.questions.length
+  }
+>
             <SquareCheckBig />
             Submit valuation
           </button>
@@ -2298,7 +2305,7 @@ export function EvaluationWorkspace({
                       <strong>{item.script}</strong>
                       <br />
                       <small>
-                        {item.page_count} pages · P{item.priority}
+                        {item.page_count} pages Â· P{item.priority}
                       </small>
                     </td>
                     <td>{item.paper}</td>
@@ -2312,7 +2319,7 @@ export function EvaluationWorkspace({
                         </div>
                         <small>
                           {item.progress_percent}%
-                          {item.draft_saved_at ? " · Draft saved" : ""}
+                          {item.draft_saved_at ? " Â· Draft saved" : ""}
                         </small>
                       </div>
                     </td>
@@ -2550,7 +2557,7 @@ function AnnotationLayer({
         style={{ left: `${geometry.x * 100}%`, top: `${geometry.y * 100}%` }}
         onClick={select}
       >
-        {item.kind === "tick" ? "✓" : "×"}
+        {item.kind === "tick" ? "âœ“" : "Ã—"}
       </span>
     );
   const handles: ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
@@ -2816,7 +2823,7 @@ function MarkingPanel({
         <div>
           <strong>Evaluation Dashboard</strong>
           <span>
-            v{marking.scheme.version} · {titleCase(marking.evaluation.status)}
+            v{marking.scheme.version} Â· {titleCase(marking.evaluation.status)}
           </span>
         </div>
         <div className="mark-total">
@@ -2844,7 +2851,7 @@ function MarkingPanel({
           Scheme of Evaluation
         </button>
         <button className={tab === "sample" ? "active" : ""} onClick={() => setTab("sample")}>
-    Sample Answer Paper ▾
+    Sample Answer Paper â–¾
   </button>
       </div>
       {tab === "marking" && (
@@ -2908,7 +2915,7 @@ function MarkingPanel({
               {question?.criteria.map((item) => (
                 <div className="criterion-note" key={item.id}>
                   <strong>
-                    {item.code} · {item.max_marks}
+                    {item.code} Â· {item.max_marks}
                   </strong>
                   <span>{item.description}</span>
                 </div>
@@ -3017,7 +3024,7 @@ function MarkingPanel({
                 <Flag />
                 {question?.id && reviewByQuestion[question.id]
                   ? "Unflag Question"
-                  : "⚑ Flag Question"}
+                  : "âš‘ Flag Question"}
               </button>
             </section>
             <section className="marking-section">
@@ -3060,16 +3067,6 @@ function MarkingPanel({
             <span>
               {complete.size}/{required} questions evaluated
             </span>
-            {!readOnly && (
-              <button
-                className="viewer-submit"
-                onClick={onSubmit}
-                disabled={busy || complete.size < required || !canSubmit}
-              >
-                <SquareCheckBig />
-                Submit valuation
-              </button>
-            )}
             {marking.evaluation.status === "submitted" && (
               <button
                 className="viewer-submit"
