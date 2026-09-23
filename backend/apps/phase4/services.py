@@ -11,12 +11,10 @@ from ninja.errors import HttpError
 
 from apps.allocation.models import Assignment
 from apps.core.services import record_event
-from apps.custody.models import Script
 from apps.discrepancy.models import DiscrepancyCase
 from apps.evaluators.models import Evaluator
 from apps.integrity.models import IntegrityAlert
 from apps.marking.models import Evaluation
-from apps.repository.models import ScriptAsset
 from apps.repository.storage import delete_object
 from apps.security.models import SecurityAlert, SecurityPolicy
 from apps.scan_processing.models import ScanQualityException
@@ -41,12 +39,10 @@ from .models import (
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
-    RemunerationStatement,
     ResultHandover,
     RevaluationRequest,
     RuntimeIncident,
     SecureEvaluationSession,
-    StudentScriptRequest,
     WorkloadAction,
 )
 
@@ -800,73 +796,6 @@ def transition_camp(*, tenant_id, actor_id, camp_id, expected_version, target, i
     item.version += 1
     item.save()
     record_event(tenant_id=tenant_id, actor_id=actor_id, action=f"centres.camp.{target}", aggregate="EvaluationCamp", aggregate_id=item.id, payload={"from": previous, "centre_id": str(item.centre_id), "performance": item.performance})
-    return item
-
-
-@transaction.atomic
-def calculate_remuneration(*, tenant_id, actor_id, evaluator, session, rule):
-    completed = Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator, script__paper__session=session, status=Assignment.Status.SUBMITTED).select_related("script__paper")
-    attendance = AttendanceRecord.objects.filter(tenant_id=tenant_id, evaluator=evaluator, session=session).exists()
-    if not attendance or not completed.exists():
-        raise HttpError(409, "Attendance and completed scripts are required before calculation")
-    scripts = completed.count()
-    pages = sum(item.script.page_count for item in completed)
-    questions = sum(item.script.paper.questions.count() for item in completed)
-    moderation = ModerationCase.objects.filter(tenant_id=tenant_id, moderator=evaluator, status=ModerationCase.Status.APPROVED).count()
-    revaluations = RevaluationRequest.objects.filter(tenant_id=tenant_id, assigned_evaluator=evaluator, status=RevaluationRequest.Status.CLOSED).count()
-    gross = Decimal(scripts) * rule.per_script + Decimal(pages) * rule.per_page + Decimal(questions) * rule.per_question + Decimal(moderation) * rule.moderator_rate + Decimal(revaluations) * rule.revaluation_rate
-    for slab in sorted(rule.slabs, key=lambda value: value.get("minimum", 0)):
-        if scripts >= int(slab.get("minimum", 0)):
-            gross += Decimal(str(slab.get("bonus", 0)))
-    gross = max(gross, rule.minimum_payment)
-    if rule.maximum_payment is not None:
-        gross = min(gross, rule.maximum_payment)
-    deductions = (gross * rule.tax_percentage / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    net = gross - deductions
-    item, created = RemunerationStatement.objects.get_or_create(tenant_id=tenant_id, evaluator=evaluator, session=session, rule=rule, defaults={"units": {"scripts": scripts, "pages": pages, "questions": questions, "moderation": moderation, "revaluations": revaluations}, "gross_amount": gross, "deductions": deductions, "net_amount": net, "calculation": {"attendance_valid": attendance, "tax_percentage": str(rule.tax_percentage)}, "calculated_by_id": actor_id})
-    if not created:
-        raise HttpError(409, "A statement already exists for this evaluator, session, and rule")
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="remuneration.calculated", aggregate="RemunerationStatement", aggregate_id=item.id, payload={"evaluator_id": str(evaluator.id), "gross": str(gross), "deductions": str(deductions), "net": str(net)})
-    return item
-
-
-@transaction.atomic
-def transition_statement(*, tenant_id, actor_id, statement_id, expected_version, target, payment_reference=""):
-    item = RemunerationStatement.objects.select_for_update().filter(id=statement_id, tenant_id=tenant_id).first()
-    if not item or item.version != expected_version:
-        raise HttpError(409, "Statement is missing or stale")
-    allowed = {
-        RemunerationStatement.Status.CALCULATED: {RemunerationStatement.Status.APPROVED},
-        RemunerationStatement.Status.APPROVED: {RemunerationStatement.Status.PAID},
-        RemunerationStatement.Status.PAID: {RemunerationStatement.Status.RECONCILED},
-    }
-    if target not in allowed.get(item.status, set()):
-        raise HttpError(409, "Statement transition is not allowed")
-    if target == RemunerationStatement.Status.APPROVED:
-        if item.calculated_by_id == actor_id:
-            raise HttpError(409, "Calculator cannot approve their own statement")
-        item.approved_by_id = actor_id
-    if target == RemunerationStatement.Status.PAID:
-        if len(payment_reference.strip()) < 4:
-            raise HttpError(422, "Payment reference is required")
-        item.payment_reference = payment_reference.strip()
-    previous = item.status
-    item.status = target
-    item.version += 1
-    item.save()
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action=f"remuneration.statement.{target}", aggregate="RemunerationStatement", aggregate_id=item.id, payload={"from": previous, "net_amount": str(item.net_amount), "payment_reference": item.payment_reference})
-    return item
-
-
-@transaction.atomic
-def create_student_request(*, tenant_id, actor_id, identity_reference, script, purpose):
-    final = FinalMark.objects.filter(tenant_id=tenant_id, script=script, status=FinalMark.Status.LOCKED).first()
-    masked = ScriptAsset.objects.filter(tenant_id=tenant_id, script=script, kind__in=[ScriptAsset.Kind.MASTER, ScriptAsset.Kind.EVALUATION], deleted_at__isnull=True).exists()
-    eligible = bool(final and masked and script.state == Script.State.FINALIZED)
-    if not eligible:
-        raise HttpError(409, "Only finalized, masked scripts are eligible for student access")
-    item = StudentScriptRequest.objects.create(tenant_id=tenant_id, identity_reference=identity_reference, script=script, purpose=purpose, eligibility={"final_mark_locked": True, "masked_asset": True, "checked_at": timezone.now().isoformat()}, requested_by_id=actor_id)
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="student.script.requested", aggregate="StudentScriptRequest", aggregate_id=item.id, payload={"script_id": str(script.id), "purpose": purpose})
     return item
 
 

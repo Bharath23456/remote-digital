@@ -2,7 +2,7 @@ from django.db import models
 
 from apps.allocation.models import Assignment
 from apps.configuration.models import Paper, Question
-from apps.core.models import TenantModel, TimeStampedModel
+from apps.core.models import TenantModel
 
 
 class AIProviderConfiguration(TenantModel):

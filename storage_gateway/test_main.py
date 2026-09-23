@@ -55,6 +55,8 @@ def request(module, method, key, query, body=b"", headers=None, path=None):
 
 def configured_gateway(monkeypatch, tmp_path):
     monkeypatch.setenv("STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("STORAGE_REPLICA_ROOT", str(tmp_path / "replica"))
+    monkeypatch.setenv("STORAGE_BACKUP_ROOT", str(tmp_path / "backup"))
     monkeypatch.setenv("STORAGE_SIGNING_KEY", "test-signing-key")
     monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", "test-encryption-key")
     return importlib.reload(gateway)
@@ -157,7 +159,8 @@ def test_scan_processing_matches_golden_digest(monkeypatch, tmp_path):
     image = Image.new("RGB", (320, 480), "white")
     draw = ImageDraw.Draw(image)
     draw.rectangle((16, 16, 304, 64), outline="black", width=2)
-    draw.text((24, 30), "ANONYMOUS SCRIPT PAGE 1", fill="black")
+    # Geometric marks avoid platform-dependent default font rasterization.
+    draw.rectangle((24, 30, 180, 44), fill="black")
     for y in range(100, 420, 32):
         draw.line((28, y, 290, y), fill=(70, 90, 120), width=2)
     source = BytesIO()
@@ -166,4 +169,10 @@ def test_scan_processing_matches_golden_digest(monkeypatch, tmp_path):
     assert mime_type == "image/png"
     assert metrics["width"] == 320 and metrics["height"] == 480
     assert metrics["is_blank"] is False
-    assert hashlib.sha256(output).hexdigest() == "b19e341ef467603a628c8cf69c65be3381f3f3d8329b7d4552147ef28159aa95"
+    # Compare decoded pixels, not PNG compression bytes that vary by codec build.
+    processed = Image.open(BytesIO(output))
+    assert processed.mode == "L"
+    assert abs(processed.info["dpi"][0] - 300) < 0.1
+    assert processed.getpixel((80, 35)) == 0
+    assert processed.getpixel((80, 80)) == 255
+    assert hashlib.sha256(processed.tobytes()).hexdigest() == "12064d4abf508a783ca350ad4cb77eb83cfb37572eb47ffd3b996c783c1b26f1"

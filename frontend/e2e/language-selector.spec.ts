@@ -6,7 +6,7 @@ const context = {
   role: "university_admin",
   permissions: [],
   must_change_password: false,
-  enabled_modules: ["configuration", "evaluators", "receiving", "custody", "digitization", "anonymisation", "repository", "allocation", "assignment_governance", "rubrics", "evaluation", "valuation", "assessment", "operations", "services", "security", "audit", "enterprise"],
+  enabled_modules: ["configuration", "evaluators", "receiving", "custody", "digitization", "anonymisation", "repository", "allocation", "assignment_governance", "rubrics", "evaluation", "valuation", "assessment", "operations", "security", "audit", "enterprise"],
   ai_evaluation: { mode: "disabled", confidence_threshold: 85, model_name: "admiezo-ai-v1", provider: { available: false }, available: false },
   tenants: [{ id: "northbridge", name: "Northbridge University", role: "university_admin" }],
   session: { id: "language-test", timeout_minutes: 60 },

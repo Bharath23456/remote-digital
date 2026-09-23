@@ -41,25 +41,20 @@ from .models import (
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
-    RemunerationRule,
-    RemunerationStatement,
     ResultHandover,
     RevaluationRequest,
     RuntimeIncident,
     SecureEvaluationSession,
-    StudentScriptRequest,
     WorkloadAction,
 )
 from .services import (
     acknowledge_handover,
     assess_centre,
-    calculate_remuneration,
     consume_authorization,
     create_issue,
     create_notification,
     create_proctoring_evidence,
     create_revaluation,
-    create_student_request,
     create_workload_action,
     declare_and_sign,
     decide_authorization,
@@ -90,7 +85,6 @@ from .services import (
     transition_recovery_plan,
     transition_revaluation,
     transition_runtime,
-    transition_statement,
     transition_workload,
     verify_proctoring_evidence,
 )
@@ -290,33 +284,6 @@ class CampIn(Schema):
     evaluator_ids: list[str] = Field(default_factory=list)
 
 
-class RemunerationRuleIn(Schema):
-    paper_id: str | None = None
-    centre_id: str | None = None
-    per_script: float = 0
-    per_page: float = 0
-    per_question: float = 0
-    moderator_rate: float = 0
-    chief_examiner_rate: float = 0
-    revaluation_rate: float = 0
-    slabs: list[dict] = Field(default_factory=list)
-    minimum_payment: float = 0
-    maximum_payment: float | None = None
-    tax_percentage: float = 0
-
-
-class RemunerationCalculateIn(Schema):
-    evaluator_id: str
-    session_id: str
-    rule_id: str
-
-
-class StudentRequestIn(Schema):
-    identity_reference: str
-    script_id: str
-    purpose: str = "copy"
-
-
 class EvidenceIn(Schema):
     script_id: str
     purpose: str
@@ -477,9 +444,6 @@ def catalog(request, section: str = ""):
         "centres": _serialize(CentreProfile.objects.filter(tenant_id=tenant_id), ["code", "name", "location", "capacity", "workstation_count", "status", "version"]),
         "readiness": _serialize(CentreReadiness.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["centre_id", "decision", "scanner_ready", "workstation_ready", "network_ready", "power_ready", "secure_lan_ready", "operators_ready", "notes"]),
         "camps": _serialize(EvaluationCamp.objects.filter(tenant_id=tenant_id), ["centre_id", "session_id", "name", "starts_at", "ends_at", "status", "performance", "version"]),
-        "remuneration_rules": _serialize(RemunerationRule.objects.filter(tenant_id=tenant_id), ["paper_id", "centre_id", "per_script", "per_page", "per_question", "minimum_payment", "maximum_payment", "tax_percentage", "version"]),
-        "statements": _serialize(RemunerationStatement.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["evaluator_id", "session_id", "units", "gross_amount", "deductions", "net_amount", "status", "payment_reference", "version"]),
-        "student_requests": _serialize(StudentScriptRequest.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["script_id", "purpose", "eligibility", "status", "expires_at", "download_allowed", "access_count", "version"]),
         "evidence_packages": _serialize(EvidencePackage.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["script_id", "purpose", "event_count", "digest", "status", "version"]),
         "integrations": _serialize(IntegrationEndpoint.objects.filter(tenant_id=tenant_id), ["name", "kind", "base_url", "authentication", "rate_limit_per_minute", "webhook_events", "status", "version"]),
         "handovers": _serialize(ResultHandover.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["endpoint_id", "final_mark_id", "payload_digest", "status", "attempt_count", "acknowledgement_reference", "differences", "version"]),
@@ -489,7 +453,6 @@ def catalog(request, section: str = ""):
     section_fields = {
         "assessment": {"moderation_policies", "moderation_cases", "revaluations", "completions", "authorizations"},
         "operations": {"monitoring", "productivity", "active_evaluations", "presence_events", "secure_sessions", "proctoring_reviews", "attendance", "workload_actions", "runtime_incidents", "issues", "knowledge", "notifications", "centres", "readiness", "camps"},
-        "services": {"remuneration_rules", "statements", "student_requests"},
         "platform": {"evidence_packages", "integrations", "handovers", "recovery_plans", "recovery_drills"},
     }
     if section in section_fields:
@@ -864,82 +827,6 @@ def camp_action(request, camp_id: str, payload: VersionActionIn):
     tenant_id = _tenant(request, *ADMIN_ROLES)
     item = transition_camp(tenant_id=tenant_id, actor_id=request.auth.id, camp_id=camp_id, expected_version=payload.version, target=payload.target, incidents=payload.values.get("incidents"), performance=payload.values.get("performance"))
     return {"id": str(item.id), "status": item.status, "version": item.version}
-
-
-@router.post("/remuneration/rules")
-def remuneration_rule(request, payload: RemunerationRuleIn):
-    tenant_id = _tenant(request, *ADMIN_ROLES)
-    paper = Paper.objects.filter(id=payload.paper_id, tenant_id=tenant_id).first() if payload.paper_id else None
-    centre = CentreProfile.objects.filter(id=payload.centre_id, tenant_id=tenant_id).first() if payload.centre_id else None
-    with transaction.atomic():
-        item = RemunerationRule.objects.create(tenant_id=tenant_id, paper=paper, centre=centre, **payload.dict(exclude={"paper_id", "centre_id"}))
-        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="remuneration.rule.created", aggregate="RemunerationRule", aggregate_id=item.id, payload={"paper_id": str(paper.id) if paper else None})
-    return {"id": str(item.id), "version": item.version}
-
-
-@router.post("/remuneration/calculate")
-def remuneration_calculate(request, payload: RemunerationCalculateIn):
-    tenant_id = _tenant(request, *ADMIN_ROLES)
-    evaluator = Evaluator.objects.filter(id=payload.evaluator_id, tenant_id=tenant_id).first()
-    session = ExamSession.objects.filter(id=payload.session_id, tenant_id=tenant_id).first()
-    rule = RemunerationRule.objects.filter(id=payload.rule_id, tenant_id=tenant_id).first()
-    if not evaluator or not session or not rule:
-        raise HttpError(404, "Evaluator, session, or rule not found")
-    item = calculate_remuneration(tenant_id=tenant_id, actor_id=request.auth.id, evaluator=evaluator, session=session, rule=rule)
-    return {"id": str(item.id), "gross": float(item.gross_amount), "deductions": float(item.deductions), "net": float(item.net_amount), "status": item.status, "version": item.version}
-
-
-@router.post("/remuneration/statements/{statement_id}/action")
-def remuneration_action(request, statement_id: str, payload: VersionActionIn):
-    tenant_id = _tenant(request, *ADMIN_ROLES)
-    item = transition_statement(tenant_id=tenant_id, actor_id=request.auth.id, statement_id=statement_id, expected_version=payload.version, target=payload.target, payment_reference=payload.values.get("payment_reference", ""))
-    return {"id": str(item.id), "status": item.status, "payment_reference": item.payment_reference, "version": item.version}
-
-
-@router.post("/student/requests")
-def student_request(request, payload: StudentRequestIn):
-    tenant_id = _tenant(request, *ADMIN_ROLES)
-    script = Script.objects.filter(id=payload.script_id, tenant_id=tenant_id).first()
-    if not script:
-        raise HttpError(404, "Script not found")
-    item = create_student_request(tenant_id=tenant_id, actor_id=request.auth.id, identity_reference=payload.identity_reference, script=script, purpose=payload.purpose)
-    return {"id": str(item.id), "status": item.status, "eligibility": item.eligibility, "version": item.version}
-
-
-@router.post("/student/requests/{request_id}/decision")
-def student_decision(request, request_id: str, payload: DecisionIn):
-    tenant_id = _tenant(request, *ADMIN_ROLES)
-    with transaction.atomic():
-        item = StudentScriptRequest.objects.select_for_update().filter(id=request_id, tenant_id=tenant_id, status=StudentScriptRequest.Status.REQUESTED).first()
-        if not item or item.version != payload.version:
-            raise HttpError(409, "Student request is missing, stale, or already decided")
-        item.status = StudentScriptRequest.Status.APPROVED if payload.approve else StudentScriptRequest.Status.REJECTED
-        item.approved_by_id = request.auth.id if payload.approve else None
-        item.expires_at = timezone.now() + timedelta(days=7) if payload.approve else None
-        item.version += 1
-        item.save()
-        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action=f"student.request.{item.status}", aggregate="StudentScriptRequest", aggregate_id=item.id, payload={"script_id": str(item.script_id)})
-    return {"id": str(item.id), "status": item.status, "expires_at": item.expires_at.isoformat() if item.expires_at else None, "version": item.version}
-
-
-@router.get("/student/requests/{request_id}/viewer")
-def student_viewer(request, request_id: str):
-    tenant_id = _tenant(request, *READ_ROLES)
-    item = StudentScriptRequest.objects.filter(id=request_id, tenant_id=tenant_id, status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE]).select_related("script").first()
-    if not item or not item.expires_at or item.expires_at <= timezone.now():
-        raise HttpError(404, "Student access is unavailable or expired")
-    assets = ScriptAsset.objects.filter(tenant_id=tenant_id, script=item.script, kind=ScriptAsset.Kind.EVALUATION, deleted_at__isnull=True).order_by("page_number")
-    pages = []
-    for asset in assets:
-        url, expires = signed_object_url(method="GET", key=asset.storage_key, ttl_seconds=300)
-        pages.append({"page_number": asset.page_number, "url": url, "expires_at": expires, "sha256": asset.sha256})
-    with transaction.atomic():
-        locked = StudentScriptRequest.objects.select_for_update().get(id=item.id)
-        locked.access_count += 1
-        locked.status = StudentScriptRequest.Status.AVAILABLE
-        locked.save()
-        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="student.script.viewed", aggregate="StudentScriptRequest", aggregate_id=locked.id, payload={"script_id": str(locked.script_id), "page_count": len(pages)})
-    return {"request_id": str(item.id), "pages": pages, "watermark": f"ADMIEZO · {item.identity_reference[-8:]} · {timezone.now().isoformat()}", "download_allowed": item.download_allowed, "ttl_seconds": 300}
 
 
 @router.post("/audit/evidence")

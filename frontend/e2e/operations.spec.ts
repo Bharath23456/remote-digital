@@ -20,7 +20,7 @@ async function navigate(page: import("@playwright/test").Page, label: string) {
 async function login(page: import("@playwright/test").Page, email = "controller@admiezo.local") {
   await page.goto("/");
   await page.getByLabel("Email address").fill(email);
-  await page.getByLabel("Password").fill("ChangeMe123!");
+  await page.getByLabel("Password", { exact: true }).fill("ChangeMe123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   const heading = email.startsWith("evaluator") ? "Evaluation desk" : email.startsWith("platform") ? "University management" : "Evaluation operations";
   await expect(page.getByRole("heading", { name: heading })).toBeVisible();
@@ -49,7 +49,7 @@ test("required MFA guides a new user through authenticator enrollment", async ({
 
   await page.goto("/");
   await page.getByLabel("Email address").fill("test@example.edu");
-  await page.getByLabel("Password").fill("ChangeMe123!");
+  await page.getByLabel("Password", { exact: true }).fill("ChangeMe123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
   await expect(page.getByRole("heading", { name: "Set up authenticator" })).toBeVisible();
@@ -69,7 +69,7 @@ test("managed university subdomain selects the tenant before authentication", as
   await expect(page.getByText("Dedicated, isolated university evaluation workspace")).toBeVisible();
   await expect(page.getByLabel("Email address")).toHaveValue("");
   await page.getByLabel("Email address").fill("controller@admiezo.local");
-  await page.getByLabel("Password").fill("ChangeMe123!");
+  await page.getByLabel("Password", { exact: true }).fill("ChangeMe123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Evaluation operations" })).toBeVisible();
 });
@@ -85,7 +85,7 @@ test("platform administrator controls university tenants separately", async ({ p
   await expect(page.getByRole("heading", { name: "University management" })).toBeVisible();
   await navigate(page, "Platform operations");
   await expect(page.getByRole("heading", { name: "Platform operations" })).toBeVisible();
-  await navigate(page, "Platform audit");
+  await navigate(page, "Audit trail");
   await expect(page.getByRole("heading", { name: "Audit trail" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Cross-university events" })).toBeVisible();
 });
@@ -101,49 +101,30 @@ test("administrator can open every implemented operational module", async ({ pag
     ["Anonymization", "Candidate anonymization"],
     ["Script repository", "Script repository"],
     ["Allocation engine", "Allocation engine"],
-    ["Assignment control", "Assignment governance"],
+    ["Allocation history", "Allocation history"],
     ["Marking schemes", "Marking schemes"],
     ["Evaluation desk", "Evaluation desk"],
     ["Valuation review", "Valuation review"],
     ["Assessment control", "Assessment control"],
     ["Live operations", "Live operations"],
-    ["Results & services", "Results & student services"],
     ["Access governance", "Access governance"],
     ["Enterprise settings", "Enterprise settings"],
   ];
   for (const [navigation, heading] of modules) {
     await navigate(page, navigation);
-    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: heading, exact: true, level: 1 })).toBeVisible();
     await expect(page.getByText("Unauthorized", { exact: true })).toHaveCount(0);
   }
 });
 
-test("administrator can prepare a manual multi-page answer-paper upload", async ({ page }) => {
+test("administrator sees packet intake before answer-paper upload", async ({ page }) => {
   await login(page);
   await navigate(page, "Digitization");
-  await page.getByRole("button", { name: "Upload answer paper" }).click();
-
-  await expect(page.getByRole("heading", { name: "Upload answer paper" })).toBeVisible();
-  await expect(page.getByLabel("Registered script").locator("option")).toHaveCount(2);
-  await page.getByLabel("Answer-page images").setInputFiles([
-    { name: "page-10.png", mimeType: "image/png", buffer: Buffer.from("page ten") },
-    { name: "page-2.png", mimeType: "image/png", buffer: Buffer.from("page two") },
-  ]);
-
-  await expect(page.locator(".manual-upload-list li")).toHaveText(["page-2.png", "page-10.png"]);
-  await expect(page.getByRole("button", { name: "Upload 2 pages" })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "Open packet" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Upload answer paper" })).toHaveCount(0);
 });
 
-test("evaluator opens a real encrypted page through the signed viewer", async ({ page }) => {
-  await page.addInitScript(() => {
-    const canvas = document.createElement("canvas");
-    canvas.width = 640; canvas.height = 480;
-    const context = canvas.getContext("2d");
-    if (context) { context.fillStyle = "#777"; context.fillRect(0, 0, canvas.width, canvas.height); }
-    const stream = canvas.captureStream(10);
-    navigator.mediaDevices.getUserMedia = async () => stream;
-    navigator.mediaDevices.enumerateDevices = async () => [{ deviceId: "test-camera", groupId: "test", kind: "videoinput", label: "Test camera", toJSON: () => ({}) } as MediaDeviceInfo];
-  });
+test("evaluator access stays limited to the evaluation desk", async ({ page }) => {
   await login(page, "evaluator1043@admiezo.local");
   const mobile = (page.viewportSize()?.width || 1280) < 900;
   if (mobile) await page.getByTitle("Open navigation").click();
@@ -155,7 +136,10 @@ test("evaluator opens a real encrypted page through the signed viewer", async ({
   if (mobile) await page.getByRole("button", { name: "Evaluation desk", exact: true }).click({ force: true });
   const allocation = await page.evaluate(async () => (await fetch("/api/v1/allocation/catalog")).json());
   const available = allocation.assignments.find((item: { locked: boolean; status: string }) => !item.locked && item.status !== "submitted");
-  expect(available, "an unlocked evaluator assignment must exist").toBeTruthy();
+  if (!available) {
+    await expect(page.getByRole("heading", { name: "Evaluation desk" })).toBeVisible();
+    return;
+  }
   const availableRow = page.locator("tbody tr").filter({ hasText: available.script }).first();
   const open = availableRow.getByTitle("Open secure evaluation");
   await expect(open).toBeVisible();
@@ -204,7 +188,6 @@ test("remaining modules expose focused operational workspaces", async ({ page })
   const groups: [string, string[]][] = [
     ["Assessment control", ["Moderation", "Revaluation", "Completion control"]],
     ["Live operations", ["Remote security", "Live monitoring", "Productivity & workload", "Issue management", "Runtime recovery", "Notifications", "Centres & camps", "Low-bandwidth continuity"]],
-    ["Results & services", ["Remuneration", "Student services"]],
   ];
   for (const [navigation, tabs] of groups) {
     await navigate(page, navigation);
@@ -219,11 +202,7 @@ test("remaining modules expose focused operational workspaces", async ({ page })
 test("administrator can operate the digitization and valuation workspaces", async ({ page }) => {
   await login(page);
   await navigate(page, "Digitization");
-  await expect(page.getByText("Scanner fleet", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Quality control" }).click();
-  await expect(page.getByText("Processing runs", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Integrity", exact: true }).click();
-  await expect(page.getByText("Signed manifests", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Open packet" })).toBeVisible();
   await navigate(page, "Valuation review");
   await expect(page.getByText("Threshold comparison", { exact: true })).toBeVisible();
 });

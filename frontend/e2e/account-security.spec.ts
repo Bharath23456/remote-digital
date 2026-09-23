@@ -2,9 +2,9 @@ import { expect, test } from "@playwright/test";
 
 test("evaluator can open personal password settings", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Northbridge University" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
   await page.getByLabel("Email address").fill("evaluator1045@admiezo.local");
-  await page.getByLabel("Password").fill("ChangeMe123!");
+  await page.getByLabel("Password", { exact: true }).fill("ChangeMe123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Account settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Account settings" });
@@ -23,9 +23,9 @@ test("administrator reaches guarded authenticator reset", async ({ page }) => {
     await route.fulfill({ response, json: body });
   });
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Northbridge University" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
   await page.getByLabel("Email address").fill("admin@admiezo.local");
-  await page.getByLabel("Password").fill("ChangeMe123!");
+  await page.getByLabel("Password", { exact: true }).fill("ChangeMe123!");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   if ((page.viewportSize()?.width || 0) <= 760) {
     await page.getByTitle("Open navigation").click();

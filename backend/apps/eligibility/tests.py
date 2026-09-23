@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from apps.core.testing import create_operational_fixtures
 from django.test import Client, TestCase
 from django.utils import timezone
 from ninja.errors import HttpError
@@ -21,6 +22,7 @@ class EligibilityAllocationTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def setUp(self):
         self.client = Client()

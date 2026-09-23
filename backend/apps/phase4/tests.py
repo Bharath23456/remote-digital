@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from apps.core.testing import create_operational_fixtures
 import json
 from unittest.mock import patch
 
@@ -23,7 +24,6 @@ from apps.valuation.models import FinalMark, ValuationResult
 from apps.workflow.models import EvaluationWorkflow
 
 from .models import (
-    AttendanceRecord,
     CentreProfile,
     CentreReadiness,
     CompletionRecord,
@@ -34,19 +34,15 @@ from .models import (
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
-    RemunerationRule,
     ResultHandover,
     SecureEvaluationSession,
-    StudentScriptRequest,
     WorkloadAction,
 )
 from .services import (
     acknowledge_handover,
-    calculate_remuneration,
     consume_authorization,
     create_issue,
     create_notification,
-    create_student_request,
     create_workload_action,
     decide_authorization,
     notification_action,
@@ -57,7 +53,6 @@ from .services import (
     transition_centre,
     transition_drill,
     transition_handover,
-    transition_statement,
     transition_workload,
 )
 
@@ -66,6 +61,7 @@ class RemainingModulesTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
         cls.admin = User.objects.get(username="admin@admiezo.local")
         cls.controller = User.objects.get(username="controller@admiezo.local")
         cls.paper = Paper.objects.get(code="CS401-A")
@@ -256,26 +252,7 @@ class RemainingModulesTests(TestCase):
         handover = acknowledge_handover(tenant_id=self.tenant_id, actor_id=self.admin.id, handover_id=handover.id, expected_version=handover.version, status=ResultHandover.Status.ACKNOWLEDGED, reference="ERP-ACK-1", remote_snapshot={"mark": "72.00", "checksum": final.checksum})
         self.assertEqual(handover.differences, {})
 
-    def test_remuneration_uses_completed_work_and_independent_approval(self):
-        assignment = Assignment.objects.filter(tenant_id=self.tenant_id).select_related("evaluator").first()
-        evaluator = assignment.evaluator
-        assignment.status = Assignment.Status.SUBMITTED
-        assignment.started_at = timezone.now() - timedelta(hours=1)
-        assignment.submitted_at = timezone.now()
-        assignment.save()
-        AttendanceRecord.objects.create(tenant_id=self.tenant_id, evaluator=evaluator, session=self.session, checked_in_at=timezone.now() - timedelta(hours=2), checked_out_at=timezone.now())
-        rule = RemunerationRule.objects.filter(tenant_id=self.tenant_id).first()
-        statement = calculate_remuneration(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator=evaluator, session=self.session, rule=rule)
-        self.assertGreater(statement.net_amount, 0)
-        with self.assertRaises(HttpError):
-            transition_statement(tenant_id=self.tenant_id, actor_id=self.admin.id, statement_id=statement.id, expected_version=statement.version, target="approved")
-        statement.refresh_from_db()
-        statement = transition_statement(tenant_id=self.tenant_id, actor_id=self.controller.id, statement_id=statement.id, expected_version=statement.version, target="approved")
-        statement = transition_statement(tenant_id=self.tenant_id, actor_id=self.admin.id, statement_id=statement.id, expected_version=statement.version, target="paid", payment_reference="BANK-2026-01")
-        statement = transition_statement(tenant_id=self.tenant_id, actor_id=self.controller.id, statement_id=statement.id, expected_version=statement.version, target="reconciled")
-        self.assertEqual(statement.status, "reconciled")
-
-    def test_student_access_evidence_i18n_and_recovery(self):
+    def test_evidence_i18n_and_recovery(self):
         script = Script.objects.filter(tenant_id=self.tenant_id).exclude(final_mark__isnull=False).first()
         script.state = Script.State.FINALIZED
         script.save(update_fields=["state", "updated_at"])
@@ -288,8 +265,6 @@ class RemainingModulesTests(TestCase):
             version=1,
             defaults={"storage_key": f"tests/{script.id}/page-1.webp", "sha256": "d" * 64, "byte_size": 1200},
         )
-        request = create_student_request(tenant_id=self.tenant_id, actor_id=self.admin.id, identity_reference="opaque-student-reference", script=script, purpose="copy")
-        self.assertEqual(request.status, StudentScriptRequest.Status.REQUESTED)
         with self.assertRaises(HttpError):
             create_issue(tenant_id=self.tenant_id, actor_id=self.admin.id, issue_type="technical", title="x", description="blocked", paper=None, question_reference="")
         package = EvidencePackage.objects.create(tenant_id=self.tenant_id, script=script, purpose="audit", requested_by_id=self.admin.id)
@@ -306,5 +281,5 @@ class RemainingModulesTests(TestCase):
 
     def test_phase4_models_do_not_store_candidate_pii(self):
         forbidden = {"candidate_name", "register_number", "usn", "college", "candidate_email", "candidate_phone", "photo", "signature"}
-        for model in (StudentScriptRequest, CompletionRecord, ResultHandover, EvidencePackage):
+        for model in (CompletionRecord, ResultHandover, EvidencePackage):
             self.assertFalse(forbidden.intersection(field.name for field in model._meta.fields))

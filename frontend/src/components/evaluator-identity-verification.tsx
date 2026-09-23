@@ -59,6 +59,7 @@ export function IdentityStatusBadge({ evaluator }: { evaluator: IdentityEvaluato
 export function IdentityVerificationModal({ mode, evaluator, assignment, onClose, onComplete }: { mode: "enroll" | "verify"; evaluator?: IdentityEvaluator; assignment?: IdentityAssignment; onClose: () => void; onComplete: (result: Record<string, unknown>) => void | Promise<void> }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const cameraRequest = useRef(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [selfStatus, setSelfStatus] = useState<FaceStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -67,19 +68,29 @@ export function IdentityVerificationModal({ mode, evaluator, assignment, onClose
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
 
   const startCamera = useCallback(async () => {
+    const requestId = ++cameraRequest.current;
     setBusy(true); setError("");
     try {
       const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      if (requestId !== cameraRequest.current) { stopStream(camera); return; }
       stopStream(streamRef.current);
       streamRef.current = camera;
       setStream(camera);
       setChecks((current) => ({ ...current, camera: cameraActive(camera) }));
     } catch (reason) {
+      if (requestId !== cameraRequest.current) return;
       setError(reason instanceof Error && reason.name === "NotAllowedError" ? "Camera permission is required." : reason instanceof Error ? reason.message : "Camera could not start.");
-    } finally { setBusy(false); }
+    } finally { if (requestId === cameraRequest.current) setBusy(false); }
   }, []);
 
-  useEffect(() => { void startCamera(); return () => stopStream(streamRef.current); }, [startCamera]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void startCamera(), 0);
+    return () => {
+      window.clearTimeout(timer);
+      cameraRequest.current += 1;
+      stopStream(streamRef.current);
+    };
+  }, [startCamera]);
   useEffect(() => { if (videoRef.current) { videoRef.current.srcObject = stream; void videoRef.current.play().catch(() => undefined); } }, [stream]);
   useEffect(() => {
     if (mode !== "verify") return;

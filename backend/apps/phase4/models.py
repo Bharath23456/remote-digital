@@ -367,68 +367,6 @@ class EvaluationCamp(TenantModel):
     version = models.PositiveIntegerField(default=1)
 
 
-class RemunerationRule(TenantModel):
-    paper = models.ForeignKey(Paper, null=True, blank=True, on_delete=models.PROTECT, related_name="remuneration_rules")
-    centre = models.ForeignKey(CentreProfile, null=True, blank=True, on_delete=models.PROTECT, related_name="remuneration_rules")
-    per_script = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    per_page = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    per_question = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    moderator_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    chief_examiner_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    revaluation_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    slabs = models.JSONField(default=list)
-    minimum_payment = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    maximum_payment = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
-    tax_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    version = models.PositiveIntegerField(default=1)
-
-
-class RemunerationStatement(TenantModel):
-    class Status(models.TextChoices):
-        CALCULATED = "calculated", "Calculated"
-        APPROVED = "approved", "Approved"
-        PAID = "paid", "Paid"
-        RECONCILED = "reconciled", "Reconciled"
-
-    evaluator = models.ForeignKey(Evaluator, on_delete=models.PROTECT, related_name="remuneration_statements")
-    session = models.ForeignKey(ExamSession, on_delete=models.PROTECT, related_name="remuneration_statements")
-    rule = models.ForeignKey(RemunerationRule, on_delete=models.PROTECT, related_name="statements")
-    units = models.JSONField(default=dict)
-    gross_amount = models.DecimalField(max_digits=12, decimal_places=2)
-    deductions = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    net_amount = models.DecimalField(max_digits=12, decimal_places=2)
-    calculation = models.JSONField(default=dict)
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.CALCULATED)
-    calculated_by_id = models.PositiveBigIntegerField(null=True, blank=True)
-    approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
-    payment_reference = models.CharField(max_length=100, blank=True)
-    version = models.PositiveIntegerField(default=1)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["evaluator", "session", "rule"], name="unique_remuneration_statement")]
-
-
-class StudentScriptRequest(TenantModel):
-    class Status(models.TextChoices):
-        REQUESTED = "requested", "Requested"
-        APPROVED = "approved", "Approved"
-        AVAILABLE = "available", "Available"
-        EXPIRED = "expired", "Expired"
-        REJECTED = "rejected", "Rejected"
-
-    identity_reference = models.CharField(max_length=128, db_index=True)
-    script = models.ForeignKey(Script, on_delete=models.PROTECT, related_name="student_access_requests")
-    purpose = models.CharField(max_length=24, choices=[("copy", "Script copy"), ("revaluation", "Revaluation")])
-    eligibility = models.JSONField(default=dict)
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.REQUESTED)
-    expires_at = models.DateTimeField(null=True, blank=True)
-    download_allowed = models.BooleanField(default=False)
-    access_count = models.PositiveIntegerField(default=0)
-    requested_by_id = models.PositiveBigIntegerField()
-    approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
-    version = models.PositiveIntegerField(default=1)
-
-
 class EvidencePackage(TenantModel):
     class Status(models.TextChoices):
         REQUESTED = "requested", "Requested"
