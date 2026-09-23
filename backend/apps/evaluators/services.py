@@ -17,6 +17,7 @@ from apps.core.services import record_event
 from apps.evaluators.models import Evaluator, EvaluatorAvailability, EvaluatorFaceTemplate, EvaluatorHistory, EvaluatorIdentityVerification, Expertise
 from apps.evaluators.face_engine import FaceEngineError, extract_embedding
 from apps.security.crypto import SecretDecryptionError, decrypt_secret, encrypt_secret
+from apps.security.models import SecurityPolicy
 from apps.tenancy.custom_fields import validate_custom_values
 from apps.tenancy.models import Institution, Membership
 
@@ -199,11 +200,12 @@ def snapshot(evaluator):
     return {
         "evaluator_code": evaluator.evaluator_code,
         "display_name": evaluator.display_name,
-        "email": evaluator.email,
+        "email": "System managed" if evaluator.is_system_ai else evaluator.email,
         "mobile": evaluator.mobile,
         "employee_id": evaluator.employee_id,
         "user_id": evaluator.user_id,
         "login_enabled": bool(evaluator.user_id),
+        "is_system_ai": evaluator.is_system_ai,
         "institution_name": evaluator.institution_name,
         "department": evaluator.department,
         "designation": evaluator.designation,
@@ -228,7 +230,16 @@ def snapshot(evaluator):
 
 def evaluator_catalog(tenant_id):
     profiles = []
-    for evaluator in Evaluator.objects.filter(tenant_id=tenant_id).select_related("face_template").prefetch_related("expertise__subject", "availability_periods", "history").order_by("display_name"):
+    evaluators = Evaluator.objects.filter(tenant_id=tenant_id)
+    policy = SecurityPolicy.objects.filter(tenant_id=tenant_id).first()
+    ai_available = False
+    if policy and policy.ai_evaluation_mode == SecurityPolicy.AIEvaluationMode.AUTONOMOUS:
+        from apps.ai_evaluation.services import provider_status
+
+        ai_available = provider_status(tenant_id, policy.ai_model_name)["available"]
+    if not ai_available:
+        evaluators = evaluators.exclude(is_system_ai=True)
+    for evaluator in evaluators.select_related("face_template").prefetch_related("expertise__subject", "availability_periods", "history").order_by("display_name"):
         profiles.append({
             "id": str(evaluator.id),
             **snapshot(evaluator),

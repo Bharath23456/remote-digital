@@ -36,6 +36,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   SquareCheckBig,
   Strikethrough,
   Undo2,
@@ -169,6 +170,26 @@ type Marking = {
     created_at: string;
   }[];
   page_anchors: PageAnchor[];
+};
+type AIAssist = {
+  enabled: boolean;
+  mode: "disabled" | "assistive" | "autonomous";
+  provider: { provider: string; configured: boolean };
+  analysis: null | {
+    id: string;
+    status: "queued" | "running" | "completed" | "low_confidence" | "failed";
+    effective_confidence: number | null;
+    summary: string;
+    error_message: string;
+    assessments: {
+      question_id: string;
+      question: string;
+      marks: number;
+      confidence: number;
+      feedback: string;
+      reasoning: string;
+    }[];
+  };
 };
 type Filter =
   | "all"
@@ -554,6 +575,8 @@ export function EvaluationWorkspace({
   const [filter, setFilter] = useState<Filter>("all");
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [marking, setMarking] = useState<Marking | null>(null);
+  const [aiAssist, setAIAssist] = useState<AIAssist | null>(null);
+  const [aiPanel, setAIPanel] = useState(false);
   const [lockToken, setLockToken] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [visitedPages, setVisitedPages] = useState<Set<number>>(
@@ -636,6 +659,18 @@ export function EvaluationWorkspace({
     );
     return body;
   }, []);
+  const loadAIAssist = useCallback(async (assignmentId: string) => {
+    try {
+      const body = (await api(
+        `/api/v1/marking/assignments/${assignmentId}/ai-analysis`,
+      )) as AIAssist;
+      setAIAssist(body);
+      return body;
+    } catch {
+      setAIAssist(null);
+      return null;
+    }
+  }, []);
   const visible = useMemo(
     () =>
       assignments.filter(
@@ -709,6 +744,7 @@ export function EvaluationWorkspace({
             method: "POST",
           });
         await refreshMarking(item.id);
+        await loadAIAssist(item.id);
       }
       const viewer = await api(
         `/api/v1/allocation/assignments/${item.id}/viewer?low_bandwidth=${bandwidth}`,
@@ -747,6 +783,7 @@ export function EvaluationWorkspace({
         }
       }
       setMarking(null);
+      setAIAssist(null);
       setError(
         reason instanceof Error
           ? reason.message
@@ -802,6 +839,8 @@ export function EvaluationWorkspace({
       await saveProgress(currentPage);
     setManifest(null);
     setMarking(null);
+    setAIAssist(null);
+    setAIPanel(false);
     setLockToken("");
     setAnnotationTool(null);
     setSelectedAnnotation(null);
@@ -1131,6 +1170,19 @@ export function EvaluationWorkspace({
     );
     void security.report("viewer_opened", "low");
   }, [manifest?.assignment.id, evaluatorMode, security.session?.id]);
+  useEffect(() => {
+    if (
+      !manifest ||
+      !aiAssist?.analysis ||
+      !["queued", "running"].includes(aiAssist.analysis.status)
+    )
+      return;
+    const poll = window.setInterval(
+      () => void loadAIAssist(manifest.assignment.id),
+      2500,
+    );
+    return () => window.clearInterval(poll);
+  }, [aiAssist?.analysis?.status, loadAIAssist, manifest?.assignment.id]);
   useCopyProtection({
     active: Boolean(manifest && evaluatorMode),
     containerRef: viewerRef,
@@ -1141,6 +1193,27 @@ export function EvaluationWorkspace({
     onSecurityPause: security.pause,
     onSoftAlert: showSecurityNotice,
   });
+  async function requestAIAnalysis() {
+    if (!manifest || !aiAssist?.enabled) return;
+    setSaving(true);
+    setError("");
+    setAIPanel(true);
+    try {
+      await api(
+        `/api/v1/marking/assignments/${manifest.assignment.id}/ai-analysis`,
+        { method: "POST" },
+      );
+      await loadAIAssist(manifest.assignment.id);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "AI analysis could not be started",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
   async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
     if (
       !annotationTool ||
@@ -1306,17 +1379,28 @@ export function EvaluationWorkspace({
       .filter((item) => item.marked_for_review)
       .map((item) => item.question_id) || [],
   );
+  const [clockNow, setClockNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (!manifest) {
+      setClockNow(null);
+      return;
+    }
+    const updateClock = () => setClockNow(Date.now());
+    updateClock();
+    const timer = window.setInterval(updateClock, 1000);
+    return () => window.clearInterval(timer);
+  }, [manifest?.assignment.due_at]);
   const timeLeft = useMemo(() => {
-    if (!manifest) return "--:--:--";
+    if (!manifest || clockNow === null) return "--:--:--";
     const ms = Math.max(
       0,
-      new Date(manifest.assignment.due_at).getTime() - Date.now(),
+      new Date(manifest.assignment.due_at).getTime() - clockNow,
     );
     const h = Math.floor(ms / 3600000);
     const m = Math.floor((ms % 3600000) / 60000);
     const sec = Math.floor((ms % 60000) / 1000);
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  }, [manifest?.assignment.due_at]);
+  }, [clockNow, manifest]);
   const syncLabel = saving
     ? "Saving"
     : syncStatus === "queued"
@@ -1456,6 +1540,21 @@ export function EvaluationWorkspace({
             </div>
             <small>{manifest.assignment.progress_percent}% reviewed</small>
           </div>
+          {aiAssist?.enabled && (
+            <button
+              className="ai-assist-button"
+              title="Analyze this script with ADMIEZO AI Assistant"
+              onClick={() =>
+                aiAssist.analysis
+                  ? setAIPanel(true)
+                  : void requestAIAnalysis()
+              }
+              disabled={saving || !aiAssist.provider.configured}
+            >
+              <Sparkles />
+              AI analysis
+            </button>
+          )}
           {evaluatorMode && <CameraPreview stream={security.stream} compact />}
           <span className={`viewer-network ${online ? "online" : "offline"}`}>
             {online ? <Wifi /> : <WifiOff />}
@@ -1737,6 +1836,14 @@ export function EvaluationWorkspace({
             />
           )}
         </div>
+        {aiPanel && aiAssist && (
+          <AIAssistPanel
+            state={aiAssist}
+            busy={saving}
+            onAnalyze={requestAIAnalysis}
+            onClose={() => setAIPanel(false)}
+          />
+        )}
         <footer className="evaluation-bottom-bar">
           <button
             className="secondary-button"
@@ -1944,6 +2051,139 @@ export function EvaluationWorkspace({
         )}
       </section>
     </div>
+  );
+}
+
+function AIAssistPanel({
+  state,
+  busy,
+  onAnalyze,
+  onClose,
+}: {
+  state: AIAssist;
+  busy: boolean;
+  onAnalyze: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const analysis = state.analysis;
+  const processing =
+    analysis && ["queued", "running"].includes(analysis.status);
+  const total =
+    analysis?.assessments.reduce((sum, item) => sum + item.marks, 0) || 0;
+
+  return (
+    <aside className="ai-assist-panel" aria-label="AI analysis suggestions">
+      <header>
+        <div>
+          <Sparkles />
+          <span>
+            <strong>AI analysis</strong>
+            <small>Advisory only. You remain the evaluator.</small>
+          </span>
+        </div>
+        <button
+          className="icon-button"
+          title="Close AI analysis"
+          onClick={onClose}
+        >
+          <X />
+        </button>
+      </header>
+      {!analysis ? (
+        <div className="ai-assist-empty">
+          <Sparkles />
+          <strong>Analyze this anonymous script</strong>
+          <p>
+            ADMIEZO AI Assistant will compare the masked paper with the
+            configured question paper and reference answers. Suggested marks
+            are never applied automatically.
+          </p>
+          <button
+            className="viewer-primary"
+            onClick={() => void onAnalyze()}
+            disabled={busy || !state.provider.configured}
+          >
+            <Sparkles />
+            Analyze with ADMIEZO AI
+          </button>
+          {!state.provider.configured && (
+            <small>
+              ADMIEZO AI Assistant is not configured by the platform
+              administrator.
+            </small>
+          )}
+        </div>
+      ) : processing ? (
+        <div className="ai-assist-empty">
+          <RefreshCw className="spin" />
+          <strong>
+            {analysis.status === "queued"
+              ? "Waiting for ADMIEZO AI Assistant"
+              : "Analyzing answer paper"}
+          </strong>
+          <p>You can continue evaluating while this runs.</p>
+        </div>
+      ) : analysis.status === "failed" ? (
+        <div className="ai-assist-empty error">
+          <ShieldAlert />
+          <strong>Analysis failed</strong>
+          <p>
+            {analysis.error_message ||
+              "ADMIEZO AI Assistant could not complete this analysis."}
+          </p>
+          <button
+            className="viewer-secondary"
+            onClick={() => void onAnalyze()}
+            disabled={busy}
+          >
+            Try again
+          </button>
+        </div>
+      ) : (
+        <div className="ai-assist-complete">
+          <div className="ai-assist-summary">
+            <div>
+              <span>Suggested total</span>
+              <strong>{total}</strong>
+            </div>
+            <div>
+              <span>Confidence</span>
+              <strong>{analysis.effective_confidence ?? 0}%</strong>
+            </div>
+          </div>
+          {analysis.summary && (
+            <p className="ai-assist-overview">{analysis.summary}</p>
+          )}
+          <div className="ai-assist-results">
+            {analysis.assessments.map((item) => (
+              <article key={item.question_id}>
+                <header>
+                  <strong>Question {item.question}</strong>
+                  <span>
+                    {item.marks} marks · {item.confidence}%
+                  </span>
+                </header>
+                <p>{item.feedback || item.reasoning}</p>
+                {item.feedback && item.reasoning && (
+                  <small>{item.reasoning}</small>
+                )}
+              </article>
+            ))}
+          </div>
+          <footer>
+            <span>Review each suggestion against the script.</span>
+            <button
+              className="viewer-secondary"
+              onClick={() => void onAnalyze()}
+              disabled={busy}
+            >
+              <RefreshCw />
+              Analyze again
+            </button>
+          </footer>
+        </div>
+      )}
+    </aside>
   );
 }
 

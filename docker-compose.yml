@@ -55,6 +55,8 @@ services:
       OUTBOX_MODE: ${OUTBOX_MODE:-log}
       OUTBOX_WEBHOOK_URL: ${OUTBOX_WEBHOOK_URL:-}
       OUTBOX_AUTH_TOKEN: ${OUTBOX_AUTH_TOKEN:-}
+      ADMIEZO_AI_PROVIDER_BASE: ${ADMIEZO_AI_PROVIDER_BASE:-https://generativelanguage.googleapis.com/v1beta}
+      ADMIEZO_AI_PROVIDER_MODEL: ${ADMIEZO_AI_PROVIDER_MODEL:-gemini-3.8-flash}
     depends_on:
       db:
         condition: service_healthy
@@ -101,6 +103,31 @@ services:
       LOAD_DEMO_DATA: "false"
       APPLICATION_ENCRYPTION_KEY: ${APPLICATION_ENCRYPTION_KEY:-}
       SCRIPT_STORAGE_INTERNAL_URL: http://storage-gateway:9000
+      SCRIPT_STORAGE_SIGNING_KEY: ${SCRIPT_STORAGE_SIGNING_KEY:-local-storage-signing-key-change-me}
+    depends_on:
+      backend:
+        condition: service_healthy
+      storage-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ai-evaluation-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "manage.py", "process_ai_evaluations", "--forever", "--interval", "2"]
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-only-change-before-deploy}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DATABASE_URL: postgresql://admiezo:${POSTGRES_PASSWORD:-admiezo-local}@db:5432/admiezo
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      LOAD_DEMO_DATA: "false"
+      APPLICATION_ENCRYPTION_KEY: ${APPLICATION_ENCRYPTION_KEY:-}
+      ADMIEZO_AI_PROVIDER_BASE: ${ADMIEZO_AI_PROVIDER_BASE:-https://generativelanguage.googleapis.com/v1beta}
+      ADMIEZO_AI_PROVIDER_MODEL: ${ADMIEZO_AI_PROVIDER_MODEL:-gemini-3.8-flash}
+      ADMIEZO_AI_REQUEST_TIMEOUT_SECONDS: ${ADMIEZO_AI_REQUEST_TIMEOUT_SECONDS:-120}
+      SCRIPT_STORAGE_INTERNAL_URL: http://storage-gateway:9000
+      SCRIPT_STORAGE_PUBLIC_BASE: /storage
       SCRIPT_STORAGE_SIGNING_KEY: ${SCRIPT_STORAGE_SIGNING_KEY:-local-storage-signing-key-change-me}
     depends_on:
       backend:

@@ -1,4 +1,5 @@
 import ipaddress
+import re
 from datetime import timedelta
 
 from django.db import transaction
@@ -31,6 +32,12 @@ def validate_policy(payload):
         raise HttpError(422, "No-face pause must be between 10 and 300 seconds")
     if not 1 <= payload.evaluation_retention_days <= 365:
         raise HttpError(422, "Evidence retention must be between 1 and 365 days")
+    if payload.ai_evaluation_mode not in SecurityPolicy.AIEvaluationMode.values:
+        raise HttpError(422, "Unsupported AI evaluation mode")
+    if not 1 <= payload.ai_confidence_threshold <= 100:
+        raise HttpError(422, "AI confidence threshold must be between 1 and 100")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,80}", payload.ai_model_name.strip()):
+        raise HttpError(422, "ADMIEZO AI Assistant model is invalid")
     try:
         for network in payload.approved_networks:
             ipaddress.ip_network(network, strict=False)
@@ -72,6 +79,7 @@ def update_policy(*, tenant_id, actor_id, payload):
             "evaluation_retention_days",
         ):
             setattr(policy, field, getattr(payload, field))
+        policy.ai_model_name = policy.ai_model_name.strip()
         policy.allowed_countries = [item.upper() for item in policy.allowed_countries]
         policy.version = policy.version + 1 if policy.pk else 1
         policy.save()

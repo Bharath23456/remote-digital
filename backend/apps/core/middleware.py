@@ -89,6 +89,7 @@ class TenantEntitlementMiddleware:
         ("/api/v1/allocation/", "allocation"),
         ("/api/v1/assignment-governance/", "assignment_governance"),
         ("/api/v1/rubrics/", "rubrics"),
+        ("/api/v1/ai-evaluation/", "ai_evaluation"),
         ("/api/v1/marking/", "evaluation"),
         ("/api/v1/workflow/", "evaluation"),
         ("/api/v1/valuation/", "valuation"),
@@ -130,6 +131,8 @@ class TenantEntitlementMiddleware:
                     or request.path.startswith(self.evaluator_evaluation_prefixes)
                 ):
                     module = "evaluation"
+                if membership and membership.role == Membership.Role.CUSTODY_OFFICER and request.path == "/api/v1/receiving/catalog":
+                    module = "custody"
                 account = TenantAccount.objects.filter(root_institution__tenant_id=active_tenant_id).only("enabled_modules").first()
                 if account and module not in account.enabled_modules:
                     return JsonResponse({"detail": "This module is not enabled for the university", "code": "module_not_enabled"}, status=403)

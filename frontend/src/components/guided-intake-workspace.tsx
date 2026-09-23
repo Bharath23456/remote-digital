@@ -6,12 +6,12 @@ import { csrfFetch } from "@/lib/api";
 
 type Stage = "receiving" | "custody" | "digitization";
 type Paper = { id: string; code: string; title: string };
-type PacketDraft = { barcode: string; paper_id: string; script_barcodes: string };
+type PacketDraft = { id: string; barcode: string; paper_id: string; script_barcodes: string };
 type Packet = { id: string; barcode: string; subject: string; status: string; expected_scripts: number; scanned_scripts: number; missing_count: number; missing_references: string[]; manual_recognition_enabled?: boolean };
 type Bundle = { id: string; barcode: string; source_centre: string; mode: string; status: string; expected_packets: number; received_packets: number; expected_scripts: number; scanned_scripts: number; packets: Packet[] };
 
 const root = "/api/v1/receiving/guided";
-const emptyPacket = (): PacketDraft => ({ barcode: "", paper_id: "", script_barcodes: "" });
+const emptyPacket = (): PacketDraft => ({ id: crypto.randomUUID(), barcode: "", paper_id: "", script_barcodes: "" });
 
 async function api(path: string, init?: RequestInit) {
   const response = await csrfFetch(path, init);
@@ -199,13 +199,13 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
             <label className="field"><span>Source college / centre</span><input value={source} onChange={(event) => setSource(event.target.value)} required /></label>
             <label className="field"><span>Route</span><select value={mode} onChange={(event) => setMode(event.target.value as "transfer" | "on_site")}><option value="transfer">Dispatch to university</option><option value="on_site">On-site scanning</option></select></label>
           </div>
-          <div className="guided-packets">{drafts.map((draft, index) => <div className="guided-packet" key={index}>
-            <div className="guided-packet-heading"><strong>Packet {index + 1}</strong>{drafts.length > 1 && <button type="button" className="icon-button" title="Remove packet" onClick={() => setDrafts(drafts.filter((_, i) => i !== index))}><Trash2 /></button>}</div>
-            <div className="form-grid"><label className="field"><span>Packet barcode</span><input value={draft.barcode} onChange={(event) => setDrafts(drafts.map((item, i) => i === index ? { ...item, barcode: event.target.value } : item))} required placeholder="PKT-2026-001" /></label>
-              <label className="field"><span>Subject / paper</span><select value={draft.paper_id} onChange={(event) => setDrafts(drafts.map((item, i) => i === index ? { ...item, paper_id: event.target.value } : item))} required><option value="">Select subject</option>{papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.code} - {paper.title}</option>)}</select></label>
-              <label className="field full-field"><span>Expected booklet QR codes</span><textarea value={draft.script_barcodes} onChange={(event) => setDrafts(drafts.map((item, i) => i === index ? { ...item, script_barcodes: event.target.value } : item))} rows={2} required placeholder="One QR code per line or comma-separated" /></label></div>
+          <div className="guided-packets">{drafts.map((draft, index) => <div className="guided-packet" key={draft.id}>
+            <div className="guided-packet-heading"><strong>Packet {index + 1}</strong>{drafts.length > 1 && <button type="button" className="icon-button" title="Remove packet" onClick={() => setDrafts((current) => current.filter((item) => item.id !== draft.id))}><Trash2 /></button>}</div>
+            <div className="form-grid"><label className="field"><span>Packet barcode</span><input value={draft.barcode} onChange={(event) => setDrafts((current) => current.map((item) => item.id === draft.id ? { ...item, barcode: event.target.value } : item))} required placeholder="PKT-2026-001" /></label>
+              <label className="field"><span>Subject / paper</span><select value={draft.paper_id} onChange={(event) => setDrafts((current) => current.map((item) => item.id === draft.id ? { ...item, paper_id: event.target.value } : item))} required><option value="">Select subject</option>{papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.code} - {paper.title}</option>)}</select></label>
+              <label className="field full-field"><span>Expected booklet QR codes</span><textarea value={draft.script_barcodes} onChange={(event) => setDrafts((current) => current.map((item) => item.id === draft.id ? { ...item, script_barcodes: event.target.value } : item))} rows={2} required placeholder="One QR code per line or comma-separated" /></label></div>
           </div>)}</div>
-          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setDrafts([...drafts, emptyPacket()])}><Plus />Packet</button><button className="primary-button" disabled={busy}>{busy ? "Saving..." : mode === "transfer" ? "Create and dispatch" : "Create on-site bundle"}<ChevronRight /></button></footer>
+          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setDrafts((current) => [...current, emptyPacket()])}><Plus />Packet</button><button className="primary-button" disabled={busy}>{busy ? "Saving..." : mode === "transfer" ? "Create and dispatch" : "Create on-site bundle"}<ChevronRight /></button></footer>
         </form>
       </section>
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Recent bundles</h2><p className="panel-subtitle">Showing {bundles.length} most recent</p></div></header>

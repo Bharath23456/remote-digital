@@ -24,6 +24,9 @@ class SecurityPolicyIn(Schema):
     evaluation_heartbeat_seconds: int = 15
     evaluation_no_face_seconds: int = 30
     evaluation_retention_days: int = 30
+    ai_evaluation_mode: str = "disabled"
+    ai_confidence_threshold: float = Field(default=85, ge=1, le=100)
+    ai_model_name: str = "admiezo-ai-v1"
 
 
 class AlertStatusIn(Schema):

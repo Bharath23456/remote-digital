@@ -40,6 +40,7 @@ class Evaluator(TenantModel):
     grade = models.CharField(max_length=20, choices=Grade.choices, default=Grade.EVALUATOR)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     daily_capacity = models.PositiveSmallIntegerField(default=20)
+    is_system_ai = models.BooleanField(default=False)
     available_from = models.DateField(null=True, blank=True)
     available_to = models.DateField(null=True, blank=True)
     version = models.PositiveIntegerField(default=1)

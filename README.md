@@ -2,6 +2,18 @@
 
 ADMIEZO is a multi-university answer-script evaluation operations platform. It runs a Next.js 16 frontend, a Django 5/Django Ninja evaluation core, an isolated Django identity service, an encrypted storage gateway, PostgreSQL, and a transactional outbox worker.
 
+## Operational RBAC
+
+Platform and university administrators can create users and assign operational roles from **Access governance → User access**. Operational roles have fixed least-privilege module access, enforced by both the UI and API:
+
+| Role | Module | Main responsibility |
+| --- | --- | --- |
+| Script receiver | Receiving | Receive dispatches, packets and bundles; reconcile receiving exceptions |
+| Scanner operator | Digitization | Run scanner batches, scan processing, manual uploads and integrity checks |
+| Chain custody officer | Chain of custody | Register scripts, scan barcodes, reconcile packets and control transfers |
+
+Role and module assignment is administrator-only. Do not put administrator or temporary passwords in source files. After pulling changes, run `docker compose up --build`; Django applies the role migration during backend startup. Sign in at `http://localhost:3000`, open **Access governance**, and create the operational users there.
+
 ## Implemented modules
 
 - 01 Digital Evaluation Administration and Configuration
@@ -45,6 +57,10 @@ ADMIEZO is a multi-university answer-script evaluation operations platform. It r
 - 49 Disaster Recovery
 
 These are working workflows, not static screens. Writes are tenant-scoped and authorized, workflow transitions are validated, audit and outbox records share the domain transaction, submit/finalize calls are idempotent, candidate PII stays in the isolated encrypted identity service, and script bytes travel directly between the browser and five-minute signed storage URLs.
+
+## AI evaluation
+
+The university-wide **ADMIEZO AI Assistant** policy supports **No AI**, evaluator-only **AI assisted evaluation**, and background **Autonomous AI evaluation** modes. A Super Admin configures each university's mode, confidence threshold, and encrypted provider credential while provisioning the university or from its settings. University Access Governance displays this platform-managed policy without allowing tenant administrators to replace it. Autonomous evaluation requires one question paper, three reference answers, question guidance, and a frozen marking scheme. Only masked evaluation assets are processed; a result at or above the configured confidence threshold enters the existing valuation/final-mark workflow, while a lower-confidence result is assigned to an eligible human without creating AI marks.
 
 ## What each module does
 

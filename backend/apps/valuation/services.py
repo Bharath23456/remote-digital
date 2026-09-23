@@ -12,6 +12,7 @@ from apps.custody.models import Script
 from apps.custody.services import transition_script
 from apps.marking.models import Evaluation
 from apps.marking.services import latest_marks
+from apps.security.models import SecurityPolicy
 from apps.workflow.models import EvaluationWorkflow, WorkflowTransition
 from apps.workflow.services import WORKFLOW_TRANSITIONS
 
@@ -53,6 +54,9 @@ def _differences(results):
 
 
 def required_valuation_rounds(script, first_result=None):
+    ai_mode = SecurityPolicy.objects.filter(tenant_id=script.tenant_id).values_list("ai_evaluation_mode", flat=True).first()
+    if ai_mode == SecurityPolicy.AIEvaluationMode.AUTONOMOUS:
+        return 1
     if script.paper.valuation_rounds != 1:
         return script.paper.valuation_rounds
     threshold = script.paper.rules.get("second_valuation_mark_threshold")
