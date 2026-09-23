@@ -200,6 +200,8 @@ def create_revaluation(
     question_ids,
     reason,
     rule,
+    request_type=RevaluationRequest.RequestType.REVALUATION,
+    recounting_notes="",
     source_system="admiezo",
     external_application_id="",
     external_payload=None,
@@ -222,6 +224,24 @@ def create_revaluation(
             "Only a script with a locked final mark is eligible for revaluation",
         )
 
+    if script.state != Script.State.FINALIZED:
+        raise HttpError(409, "Only a finalized, anonymized script is eligible for revaluation")
+
+    masked_pages = (
+        ScriptAsset.objects
+        .filter(
+            tenant_id=tenant_id,
+            script=script,
+            kind=ScriptAsset.Kind.EVALUATION,
+            deleted_at__isnull=True,
+        )
+        .values("page_number")
+        .distinct()
+        .count()
+    )
+    if masked_pages != script.page_count:
+        raise HttpError(409, "The complete masked answer script is required before revaluation")
+
     if scope not in {"full", "questions"}:
         raise HttpError(422, "Revaluation scope must be full or questions")
 
@@ -235,6 +255,14 @@ def create_revaluation(
 
     if rule not in RevaluationRequest.Rule.values:
         raise HttpError(422, "Unsupported revaluation rule")
+
+    if request_type not in RevaluationRequest.RequestType.values:
+        raise HttpError(422, "Unsupported revaluation request type")
+
+    if request_type == RevaluationRequest.RequestType.RECOUNTING and scope != "questions":
+        raise HttpError(422, "Recounting must target the questions where marks may have been missed")
+
+    recounting_notes = (recounting_notes or "").strip()
 
     source_system = (source_system or "admiezo").strip().lower()
     external_application_id = (external_application_id or "").strip()
@@ -273,6 +301,8 @@ def create_revaluation(
         scope=scope,
         question_ids=question_ids,
         reason=reason,
+        request_type=request_type,
+        recounting_notes=recounting_notes,
         rule=rule,
         eligibility_snapshot={
             "final_mark_id": str(final.id),
@@ -302,6 +332,8 @@ def create_revaluation(
             "script_code": script.script_code,
             "scope": scope,
             "rule": rule,
+            "request_type": request_type,
+            "recounting_notes": bool(recounting_notes),
             "source_system": source_system,
             "external_application_id": external_application_id or None,
         },
@@ -391,10 +423,10 @@ def transition_revaluation(
             valuation_round=next_round,
             status=Assignment.Status.ASSIGNED,
             quality_score=Decimal("100.00"),
-            source="revaluation",
+            source=item.request_type,
             score_breakdown={
-                "assignment_type": "revaluation",
-                "reason": "independent_revaluation",
+                "assignment_type": item.request_type,
+                "reason": "missed_mark_recount" if item.request_type == RevaluationRequest.RequestType.RECOUNTING else "independent_revaluation",
                 "revaluation_request_id": str(item.id),
                 "original_final_mark_id": str(item.original_final_mark_id),
                 "original_mark": str(item.original_mark_snapshot),
@@ -490,7 +522,7 @@ def transition_revaluation(
     record_event(
         tenant_id=tenant_id,
         actor_id=actor_id,
-        action=f"revaluation.{target}",
+        action=f"{item.request_type}.{target}",
         aggregate="RevaluationRequest",
         aggregate_id=item.id,
         payload={
@@ -1121,14 +1153,72 @@ def transition_statement(*, tenant_id, actor_id, statement_id, expected_version,
 
 
 @transaction.atomic
-def create_student_request(*, tenant_id, actor_id, identity_reference, script, purpose):
+def create_student_request(
+    *,
+    tenant_id,
+    actor_id,
+    identity_reference,
+    script,
+    purpose,
+    source_system="admiezo",
+    external_application_id="",
+    external_payload=None,
+    integration_endpoint=None,
+    release_mode=StudentScriptRequest.ReleaseMode.MASKED,
+):
+    if release_mode not in StudentScriptRequest.ReleaseMode.values:
+        raise HttpError(422, "Unsupported photocopy release mode")
     final = FinalMark.objects.filter(tenant_id=tenant_id, script=script, status=FinalMark.Status.LOCKED).first()
     masked = ScriptAsset.objects.filter(tenant_id=tenant_id, script=script, kind__in=[ScriptAsset.Kind.MASTER, ScriptAsset.Kind.EVALUATION], deleted_at__isnull=True).exists()
-    eligible = bool(final and masked and script.state == Script.State.FINALIZED)
+    masked_pages = ScriptAsset.objects.filter(tenant_id=tenant_id, script=script, kind=ScriptAsset.Kind.EVALUATION, deleted_at__isnull=True).values("page_number").distinct().count()
+    eligible = bool(final and masked and masked_pages == script.page_count and script.state == Script.State.FINALIZED)
     if not eligible:
         raise HttpError(409, "Only finalized, masked scripts are eligible for student access")
-    item = StudentScriptRequest.objects.create(tenant_id=tenant_id, identity_reference=identity_reference, script=script, purpose=purpose, eligibility={"final_mark_locked": True, "masked_asset": True, "checked_at": timezone.now().isoformat()}, requested_by_id=actor_id)
-    record_event(tenant_id=tenant_id, actor_id=actor_id, action="student.script.requested", aggregate="StudentScriptRequest", aggregate_id=item.id, payload={"script_id": str(script.id), "purpose": purpose})
+
+    source_system = (source_system or "admiezo").strip().lower()
+    external_application_id = (external_application_id or "").strip()
+
+    if external_application_id:
+        existing_external = StudentScriptRequest.objects.filter(
+            tenant_id=tenant_id,
+            source_system=source_system,
+            external_application_id=external_application_id,
+        ).first()
+        if existing_external:
+            return existing_external
+
+    item = StudentScriptRequest.objects.create(
+        tenant_id=tenant_id,
+        identity_reference=identity_reference,
+        script=script,
+        purpose=purpose,
+        release_mode=release_mode,
+        eligibility={
+            "final_mark_locked": True,
+            "masked_asset": True,
+            "checked_at": timezone.now().isoformat(),
+        },
+        requested_by_id=actor_id,
+        source_system=source_system,
+        external_application_id=external_application_id,
+        external_payload=external_payload or {},
+        received_at=timezone.now() if external_application_id else None,
+        integration_endpoint=integration_endpoint,
+    )
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="student.script.requested",
+        aggregate="StudentScriptRequest",
+        aggregate_id=item.id,
+        payload={
+            "script_id": str(script.id),
+            "purpose": purpose,
+            "source_system": source_system,
+            "external_application_id": external_application_id or None,
+            "release_mode": release_mode,
+        },
+    )
     return item
 
 

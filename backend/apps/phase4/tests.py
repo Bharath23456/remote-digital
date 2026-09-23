@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+import hashlib
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
@@ -12,13 +13,14 @@ from ninja.errors import HttpError
 
 from apps.allocation.models import Assignment
 from apps.configuration.models import ExamSession, Paper
-from apps.core.models import OutboxEvent
+from apps.core.models import AuditEvent, OutboxEvent
 from apps.custody.models import Script
 from apps.evaluators.models import Evaluator
 from apps.evaluators.services import enroll_face_template, verify_evaluator_access
 from apps.identity_auth.models import AccessSession
 from apps.marking.models import Evaluation
 from apps.repository.models import ScriptAsset
+from apps.rubrics.models import MarkingScheme
 from apps.valuation.models import FinalMark, ValuationResult
 from apps.workflow.models import EvaluationWorkflow
 
@@ -38,6 +40,7 @@ from .models import (
     ResultHandover,
     SecureEvaluationSession,
     StudentScriptRequest,
+    UniversityApiKey,
     WorkloadAction,
 )
 from .services import (
@@ -46,6 +49,7 @@ from .services import (
     consume_authorization,
     create_issue,
     create_notification,
+    create_revaluation,
     create_student_request,
     create_workload_action,
     decide_authorization,
@@ -58,6 +62,7 @@ from .services import (
     transition_drill,
     transition_handover,
     transition_statement,
+    transition_revaluation,
     transition_workload,
 )
 
@@ -72,6 +77,74 @@ class RemainingModulesTests(TestCase):
         cls.tenant_id = cls.paper.tenant_id
         cls.session = ExamSession.objects.get(id=cls.paper.session_id)
         cls.evaluator = Evaluator.objects.filter(tenant_id=cls.tenant_id, status=Evaluator.Status.ACTIVE).first()
+        cls.phase4_script = Script.objects.create(
+            tenant_id=cls.tenant_id,
+            script_code="AS-PHASE4-FLOW",
+            primary_barcode="NB-PHASE4-FLOW",
+            packet=Script.objects.filter(tenant_id=cls.tenant_id).first().packet,
+            paper=cls.paper,
+            page_count=1,
+            state=Script.State.FINALIZED,
+        )
+        ScriptAsset.objects.create(
+            tenant_id=cls.tenant_id,
+            script=cls.phase4_script,
+            kind=ScriptAsset.Kind.MASTER,
+            page_number=1,
+            storage_key="scripts-master/phase4-flow/page-1.webp",
+            sha256="1" * 64,
+            byte_size=100,
+        )
+        ScriptAsset.objects.create(
+            tenant_id=cls.tenant_id,
+            script=cls.phase4_script,
+            kind=ScriptAsset.Kind.EVALUATION,
+            page_number=1,
+            storage_key="scripts-evaluation/phase4-flow/page-1.webp",
+            sha256="2" * 64,
+            byte_size=100,
+        )
+        previous_assignment = Assignment.objects.create(
+            tenant_id=cls.tenant_id,
+            script=cls.phase4_script,
+            evaluator=cls.evaluator,
+            valuation_round=1,
+            status=Assignment.Status.SUBMITTED,
+            due_at=timezone.now() + timedelta(days=3),
+        )
+        scheme = MarkingScheme.objects.filter(tenant_id=cls.tenant_id, paper=cls.paper).first()
+        previous_evaluation = Evaluation.objects.create(
+            tenant_id=cls.tenant_id,
+            assignment=previous_assignment,
+            scheme=scheme,
+            status=Evaluation.Status.LOCKED,
+            total_marks=Decimal("72"),
+            checksum="3" * 64,
+        )
+        ValuationResult.objects.create(
+            tenant_id=cls.tenant_id,
+            evaluation=previous_evaluation,
+            script=cls.phase4_script,
+            valuation_round=1,
+            total_marks=Decimal("72"),
+            checksum="5" * 64,
+            is_locked=True,
+            locked_by_id=cls.controller.id,
+            locked_at=timezone.now(),
+        )
+        FinalMark.objects.create(
+            tenant_id=cls.tenant_id,
+            script=cls.phase4_script,
+            rule=FinalMark.Rule.APPROVED,
+            mark=Decimal("72"),
+            calculation={"source": "phase4_test_fixture"},
+            status=FinalMark.Status.LOCKED,
+            proposed_by_id=cls.admin.id,
+            approved_by_id=cls.controller.id,
+            locked_by_id=cls.admin.id,
+            locked_at=timezone.now(),
+            checksum="4" * 64,
+        )
 
     def face_capture(self):
         return {
@@ -256,6 +329,59 @@ class RemainingModulesTests(TestCase):
         handover = acknowledge_handover(tenant_id=self.tenant_id, actor_id=self.admin.id, handover_id=handover.id, expected_version=handover.version, status=ResultHandover.Status.ACKNOWLEDGED, reference="ERP-ACK-1", remote_snapshot={"mark": "72.00", "checksum": final.checksum})
         self.assertEqual(handover.differences, {})
 
+    def test_revaluation_requires_masked_finalized_script_and_completes_independently(self):
+        script = None
+        previous_assignment = None
+        for candidate in Script.objects.filter(tenant_id=self.tenant_id, state=Script.State.FINALIZED, final_mark__status=FinalMark.Status.LOCKED):
+            assignment = Assignment.objects.filter(script=candidate).select_related("evaluator").first()
+            masked_pages = ScriptAsset.objects.filter(tenant_id=self.tenant_id, script=candidate, kind=ScriptAsset.Kind.EVALUATION, deleted_at__isnull=True).values("page_number").distinct().count()
+            if assignment and masked_pages == candidate.page_count:
+                script = candidate
+                previous_assignment = assignment
+                break
+        self.assertIsNotNone(script)
+        self.assertIsNotNone(previous_assignment)
+        script = Script.objects.get(id=script.id)
+        previous_assignment = Assignment.objects.get(id=previous_assignment.id)
+        evaluator = Evaluator.objects.filter(tenant_id=self.tenant_id, status=Evaluator.Status.ACTIVE).exclude(id=previous_assignment.evaluator_id).first()
+        self.assertIsNotNone(evaluator)
+
+        script.state = Script.State.MASKED
+        script.save(update_fields=["state", "updated_at"])
+        with self.assertRaises(HttpError):
+            create_revaluation(tenant_id=self.tenant_id, actor_id=self.admin.id, script=script, identity_reference="opaque-reval", scope="full", question_ids=[], reason="Student requested revaluation", rule="best")
+        script.state = Script.State.FINALIZED
+        script.save(update_fields=["state", "updated_at"])
+
+        missing_page = ScriptAsset.objects.filter(tenant_id=self.tenant_id, script=script, kind=ScriptAsset.Kind.EVALUATION, deleted_at__isnull=True).order_by("page_number").first()
+        self.assertIsNotNone(missing_page)
+        missing_page.deleted_at = timezone.now()
+        missing_page.save(update_fields=["deleted_at", "updated_at"])
+        with self.assertRaises(HttpError):
+            create_revaluation(tenant_id=self.tenant_id, actor_id=self.admin.id, script=script, identity_reference="opaque-reval", scope="full", question_ids=[], reason="Student requested revaluation", rule="best")
+        missing_page.deleted_at = None
+        missing_page.save(update_fields=["deleted_at", "updated_at"])
+
+        item = create_revaluation(tenant_id=self.tenant_id, actor_id=self.admin.id, script=script, identity_reference="opaque-reval", scope="full", question_ids=[], reason="Student requested revaluation", rule="best")
+        self.assertEqual(item.status, item.Status.REQUESTED)
+        item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.APPROVED)
+        with self.assertRaises(HttpError):
+            transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.ASSIGNED, evaluator=previous_assignment.evaluator)
+        item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.ASSIGNED, evaluator=evaluator)
+        self.assertEqual(item.assignment.source, "revaluation")
+        self.assertEqual(item.assignment.evaluator_id, evaluator.id)
+
+        scheme = Evaluation.objects.get(assignment=previous_assignment).scheme
+        evaluation = Evaluation.objects.create(tenant_id=self.tenant_id, assignment=item.assignment, scheme=scheme, status=Evaluation.Status.LOCKED, total_marks=Decimal("78"), checksum="e" * 64)
+        result = ValuationResult.objects.create(tenant_id=self.tenant_id, evaluation=evaluation, script=script, valuation_round=item.assignment.valuation_round, total_marks=Decimal("78"), checksum="f" * 64, is_locked=True, locked_by_id=self.controller.id, locked_at=timezone.now())
+        item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.EVALUATED, new_result=result)
+        self.assertEqual(item.mark_difference, Decimal("6.00"))
+        item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.DECIDED)
+        self.assertEqual(item.final_mark, Decimal("78.00"))
+        item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.CLOSED)
+        self.assertEqual(item.status, item.Status.CLOSED)
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(item.id), action="revaluation.closed").exists())
+
     def test_remuneration_uses_completed_work_and_independent_approval(self):
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id).select_related("evaluator").first()
         evaluator = assignment.evaluator
@@ -280,14 +406,15 @@ class RemainingModulesTests(TestCase):
         script.state = Script.State.FINALIZED
         script.save(update_fields=["state", "updated_at"])
         FinalMark.objects.create(tenant_id=self.tenant_id, script=script, rule=FinalMark.Rule.APPROVED, mark=Decimal("68"), status=FinalMark.Status.LOCKED, proposed_by_id=self.admin.id, checksum="c" * 64)
-        ScriptAsset.objects.get_or_create(
-            tenant_id=self.tenant_id,
-            script=script,
-            kind=ScriptAsset.Kind.EVALUATION,
-            page_number=1,
-            version=1,
-            defaults={"storage_key": f"tests/{script.id}/page-1.webp", "sha256": "d" * 64, "byte_size": 1200},
-        )
+        for page in range(1, max(script.page_count, 1) + 1):
+            ScriptAsset.objects.get_or_create(
+                tenant_id=self.tenant_id,
+                script=script,
+                kind=ScriptAsset.Kind.EVALUATION,
+                page_number=page,
+                version=1,
+                defaults={"storage_key": f"tests/{script.id}/page-{page}.webp", "sha256": f"{page:064x}", "byte_size": 1200},
+            )
         request = create_student_request(tenant_id=self.tenant_id, actor_id=self.admin.id, identity_reference="opaque-student-reference", script=script, purpose="copy")
         self.assertEqual(request.status, StudentScriptRequest.Status.REQUESTED)
         with self.assertRaises(HttpError):
@@ -308,3 +435,65 @@ class RemainingModulesTests(TestCase):
         forbidden = {"candidate_name", "register_number", "usn", "college", "candidate_email", "candidate_phone", "photo", "signature"}
         for model in (StudentScriptRequest, CompletionRecord, ResultHandover, EvidencePackage):
             self.assertFalse(forbidden.intersection(field.name for field in model._meta.fields))
+
+    def test_official_portal_photocopy_http_flow_reaches_delivery(self):
+        raw_key = "admz_test_phase4_photocopy_key"
+        UniversityApiKey.objects.create(
+            tenant_id=self.tenant_id,
+            name="Phase 4 automated university portal",
+            key_prefix=raw_key[:16],
+            key_hash=hashlib.sha256(raw_key.encode("utf-8")).hexdigest(),
+            source_system="university_portal",
+            scopes=["photocopy:request", "revaluation:request", "recounting:request"],
+            created_by_id=self.admin.id,
+        )
+        university_client = Client()
+        intake = university_client.post(
+            "/api/v1/phase4/official-portal/photocopy-requests",
+            data=json.dumps({
+                "external_application_id": "UNI-PHASE4-COPY-001",
+                "identity_reference": "STUDENT-PHASE4-001",
+                "script_id": str(self.phase4_script.id),
+                "purpose": "copy",
+                "release_mode": "masked",
+            }),
+            content_type="application/json",
+            HTTP_X_ADMIEZO_API_KEY=raw_key,
+        )
+        self.assertEqual(intake.status_code, 200)
+        request_id = intake.json()["id"]
+        self.assertEqual(intake.json()["status"], StudentScriptRequest.Status.REQUESTED)
+
+        admin_client = Client()
+        login = admin_client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": self.admin.email, "password": "ChangeMe123!", "device_id": "phase4-http-test"}),
+            content_type="application/json",
+        )
+        self.assertEqual(login.status_code, 200)
+        approve = admin_client.post(
+            f"/api/v1/phase4/student/requests/{request_id}/decision",
+            data=json.dumps({"version": intake.json()["version"], "approve": True, "release_mode": "masked"}),
+            content_type="application/json",
+        )
+        self.assertEqual(approve.status_code, 200)
+        self.assertEqual(approve.json()["status"], StudentScriptRequest.Status.APPROVED)
+
+        download = university_client.get(
+            f"/api/v1/phase4/official-portal/photocopy-requests/{request_id}/download",
+            HTTP_X_ADMIEZO_API_KEY=raw_key,
+        )
+        self.assertEqual(download.status_code, 200)
+        self.assertFalse(download.json()["evaluator_marks_included"])
+        self.assertEqual(download.json()["release_mode"], StudentScriptRequest.ReleaseMode.MASKED)
+        self.assertEqual(len(download.json()["pages"]), 1)
+
+        acknowledge = university_client.post(
+            f"/api/v1/phase4/official-portal/photocopy-requests/{request_id}/acknowledge",
+            data=json.dumps({"delivery_reference": "UNIVERSITY-HANDOVER-PHASE4-001"}),
+            content_type="application/json",
+            HTTP_X_ADMIEZO_API_KEY=raw_key,
+        )
+        self.assertEqual(acknowledge.status_code, 200)
+        self.assertEqual(acknowledge.json()["status"], StudentScriptRequest.Status.DELIVERED)
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=request_id, action="student.copy.delivered").exists())

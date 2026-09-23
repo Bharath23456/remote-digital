@@ -58,6 +58,10 @@ class RevaluationRequest(TenantModel):
         AVERAGE = "average", "Average mark"
         REGULATION = "regulation", "Regulation based"
 
+    class RequestType(models.TextChoices):
+        REVALUATION = "revaluation", "Revaluation"
+        RECOUNTING = "recounting", "Recounting"
+
     script = models.ForeignKey(
         Script,
         on_delete=models.PROTECT,
@@ -83,6 +87,17 @@ class RevaluationRequest(TenantModel):
     )
 
     reason = models.TextField()
+
+    request_type = models.CharField(
+        max_length=20,
+        choices=RequestType.choices,
+        default=RequestType.REVALUATION,
+        db_index=True,
+    )
+
+    recounting_notes = models.TextField(
+        blank=True,
+    )
 
     eligibility_snapshot = models.JSONField(
         default=dict,
@@ -580,12 +595,18 @@ class StudentScriptRequest(TenantModel):
         REQUESTED = "requested", "Requested"
         APPROVED = "approved", "Approved"
         AVAILABLE = "available", "Available"
+        DELIVERED = "delivered", "Delivered to university"
         EXPIRED = "expired", "Expired"
         REJECTED = "rejected", "Rejected"
+
+    class ReleaseMode(models.TextChoices):
+        MASKED = "masked", "Masked student copy"
+        UNMASKED_IDENTITY = "unmasked_identity", "Unmasked identity copy"
 
     identity_reference = models.CharField(max_length=128, db_index=True)
     script = models.ForeignKey(Script, on_delete=models.PROTECT, related_name="student_access_requests")
     purpose = models.CharField(max_length=24, choices=[("copy", "Script copy"), ("revaluation", "Revaluation")])
+    release_mode = models.CharField(max_length=24, choices=ReleaseMode.choices, default=ReleaseMode.MASKED)
     eligibility = models.JSONField(default=dict)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.REQUESTED)
     expires_at = models.DateTimeField(null=True, blank=True)
@@ -593,7 +614,36 @@ class StudentScriptRequest(TenantModel):
     access_count = models.PositiveIntegerField(default=0)
     requested_by_id = models.PositiveBigIntegerField()
     approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    delivery_reference = models.CharField(max_length=160, blank=True)
+
+    source_system = models.CharField(max_length=50, default="admiezo", db_index=True)
+    external_application_id = models.CharField(max_length=128, blank=True, db_index=True)
+    external_payload = models.JSONField(default=dict, blank=True)
+    received_at = models.DateTimeField(null=True, blank=True)
+    integration_endpoint = models.ForeignKey(
+        "IntegrationEndpoint",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="student_script_requests",
+    )
     version = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_id", "source_system", "external_application_id"],
+                condition=~models.Q(external_application_id=""),
+                name="unique_external_student_script_request",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant_id", "source_system", "external_application_id"],
+                name="student_req_external_idx",
+            ),
+        ]
 
 
 class EvidencePackage(TenantModel):
@@ -629,6 +679,38 @@ class IntegrationEndpoint(TenantModel):
     webhook_events = models.JSONField(default=list)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
     version = models.PositiveIntegerField(default=1)
+
+
+class UniversityApiKey(TenantModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        REVOKED = "revoked", "Revoked"
+
+    name = models.CharField(max_length=120)
+    key_prefix = models.CharField(max_length=16, db_index=True)
+    key_hash = models.CharField(max_length=64, unique=True)
+    source_system = models.CharField(max_length=50, db_index=True)
+    integration_endpoint = models.ForeignKey(
+        IntegrationEndpoint,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="api_keys",
+    )
+    scopes = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    created_by_id = models.PositiveBigIntegerField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    version = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_id", "source_system", "name"],
+                name="unique_university_api_key_name",
+            ),
+        ]
 
 
 class ResultHandover(TenantModel):
