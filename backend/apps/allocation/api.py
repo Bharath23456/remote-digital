@@ -17,7 +17,7 @@ from apps.core.services import record_event
 from apps.tenancy.models import Membership
 
 from .models import AllocationPolicy, AllocationProposal, AllocationRun, Assignment
-from .schemas import AssignmentActionIn, PolicyIn, RedistributionIn, SimulationIn
+from .schemas import AssignmentActionIn, AssignmentFlagIn, PolicyIn, RedistributionIn, SimulationIn
 from .services import build_plan, execute_plan, next_valuation_round, redistribute_assignment, save_policy
 
 
@@ -224,6 +224,33 @@ def assignment_action(request, assignment_id: str, payload: AssignmentActionIn):
         assignment.version += 1
         assignment.save()
         record_event(tenant_id=tenant_id, actor_id=request.auth.id, action=f"allocation.assignment.{payload.action}", aggregate="Assignment", aggregate_id=assignment.id, payload={"script_id": str(assignment.script_id), "page": payload.page, "progress_percent": payload.progress_percent, "reason": payload.reason, "priority": payload.priority})
+    return assignment_data(assignment)
+
+
+@router.post("/assignments/{assignment_id}/flag")
+def assignment_flag(request, assignment_id: str, payload: AssignmentFlagIn):
+    """Toggle the review flag without requiring an active secure viewer session."""
+    membership, assignment = _authorized_assignment(request, assignment_id)
+    tenant_id = membership.institution.tenant_id
+    with transaction.atomic():
+        assignment = Assignment.objects.select_for_update().get(
+            id=assignment.id,
+            tenant_id=tenant_id,
+        )
+        if assignment.version != payload.version:
+            raise HttpError(409, "Assignment was changed by another user")
+        assignment.is_flagged = payload.flagged
+        assignment.flag_reason = payload.reason[:240] if payload.flagged else ""
+        assignment.version += 1
+        assignment.save(update_fields=["is_flagged", "flag_reason", "version", "updated_at"])
+        record_event(
+            tenant_id=tenant_id,
+            actor_id=request.auth.id,
+            action="allocation.assignment.flag" if payload.flagged else "allocation.assignment.unflag",
+            aggregate="Assignment",
+            aggregate_id=assignment.id,
+            payload={"script_id": str(assignment.script_id), "reason": payload.reason},
+        )
     return assignment_data(assignment)
 
 

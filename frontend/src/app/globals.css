@@ -525,7 +525,9 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .thumbnail-rail button.active { border-color: #4fa884; color: white; }
 .thumbnail-rail img { width: 100%; aspect-ratio: .72; object-fit: cover; background: white; }
 .document-stage { min-width: 0; min-height: 0; overflow: auto; background: #303632; padding: 22px; user-select: none; }
-.document-stage.single { display: grid; place-items: center; cursor: grab; }
+.document-stage.single { display: flex; align-items: flex-start; justify-content: flex-start; cursor: grab; }
+.document-stage-content { display: grid; min-width: 100%; min-height: 100%; align-content: start; justify-items: center; }
+.document-stage.single .document-stage-content { flex: 0 0 auto; margin-inline: auto; }
 .document-stage.single:active { cursor: grabbing; }
 .document-stage img { display: block; max-width: none; background: white; box-shadow: 0 5px 22px rgba(0,0,0,.35); transition: filter .15s ease; }
 .document-stage.single img.fit-screen { width: auto; max-width: 100%; max-height: calc(100vh - 152px); }
@@ -600,6 +602,16 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .annotation-shape.circle { border-radius: 50%; }
 .annotation-shape.highlight { border: 0; background: rgba(246,216,95,.48); mix-blend-mode: multiply; }
 .annotation-shape.underline { border: 0; border-bottom: 3px solid #cf2929; }
+.annotation-shape.preview { pointer-events: none; opacity: .65; }
+.annotation-handle { position: absolute; z-index: 4; width: 8px; height: 8px; border: 1px solid white; border-radius: 2px; background: #287b59; pointer-events: auto; }
+.annotation-handle.nw { top: -5px; left: -5px; cursor: nwse-resize; }
+.annotation-handle.n { top: -5px; left: calc(50% - 4px); cursor: ns-resize; }
+.annotation-handle.ne { top: -5px; right: -5px; cursor: nesw-resize; }
+.annotation-handle.e { top: calc(50% - 4px); right: -5px; cursor: ew-resize; }
+.annotation-handle.se { right: -5px; bottom: -5px; cursor: nwse-resize; }
+.annotation-handle.s { bottom: -5px; left: calc(50% - 4px); cursor: ns-resize; }
+.annotation-handle.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+.annotation-handle.w { top: calc(50% - 4px); left: -5px; cursor: ew-resize; }
 .annotation-mark.selected, .annotation-shape.selected { filter: drop-shadow(0 0 4px rgba(40,123,89,.75)); outline: 2px solid rgba(40,123,89,.45); outline-offset: 3px; }
 .marking-panel { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr) auto; border-left: 1px solid #3b423e; background: #f8faf9; color: #18221d; }
 .marking-panel > header { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #dce3df; padding: 9px 13px; }
