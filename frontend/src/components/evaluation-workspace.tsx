@@ -982,8 +982,26 @@ export function EvaluationWorkspace({
   const saveProgress = useCallback(
     async (page: number) => {
       if (!manifest || manifest.assignment.status === "submitted") return;
-      const progress = Math.round(
-        (page * 100) / Math.max(manifest.page_count, 1),
+      const nextVisitedPages = new Set(visitedPages);
+      nextVisitedPages.add(page);
+      const requiredQuestionIds = new Set(
+        marking?.questions.filter((item) => item.required).map((item) => item.id) || [],
+      );
+      const savedRequiredMarks = new Set(
+        marking?.marks
+          .filter((item) => requiredQuestionIds.has(item.question_id))
+          .map((item) => item.question_id) || [],
+      ).size;
+      const pageCompletion = nextVisitedPages.size / Math.max(manifest.page_count, 1);
+      const markCompletion = requiredQuestionIds.size
+        ? savedRequiredMarks / requiredQuestionIds.size
+        : 1;
+      const progress = Math.min(
+        nextVisitedPages.size >= manifest.page_count &&
+          savedRequiredMarks >= requiredQuestionIds.size
+          ? 100
+          : 99,
+        Math.round(((pageCompletion + markCompletion) / 2) * 100),
       );
       if (!navigator.onLine) {
         const stored = JSON.parse(
@@ -2319,7 +2337,7 @@ export function EvaluationWorkspace({
                         </div>
                         <small>
                           {item.progress_percent}%
-                          {item.draft_saved_at ? " Â· Draft saved" : ""}
+                          {item.draft_saved_at && item.status !== "submitted" ? " Â· Draft saved" : ""}
                         </small>
                       </div>
                     </td>
