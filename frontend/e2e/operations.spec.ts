@@ -174,6 +174,7 @@ test("evaluator opens a real encrypted page through the signed viewer", async ({
   if (!mobile) await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await page.evaluate(() => document.exitFullscreen());
   await expect(page.getByRole("heading", { name: "Evaluation paused" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Password" }).fill("ChangeMe123!");
   await page.getByRole("button", { name: "Run checks and resume" }).click();
   await expect(page.getByRole("heading", { name: "Evaluation paused" })).toHaveCount(0);
   if (!mobile && process.env.PLAYWRIGHT_DESTRUCTIVE_SUBMIT === "1") {
