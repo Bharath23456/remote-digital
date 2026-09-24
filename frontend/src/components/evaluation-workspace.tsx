@@ -2635,7 +2635,7 @@ function MarkingPanel({
       }));
     }
     setConfirmed(mark?.examiner_confirmed || false);
-  }, [marking.marks, question?.id]);
+  }, [question?.id]);
   async function saveMark(event: FormEvent) {
     event.preventDefault();
     if (!question) return;
