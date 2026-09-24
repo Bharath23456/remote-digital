@@ -1,0 +1,105 @@
+{
+  "info": {
+    "name": "ADMIEZO Phase 4 - Revaluation and Recounting",
+    "description": "Separate official-portal intake and admin lifecycle checks. Set variables before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "apiKey", "value": "" },
+    { "key": "scriptId", "value": "" },
+    { "key": "adminCookie", "value": "" },
+    { "key": "csrfToken", "value": "" },
+    { "key": "revaluationApplicationId", "value": "UNI-REVAL-1001" },
+    { "key": "recountingApplicationId", "value": "UNI-RECOUNT-1001" },
+    { "key": "revaluationRequestId", "value": "" },
+    { "key": "recountingRequestId", "value": "" },
+    { "key": "requestVersion", "value": "1" },
+    { "key": "evaluatorId", "value": "" },
+    { "key": "resultId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Official Portal",
+      "item": [
+        {
+          "name": "Submit revaluation",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-ADMIEZO-API-KEY", "value": "{{apiKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"external_application_id\": \"{{revaluationApplicationId}}\",\n  \"identity_reference\": \"STUDENT-REVAL-001\",\n  \"script_id\": \"{{scriptId}}\",\n  \"scope\": \"full\",\n  \"reason\": \"Student requested a complete independent revaluation\",\n  \"request_type\": \"revaluation\",\n  \"payload\": {\"test\": true}\n}" },
+            "url": "{{baseUrl}}/api/v1/phase4/official-portal/revaluation-requests"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('request accepted', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));", "if (pm.response.code < 300) pm.collectionVariables.set('revaluationRequestId', pm.response.json().id);"] } }]
+        },
+        {
+          "name": "Submit recounting for missed questions",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-ADMIEZO-API-KEY", "value": "{{apiKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"external_application_id\": \"{{recountingApplicationId}}\",\n  \"identity_reference\": \"STUDENT-RECOUNT-001\",\n  \"script_id\": \"{{scriptId}}\",\n  \"scope\": \"questions\",\n  \"question_ids\": [\"Q1\", \"Q2(a)\"],\n  \"reason\": \"Evaluator may have missed marks on selected answers\",\n  \"request_type\": \"recounting\",\n  \"recounting_notes\": \"Check Q1 and Q2(a) for omitted marks\",\n  \"payload\": {\"test\": true}\n}" },
+            "url": "{{baseUrl}}/api/v1/phase4/official-portal/recounting-requests"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('recounting request accepted', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));", "if (pm.response.code < 300) pm.collectionVariables.set('recountingRequestId', pm.response.json().id);"] } }]
+        }
+      ]
+    },
+    {
+      "name": "Admin workflow",
+      "item": [
+        {
+          "name": "View assessment queue",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "{{adminCookie}}" }],
+            "url": "{{baseUrl}}/api/v1/phase4/catalog?section=assessment"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('assessment catalog loaded', () => pm.expect(pm.response.code).to.eql(200));"] } }]
+        },
+        {
+          "name": "Approve selected request",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "{{adminCookie}}" }, { "key": "X-CSRFToken", "value": "{{csrfToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"version\": {{requestVersion}}, \"target\": \"approved\", \"reason\": \"Eligibility and request evidence approved\", \"values\": {}}" },
+            "url": "{{baseUrl}}/api/v1/phase4/revaluation/requests/{{revaluationRequestId}}/action"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('approval completed', () => pm.expect(pm.response.code).to.eql(200));", "if (pm.response.code < 300) pm.collectionVariables.set('requestVersion', pm.response.json().version);"] } }]
+        },
+        {
+          "name": "Assign independent evaluator",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "{{adminCookie}}" }, { "key": "X-CSRFToken", "value": "{{csrfToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"version\": {{requestVersion}}, \"target\": \"assigned\", \"reason\": \"Independent evaluator selected\", \"values\": {\"evaluator_id\": \"{{evaluatorId}}\"}}" },
+            "url": "{{baseUrl}}/api/v1/phase4/revaluation/requests/{{revaluationRequestId}}/action"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('assignment created', () => pm.expect(pm.response.code).to.eql(200));", "if (pm.response.code < 300) pm.collectionVariables.set('requestVersion', pm.response.json().version);"] } }]
+        },
+        {
+          "name": "Attach locked valuation result",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "{{adminCookie}}" }, { "key": "X-CSRFToken", "value": "{{csrfToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"version\": {{requestVersion}}, \"target\": \"evaluated\", \"reason\": \"Locked evaluator result attached\", \"values\": {\"result_id\": \"{{resultId}}\"}}" },
+            "url": "{{baseUrl}}/api/v1/phase4/revaluation/requests/{{revaluationRequestId}}/action"
+          }
+        },
+        {
+          "name": "Decide final mark",
+          "request": { "method": "POST", "header": [{ "key": "Cookie", "value": "{{adminCookie}}" }, { "key": "X-CSRFToken", "value": "{{csrfToken}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"version\": {{requestVersion}}, \"target\": \"decided\", \"reason\": \"Final mark decided under configured rule\", \"values\": {}}" }, "url": "{{baseUrl}}/api/v1/phase4/revaluation/requests/{{revaluationRequestId}}/action" }
+        },
+        {
+          "name": "Close request",
+          "request": { "method": "POST", "header": [{ "key": "Cookie", "value": "{{adminCookie}}" }, { "key": "X-CSRFToken", "value": "{{csrfToken}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"version\": {{requestVersion}}, \"target\": \"closed\", \"reason\": \"Workflow completed\", \"values\": {}}" }, "url": "{{baseUrl}}/api/v1/phase4/revaluation/requests/{{revaluationRequestId}}/action" }
+        }
+      ]
+    }
+  ]
+}

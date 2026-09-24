@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -48,6 +50,7 @@ from .models import (
     RuntimeIncident,
     SecureEvaluationSession,
     StudentScriptRequest,
+    UniversityApiKey,
     WorkloadAction,
 )
 from .services import (
@@ -137,6 +140,8 @@ class RevaluationIn(Schema):
     question_ids: list[str] = Field(default_factory=list)
     reason: str
     rule: str = "best"
+    request_type: str = "revaluation"
+    recounting_notes: str = ""
 
 
 class CompletionSignIn(Schema):
@@ -156,6 +161,7 @@ class AuthorizationIn(Schema):
 class DecisionIn(Schema):
     version: int
     approve: bool
+    release_mode: str = "masked"
 
 
 class PresenceEventIn(Schema):
@@ -315,6 +321,40 @@ class StudentRequestIn(Schema):
     identity_reference: str
     script_id: str
     purpose: str = "copy"
+    release_mode: str = "masked"
+
+
+class UniversityApiKeyIn(Schema):
+    name: str
+    source_system: str
+    endpoint_id: str | None = None
+    scopes: list[str] = Field(default_factory=lambda: ["photocopy:request", "revaluation:request", "recounting:request"])
+
+
+class OfficialPortalPhotocopyIn(Schema):
+    external_application_id: str
+    identity_reference: str
+    script_id: str
+    purpose: str = "copy"
+    release_mode: str = "masked"
+    payload: dict = Field(default_factory=dict)
+
+
+class DeliveryAcknowledgementIn(Schema):
+    delivery_reference: str
+
+
+class OfficialPortalRevaluationIn(Schema):
+    external_application_id: str
+    identity_reference: str
+    script_id: str
+    scope: str = "full"
+    question_ids: list[str] = Field(default_factory=list)
+    reason: str
+    rule: str = "best"
+    request_type: str = "revaluation"
+    recounting_notes: str = ""
+    payload: dict = Field(default_factory=dict)
 
 
 class EvidenceIn(Schema):
@@ -369,6 +409,28 @@ class DrillIn(Schema):
 def _tenant(request, *roles):
     membership = require_roles(request, *(roles or READ_ROLES))
     return membership.institution.tenant_id
+
+
+def _hash_api_key(raw_key):
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _official_portal_context(request, required_scope):
+    raw_key = request.headers.get("X-ADMIEZO-API-KEY", "").strip()
+    if not raw_key:
+        raise HttpError(401, "Official portal API key is required")
+
+    key_hash = _hash_api_key(raw_key)
+    item = UniversityApiKey.objects.select_related("integration_endpoint").filter(
+        key_hash=key_hash,
+        status=UniversityApiKey.Status.ACTIVE,
+    ).first()
+    if not item or required_scope not in item.scopes:
+        raise HttpError(403, "Official portal API key is invalid or lacks scope")
+
+    item.last_used_at = timezone.now()
+    item.save(update_fields=["last_used_at", "updated_at"])
+    return item
 
 
 def _secure_evaluator_context(request, assignment_id=None):
@@ -447,7 +509,7 @@ def catalog(request, section: str = ""):
         ],
         "moderation_policies": _serialize(ModerationPolicy.objects.filter(tenant_id=tenant_id).select_related("paper"), ["paper_id", "sample_percentage", "sampling_modes", "mandatory", "version"]),
         "moderation_cases": _serialize(ModerationCase.objects.filter(tenant_id=tenant_id).select_related("script", "moderator"), ["script_id", "moderator_id", "sample_reasons", "status", "original_mark", "adjusted_mark", "version"]),
-        "revaluations": _serialize(RevaluationRequest.objects.filter(tenant_id=tenant_id).select_related("script"), ["script_id", "scope", "original_mark_snapshot", "new_mark", "mark_difference", "rule", "final_mark", "status", "version"]),
+        "revaluations": _serialize(RevaluationRequest.objects.filter(tenant_id=tenant_id).select_related("script").order_by("-created_at")[:200], ["script_id", "request_type", "source_system", "external_application_id", "scope", "recounting_notes", "original_mark_snapshot", "new_mark", "mark_difference", "rule", "final_mark", "status", "received_at", "created_at", "version"]),
         "completions": _serialize(CompletionRecord.objects.filter(tenant_id=tenant_id).select_related("script", "final_mark"), ["script_id", "final_mark_id", "checks", "signature_digest", "status", "version"]),
         "authorizations": _serialize(ControlledAuthorization.objects.filter(tenant_id=tenant_id), ["kind", "final_mark_id", "purpose", "proposed_change", "expires_at", "status", "version"]),
         "presence_events": _serialize(PresenceSecurityEvent.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["assignment_id", "category", "severity", "action", "created_at"]),
@@ -479,9 +541,10 @@ def catalog(request, section: str = ""):
         "camps": _serialize(EvaluationCamp.objects.filter(tenant_id=tenant_id), ["centre_id", "session_id", "name", "starts_at", "ends_at", "status", "performance", "version"]),
         "remuneration_rules": _serialize(RemunerationRule.objects.filter(tenant_id=tenant_id), ["paper_id", "centre_id", "per_script", "per_page", "per_question", "minimum_payment", "maximum_payment", "tax_percentage", "version"]),
         "statements": _serialize(RemunerationStatement.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["evaluator_id", "session_id", "units", "gross_amount", "deductions", "net_amount", "status", "payment_reference", "version"]),
-        "student_requests": _serialize(StudentScriptRequest.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["script_id", "purpose", "eligibility", "status", "expires_at", "download_allowed", "access_count", "version"]),
+        "student_requests": _serialize(StudentScriptRequest.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["script_id", "purpose", "release_mode", "source_system", "external_application_id", "eligibility", "status", "expires_at", "download_allowed", "access_count", "delivered_at", "delivery_reference", "created_at", "received_at", "version"]),
         "evidence_packages": _serialize(EvidencePackage.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["script_id", "purpose", "event_count", "digest", "status", "version"]),
         "integrations": _serialize(IntegrationEndpoint.objects.filter(tenant_id=tenant_id), ["name", "kind", "base_url", "authentication", "rate_limit_per_minute", "webhook_events", "status", "version"]),
+        "university_api_keys": _serialize(UniversityApiKey.objects.filter(tenant_id=tenant_id), ["name", "key_prefix", "source_system", "integration_endpoint_id", "scopes", "status", "last_used_at", "version"]),
         "handovers": _serialize(ResultHandover.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["endpoint_id", "final_mark_id", "payload_digest", "status", "attempt_count", "acknowledgement_reference", "differences", "version"]),
         "recovery_plans": _serialize(RecoveryPlan.objects.filter(tenant_id=tenant_id), ["name", "regions", "rpo_minutes", "rto_minutes", "clean_environment", "status", "version"]),
         "recovery_drills": _serialize(RecoveryDrill.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["plan_id", "drill_type", "status", "measurements", "integrity_checks", "report", "corrective_actions", "version"]),
@@ -490,7 +553,7 @@ def catalog(request, section: str = ""):
         "assessment": {"moderation_policies", "moderation_cases", "revaluations", "completions", "authorizations"},
         "operations": {"monitoring", "productivity", "active_evaluations", "presence_events", "secure_sessions", "proctoring_reviews", "attendance", "workload_actions", "runtime_incidents", "issues", "knowledge", "notifications", "centres", "readiness", "camps"},
         "services": {"remuneration_rules", "statements", "student_requests"},
-        "platform": {"evidence_packages", "integrations", "handovers", "recovery_plans", "recovery_drills"},
+        "platform": {"evidence_packages", "integrations", "university_api_keys", "handovers", "recovery_plans", "recovery_drills"},
     }
     if section in section_fields:
         allowed = section_fields[section] | {"references"}
@@ -532,7 +595,7 @@ def revaluation_create(request, payload: RevaluationIn):
     script = Script.objects.filter(id=payload.script_id, tenant_id=tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
-    item = create_revaluation(tenant_id=tenant_id, actor_id=request.auth.id, script=script, identity_reference=payload.identity_reference, scope=payload.scope, question_ids=payload.question_ids, reason=payload.reason, rule=payload.rule)
+    item = create_revaluation(tenant_id=tenant_id, actor_id=request.auth.id, script=script, identity_reference=payload.identity_reference, scope=payload.scope, question_ids=payload.question_ids, reason=payload.reason, rule=payload.rule, request_type=payload.request_type, recounting_notes=payload.recounting_notes)
     return {"id": str(item.id), "status": item.status, "version": item.version}
 
 
@@ -902,7 +965,7 @@ def student_request(request, payload: StudentRequestIn):
     script = Script.objects.filter(id=payload.script_id, tenant_id=tenant_id).first()
     if not script:
         raise HttpError(404, "Script not found")
-    item = create_student_request(tenant_id=tenant_id, actor_id=request.auth.id, identity_reference=payload.identity_reference, script=script, purpose=payload.purpose)
+    item = create_student_request(tenant_id=tenant_id, actor_id=request.auth.id, identity_reference=payload.identity_reference, script=script, purpose=payload.purpose, release_mode=payload.release_mode)
     return {"id": str(item.id), "status": item.status, "eligibility": item.eligibility, "version": item.version}
 
 
@@ -913,6 +976,9 @@ def student_decision(request, request_id: str, payload: DecisionIn):
         item = StudentScriptRequest.objects.select_for_update().filter(id=request_id, tenant_id=tenant_id, status=StudentScriptRequest.Status.REQUESTED).first()
         if not item or item.version != payload.version:
             raise HttpError(409, "Student request is missing, stale, or already decided")
+        if payload.approve and payload.release_mode == StudentScriptRequest.ReleaseMode.UNMASKED_IDENTITY:
+            raise HttpError(409, "Unmasked identity delivery is blocked until a verified evaluator-redacted release asset exists")
+        item.release_mode = payload.release_mode
         item.status = StudentScriptRequest.Status.APPROVED if payload.approve else StudentScriptRequest.Status.REJECTED
         item.approved_by_id = request.auth.id if payload.approve else None
         item.expires_at = timezone.now() + timedelta(days=7) if payload.approve else None
@@ -940,6 +1006,51 @@ def student_viewer(request, request_id: str):
         locked.save()
         record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="student.script.viewed", aggregate="StudentScriptRequest", aggregate_id=locked.id, payload={"script_id": str(locked.script_id), "page_count": len(pages)})
     return {"request_id": str(item.id), "pages": pages, "watermark": f"ADMIEZO · {item.identity_reference[-8:]} · {timezone.now().isoformat()}", "download_allowed": item.download_allowed, "ttl_seconds": 300}
+
+
+@router.get("/official-portal/photocopy-requests/{request_id}/download", auth=None)
+def official_portal_photocopy_download(request, request_id: str):
+    api_key = _official_portal_context(request, "photocopy:request")
+    item = StudentScriptRequest.objects.filter(
+        id=request_id,
+        tenant_id=api_key.tenant_id,
+        source_system=api_key.source_system,
+        status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE, StudentScriptRequest.Status.DELIVERED],
+    ).select_related("script").first()
+    if not item or not item.expires_at or item.expires_at <= timezone.now():
+        raise HttpError(404, "Approved photocopy delivery is unavailable or expired")
+    if item.release_mode == StudentScriptRequest.ReleaseMode.UNMASKED_IDENTITY:
+        raise HttpError(409, "Unmasked identity delivery is blocked until a verified evaluator-redacted release asset exists")
+    assets = ScriptAsset.objects.filter(tenant_id=api_key.tenant_id, script=item.script, kind=ScriptAsset.Kind.EVALUATION, deleted_at__isnull=True).order_by("page_number")
+    pages = []
+    for asset in assets:
+        url, expires = signed_object_url(method="GET", key=asset.storage_key, ttl_seconds=300)
+        pages.append({"page_number": asset.page_number, "url": url, "expires_at": expires, "sha256": asset.sha256})
+    with transaction.atomic():
+        locked = StudentScriptRequest.objects.select_for_update().get(id=item.id)
+        locked.access_count += 1
+        locked.status = StudentScriptRequest.Status.AVAILABLE
+        locked.save(update_fields=["access_count", "status", "updated_at"])
+    return {"request_id": str(item.id), "external_application_id": item.external_application_id, "release_mode": item.release_mode, "evaluator_marks_included": False, "watermark": f"ADMIEZO-{item.external_application_id or item.id}-{timezone.now().isoformat()}", "pages": pages, "ttl_seconds": 300}
+
+
+@router.post("/official-portal/photocopy-requests/{request_id}/acknowledge", auth=None)
+def official_portal_photocopy_acknowledge(request, request_id: str, payload: DeliveryAcknowledgementIn):
+    api_key = _official_portal_context(request, "photocopy:request")
+    with transaction.atomic():
+        item = StudentScriptRequest.objects.select_for_update().filter(id=request_id, tenant_id=api_key.tenant_id, source_system=api_key.source_system, status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE]).first()
+        if not item:
+            raise HttpError(404, "Photocopy request is not ready for acknowledgement")
+        reference = payload.delivery_reference.strip()
+        if len(reference) < 3:
+            raise HttpError(422, "A delivery reference is required")
+        item.status = StudentScriptRequest.Status.DELIVERED
+        item.delivered_at = timezone.now()
+        item.delivery_reference = reference[:160]
+        item.version += 1
+        item.save(update_fields=["status", "delivered_at", "delivery_reference", "version", "updated_at"])
+        record_event(tenant_id=item.tenant_id, actor_id=0, action="student.copy.delivered", aggregate="StudentScriptRequest", aggregate_id=item.id, payload={"external_application_id": item.external_application_id, "delivery_reference": item.delivery_reference})
+    return {"id": str(item.id), "status": item.status, "delivery_reference": item.delivery_reference, "version": item.version}
 
 
 @router.post("/audit/evidence")
@@ -984,6 +1095,126 @@ def integration_create(request, payload: IntegrationIn):
         item = IntegrationEndpoint.objects.create(tenant_id=tenant_id, **payload.dict())
         record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="integration.endpoint.created", aggregate="IntegrationEndpoint", aggregate_id=item.id, payload={"kind": item.kind, "base_url": item.base_url})
     return {"id": str(item.id), "status": item.status, "version": item.version}
+
+
+@router.get("/integrations/api-keys")
+def university_api_keys(request):
+    tenant_id = _tenant(request, *ADMIN_ROLES)
+    return _serialize(
+        UniversityApiKey.objects.filter(tenant_id=tenant_id).order_by("name"),
+        ["name", "key_prefix", "source_system", "integration_endpoint_id", "scopes", "status", "last_used_at", "version"],
+    )
+
+
+@router.post("/integrations/api-keys")
+def university_api_key_create(request, payload: UniversityApiKeyIn):
+    tenant_id = _tenant(request, *ADMIN_ROLES)
+    endpoint = IntegrationEndpoint.objects.filter(id=payload.endpoint_id, tenant_id=tenant_id).first() if payload.endpoint_id else None
+    raw_key = f"admz_live_{secrets.token_urlsafe(32)}"
+    source_system = payload.source_system.strip().lower()
+    with transaction.atomic():
+        item = UniversityApiKey.objects.create(
+            tenant_id=tenant_id,
+            name=payload.name.strip(),
+            key_prefix=raw_key[:16],
+            key_hash=_hash_api_key(raw_key),
+            source_system=source_system,
+            integration_endpoint=endpoint,
+            scopes=payload.scopes,
+            created_by_id=request.auth.id,
+        )
+        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="integration.api_key.created", aggregate="UniversityApiKey", aggregate_id=item.id, payload={"name": item.name, "source_system": item.source_system, "scopes": item.scopes})
+    return {"id": str(item.id), "api_key": raw_key, "key_prefix": item.key_prefix, "source_system": item.source_system, "scopes": item.scopes, "status": item.status, "version": item.version}
+
+
+@router.post("/integrations/api-keys/{key_id}/revoke")
+def university_api_key_revoke(request, key_id: str, payload: VersionActionIn):
+    tenant_id = _tenant(request, *ADMIN_ROLES)
+    with transaction.atomic():
+        item = UniversityApiKey.objects.select_for_update().filter(id=key_id, tenant_id=tenant_id).first()
+        if not item or item.version != payload.version:
+            raise HttpError(409, "API key is missing or stale")
+        item.status = UniversityApiKey.Status.REVOKED
+        item.revoked_at = timezone.now()
+        item.version += 1
+        item.save(update_fields=["status", "revoked_at", "version", "updated_at"])
+        record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="integration.api_key.revoked", aggregate="UniversityApiKey", aggregate_id=item.id, payload={"reason": payload.reason})
+    return {"id": str(item.id), "status": item.status, "version": item.version}
+
+
+@router.post("/official-portal/photocopy-requests", auth=None)
+def official_portal_photocopy_request(request, payload: OfficialPortalPhotocopyIn):
+    api_key = _official_portal_context(request, "photocopy:request")
+    script = Script.objects.filter(id=payload.script_id, tenant_id=api_key.tenant_id).first()
+    if not script:
+        raise HttpError(404, "Script not found")
+    item = create_student_request(
+        tenant_id=api_key.tenant_id,
+        actor_id=0,
+        identity_reference=payload.identity_reference,
+        script=script,
+        purpose=payload.purpose,
+        source_system=api_key.source_system,
+        external_application_id=payload.external_application_id,
+        external_payload=payload.payload,
+        integration_endpoint=api_key.integration_endpoint,
+        release_mode=payload.release_mode,
+    )
+    return {"id": str(item.id), "status": item.status, "external_application_id": item.external_application_id, "version": item.version}
+
+
+@router.post("/official-portal/revaluation-requests", auth=None)
+def official_portal_revaluation_request(request, payload: OfficialPortalRevaluationIn):
+    api_key = _official_portal_context(request, "revaluation:request")
+    if payload.request_type != RevaluationRequest.RequestType.REVALUATION:
+        raise HttpError(422, "Use the recounting endpoint for recounting requests")
+    script = Script.objects.filter(id=payload.script_id, tenant_id=api_key.tenant_id).first()
+    if not script:
+        raise HttpError(404, "Script not found")
+    item = create_revaluation(
+        tenant_id=api_key.tenant_id,
+        actor_id=0,
+        script=script,
+        identity_reference=payload.identity_reference,
+        scope=payload.scope,
+        question_ids=payload.question_ids,
+        reason=payload.reason,
+        rule=payload.rule,
+        request_type=payload.request_type,
+        recounting_notes=payload.recounting_notes,
+        source_system=api_key.source_system,
+        external_application_id=payload.external_application_id,
+        external_payload=payload.payload,
+        integration_endpoint=api_key.integration_endpoint,
+    )
+    return {"id": str(item.id), "status": item.status, "request_type": item.request_type, "external_application_id": item.external_application_id, "version": item.version}
+
+
+@router.post("/official-portal/recounting-requests", auth=None)
+def official_portal_recounting_request(request, payload: OfficialPortalRevaluationIn):
+    api_key = _official_portal_context(request, "recounting:request")
+    if payload.request_type != RevaluationRequest.RequestType.RECOUNTING:
+        raise HttpError(422, "Recounting endpoint requires request_type=recounting")
+    script = Script.objects.filter(id=payload.script_id, tenant_id=api_key.tenant_id).first()
+    if not script:
+        raise HttpError(404, "Script not found")
+    item = create_revaluation(
+        tenant_id=api_key.tenant_id,
+        actor_id=0,
+        script=script,
+        identity_reference=payload.identity_reference,
+        scope=payload.scope,
+        question_ids=payload.question_ids,
+        reason=payload.reason,
+        rule=payload.rule,
+        request_type=payload.request_type,
+        recounting_notes=payload.recounting_notes,
+        source_system=api_key.source_system,
+        external_application_id=payload.external_application_id,
+        external_payload=payload.payload,
+        integration_endpoint=api_key.integration_endpoint,
+    )
+    return {"id": str(item.id), "status": item.status, "request_type": item.request_type, "external_application_id": item.external_application_id, "version": item.version}
 
 
 @router.post("/integrations/handovers")

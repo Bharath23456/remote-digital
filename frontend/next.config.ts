@@ -11,6 +11,7 @@ const allowedDevOrigins = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  turbopack: { root: __dirname },
   poweredByHeader: false,
   allowedDevOrigins,
   async headers() {

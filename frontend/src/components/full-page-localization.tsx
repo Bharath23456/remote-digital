@@ -192,9 +192,13 @@ function translateInputValue(input: HTMLInputElement, language: LanguageCode) {
   const originalType = original.type || "text";
   const localizable = !["checkbox", "radio", "file", "hidden", "password", "email", "url"].includes(originalType);
   if (language === "en") {
-    if (original.type === null) input.removeAttribute("type"); else input.setAttribute("type", original.type);
-    if (original.inputMode === null) input.removeAttribute("inputmode"); else input.setAttribute("inputmode", original.inputMode);
-    if (localizable && input.value) input.value = original.source;
+    if (original.type === null) input.removeAttribute("type");
+    else input.setAttribute("type", originalType);
+    if (original.inputMode === null) input.removeAttribute("inputmode");
+    else input.setAttribute("inputmode", original.inputMode);
+    if (localizable && input.value !== original.output && input.value !== original.source) {
+      original.source = input.value;
+    }
     original.output = input.value;
     return;
   }
@@ -202,7 +206,7 @@ function translateInputValue(input: HTMLInputElement, language: LanguageCode) {
     input.setAttribute("type", "text");
     input.setAttribute("inputmode", "decimal");
   }
-  if (localizable && input.value) {
+  if (localizable && input.value && document.activeElement !== input) {
     if (input.value !== original.output && input.value !== original.source) original.source = recoverEnglish(input.value, language);
     const exact = lookup(language, original.source.trim());
     input.value = exact ? localizeDigits(exact, language) : localizeDigits(normalizeDigits(original.source), language);

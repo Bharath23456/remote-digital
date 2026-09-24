@@ -5,6 +5,7 @@ from unittest.mock import patch
 from django.apps import apps
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from apps.core.testing import create_operational_fixtures
 from django.test import Client, TestCase
 
 from apps.configuration.models import Paper
@@ -18,6 +19,7 @@ class EvaluationCoreApiTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def setUp(self):
         self.client = Client()
@@ -135,6 +137,7 @@ class OperationalRoleBoundaryTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
         institution = Institution.objects.get(code="northbridge-university")
         for email, role, modules in (
             ("receiver-rbac@admiezo.local", Membership.Role.SCRIPT_RECEIVER, ["receiving"]),
@@ -190,6 +193,7 @@ class CsrfBoundaryTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def test_session_login_and_domain_writes_require_csrf(self):
         client = Client(enforce_csrf_checks=True)
