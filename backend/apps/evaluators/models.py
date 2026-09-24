@@ -1,5 +1,6 @@
-from django.db import models
 from django.conf import settings
+from django.db import models
+from decimal import Decimal
 
 from apps.configuration.models import Subject
 from apps.core.models import TenantModel
@@ -39,12 +40,62 @@ class Evaluator(TenantModel):
     grade = models.CharField(max_length=20, choices=Grade.choices, default=Grade.EVALUATOR)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     daily_capacity = models.PositiveSmallIntegerField(default=20)
+    is_system_ai = models.BooleanField(default=False)
     available_from = models.DateField(null=True, blank=True)
     available_to = models.DateField(null=True, blank=True)
     version = models.PositiveIntegerField(default=1)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant_id", "evaluator_code"], name="unique_evaluator_code")]
+
+
+class EvaluatorFaceTemplate(TenantModel):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        REVOKED = "revoked", "Revoked"
+
+    evaluator = models.OneToOneField(Evaluator, on_delete=models.CASCADE, related_name="face_template")
+    encrypted_template = models.TextField()
+    template_digest = models.CharField(max_length=64, db_index=True)
+    model_version = models.CharField(max_length=64, default="opencv-sface-v1")
+    threshold = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.8200"))
+    quality_score = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    liveness_reference = models.JSONField(default=dict, blank=True)
+    enrolled_by_id = models.PositiveBigIntegerField()
+    enrolled_at = models.DateTimeField(auto_now_add=True)
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    version = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        indexes = [models.Index(fields=["tenant_id", "status"], name="evaluators__tenant__0dc1b4_idx")]
+
+
+class EvaluatorIdentityVerification(TenantModel):
+    evaluator = models.ForeignKey(Evaluator, on_delete=models.PROTECT, related_name="identity_verifications")
+    assignment = models.ForeignKey("allocation.Assignment", null=True, blank=True, on_delete=models.PROTECT, related_name="identity_verifications")
+    access_session_id = models.UUIDField(null=True, blank=True, db_index=True)
+    verified = models.BooleanField(default=False)
+    liveness_verified = models.BooleanField(default=False)
+    authorized = models.BooleanField(default=False)
+    access_granted = models.BooleanField(default=False)
+    similarity_score = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.0000"))
+    threshold = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.8200"))
+    failure_reason = models.CharField(max_length=80, blank=True, db_index=True)
+    model_version = models.CharField(max_length=64, default="opencv-sface-v1")
+    probe_digest = models.CharField(max_length=64, blank=True)
+    device_fingerprint = models.CharField(max_length=128, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    attempt_number = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tenant_id", "evaluator", "created_at"], name="evaluators__tenant__560cb4_idx"),
+            models.Index(fields=["tenant_id", "access_session_id", "expires_at"], name="evaluators__tenant__0d32b2_idx"),
+        ]
 
 
 class Expertise(TenantModel):

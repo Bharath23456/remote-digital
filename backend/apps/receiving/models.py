@@ -6,15 +6,22 @@ from apps.core.models import TenantModel
 
 
 class Dispatch(TenantModel):
+    class IntakeMode(models.TextChoices):
+        LEGACY = "legacy", "Legacy receiving"
+        TRANSFER = "transfer", "Transfer to university"
+        ON_SITE = "on_site", "Scan on site"
+
     class Status(models.TextChoices):
         REGISTERED = "registered", "Registered"
         IN_TRANSIT = "in_transit", "In transit"
+        ON_SITE = "on_site", "On-site scanning"
         RECEIVED = "received", "Received"
         RECONCILED = "reconciled", "Reconciled"
         EXCEPTION = "exception", "Exception"
         CLOSED = "closed", "Closed"
 
     reference = models.CharField(max_length=40)
+    intake_mode = models.CharField(max_length=16, choices=IntakeMode.choices, default=IntakeMode.LEGACY)
     paper = models.ForeignKey(Paper, on_delete=models.PROTECT, related_name="dispatches")
     source_centre = models.CharField(max_length=120)
     expected_packets = models.PositiveIntegerField()
@@ -40,7 +47,9 @@ class Dispatch(TenantModel):
 
 class Packet(TenantModel):
     dispatch = models.ForeignKey(Dispatch, on_delete=models.PROTECT, related_name="packets")
+    paper = models.ForeignKey(Paper, null=True, blank=True, on_delete=models.PROTECT, related_name="intake_packets")
     barcode = models.CharField(max_length=64, unique=True)
+    script_manifest = models.JSONField(default=list, blank=True)
     expected_scripts = models.PositiveIntegerField()
     received_scripts = models.PositiveIntegerField(default=0)
     condition = models.CharField(max_length=20, default="intact")

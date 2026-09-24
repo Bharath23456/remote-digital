@@ -3,19 +3,23 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from django.apps import apps
+from django.contrib.auth.models import User
 from django.core.management import call_command
+from apps.core.testing import create_operational_fixtures
 from django.test import Client, TestCase
 
 from apps.configuration.models import Paper
 from apps.core.models import AuditEvent, OutboxEvent
 from apps.custody.models import Script
 from apps.core.outbox import publish_next
+from apps.tenancy.models import Institution, Membership
 
 
 class EvaluationCoreApiTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def setUp(self):
         self.client = Client()
@@ -127,10 +131,69 @@ class CandidatePiiBoundaryTests(TestCase):
         self.assertFalse(forbidden.intersection(exposed))
 
 
+class OperationalRoleBoundaryTests(TestCase):
+    password = "RoleBoundary123!"
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
+        institution = Institution.objects.get(code="northbridge-university")
+        for email, role, modules in (
+            ("receiver-rbac@admiezo.local", Membership.Role.SCRIPT_RECEIVER, ["receiving"]),
+            ("scanner-rbac@admiezo.local", Membership.Role.SCANNER_OPERATOR, ["digitization"]),
+            ("custody-rbac@admiezo.local", Membership.Role.CUSTODY_OFFICER, ["custody"]),
+        ):
+            user = User.objects.create_user(username=email, email=email, password=cls.password)
+            Membership.objects.create(
+                user=user,
+                institution=institution,
+                role=role,
+                enabled_modules=modules,
+            )
+
+    def client_for(self, email):
+        client = Client()
+        response = client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": email, "password": self.password, "device_id": f"{email}-device"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        return client, response.json()
+
+    def test_script_receiver_is_limited_to_receiving(self):
+        client, context = self.client_for("receiver-rbac@admiezo.local")
+        self.assertEqual(context["enabled_modules"], ["receiving"])
+        self.assertEqual(client.get("/api/v1/receiving/catalog").status_code, 200)
+        self.assertEqual(client.get("/api/v1/scanning/catalog").status_code, 403)
+        self.assertEqual(client.get("/api/v1/custody/catalog").status_code, 403)
+        self.assertEqual(client.get("/api/v1/security/catalog").status_code, 403)
+
+    def test_scanner_operator_is_limited_to_digitization(self):
+        client, context = self.client_for("scanner-rbac@admiezo.local")
+        self.assertEqual(context["enabled_modules"], ["digitization"])
+        self.assertEqual(client.get("/api/v1/scanning/catalog").status_code, 200)
+        self.assertEqual(client.get("/api/v1/scan-processing/catalog").status_code, 200)
+        self.assertEqual(client.get("/api/v1/integrity/catalog").status_code, 200)
+        self.assertEqual(client.get("/api/v1/receiving/catalog").status_code, 403)
+        self.assertEqual(client.get("/api/v1/custody/catalog").status_code, 403)
+        self.assertEqual(client.get("/api/v1/security/catalog").status_code, 403)
+
+    def test_custody_officer_is_limited_to_chain_of_custody(self):
+        client, context = self.client_for("custody-rbac@admiezo.local")
+        self.assertEqual(context["enabled_modules"], ["custody"])
+        self.assertEqual(client.get("/api/v1/custody/catalog").status_code, 200)
+        self.assertEqual(client.get("/api/v1/receiving/catalog").status_code, 200)
+        self.assertEqual(client.get("/api/v1/scanning/catalog").status_code, 403)
+        self.assertEqual(client.get("/api/v1/security/catalog").status_code, 403)
+
+
 class CsrfBoundaryTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def test_session_login_and_domain_writes_require_csrf(self):
         client = Client(enforce_csrf_checks=True)

@@ -2,9 +2,12 @@ from ninja import Field, Router, Schema
 from ninja.errors import HttpError
 
 from apps.allocation.models import Assignment
+from apps.ai_evaluation.models import AIAnalysis
+from apps.ai_evaluation.services import provider_status, queue_assistive_analysis, tenant_ai_policy
 from apps.core.authz import require_roles, require_secure_evaluation_session
 from apps.evaluators.models import Evaluator
 from apps.rubrics.models import RubricCriterion
+from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Membership
 from apps.workflow.services import start_workflow
 
@@ -118,6 +121,58 @@ def workspace(request, assignment_id: str):
         "comments": [{"id": str(item.id), "question_id": str(item.question_id) if item.question_id else None, "page_number": item.page_number, "kind": item.kind, "body": item.body, "created_at": item.created_at.isoformat()} for item in evaluation.comments.all()],
         "page_anchors": [{"question_id": str(item.question_id), "page_number": item.page_number} for item in evaluation.page_anchors.all()],
     }
+
+
+def _ai_analysis_data(item):
+    if not item:
+        return None
+    return {
+        "id": str(item.id),
+        "status": item.status,
+        "model_name": item.model_name,
+        "effective_confidence": float(item.effective_confidence) if item.effective_confidence is not None else None,
+        "summary": item.raw_response.get("summary", ""),
+        "error_message": item.error_message,
+        "created_at": item.created_at.isoformat(),
+        "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+        "assessments": [
+            {
+                "question_id": str(assessment.question_id),
+                "question": assessment.question.number,
+                "marks": float(assessment.marks),
+                "confidence": float(assessment.confidence),
+                "feedback": assessment.feedback,
+                "reasoning": assessment.reasoning,
+            }
+            for assessment in item.question_assessments.select_related("question").all()
+        ],
+    }
+
+
+@router.get("/assignments/{assignment_id}/ai-analysis")
+def ai_analysis(request, assignment_id: str):
+    tenant_id, evaluator, assignment = _evaluator_context(request, assignment_id)
+    require_secure_evaluation_session(request, assignment, allow_paused=True)
+    policy = tenant_ai_policy(tenant_id)
+    provider = provider_status(tenant_id, policy.ai_model_name)
+    latest = AIAnalysis.objects.filter(tenant_id=tenant_id, assignment=assignment, trigger=AIAnalysis.Trigger.ASSISTIVE).prefetch_related("question_assessments__question").first()
+    return {
+        "mode": policy.ai_evaluation_mode,
+        "enabled": policy.ai_evaluation_mode == SecurityPolicy.AIEvaluationMode.ASSISTIVE and provider["available"],
+        "confidence_threshold": float(policy.ai_confidence_threshold),
+        "provider": provider,
+        "analysis": _ai_analysis_data(latest),
+    }
+
+
+@router.post("/assignments/{assignment_id}/ai-analysis")
+def request_ai_analysis(request, assignment_id: str):
+    tenant_id, evaluator, assignment = _evaluator_context(request, assignment_id)
+    require_secure_evaluation_session(request, assignment)
+    if assignment.status == Assignment.Status.SUBMITTED:
+        raise HttpError(409, "Submitted evaluations cannot request AI assistance")
+    analysis, created = queue_assistive_analysis(tenant_id=tenant_id, actor_id=request.auth.id, assignment=assignment)
+    return {"created": created, "analysis": _ai_analysis_data(analysis)}
 
 
 @router.post("/evaluations/{evaluation_id}/marks")

@@ -10,7 +10,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.core.authz import membership_for, require_roles, require_step_up
+from apps.core.authz import ROLE_MODULES, allowed_modules_for_role, membership_for, require_roles, require_step_up
 from apps.core.services import record_event
 from apps.identity_auth.models import AccessSession, AuthenticationMethod, DeviceAuthorization, OidcProvider
 from apps.identity_auth.services import active_session_for_request, policy_for
@@ -58,6 +58,9 @@ def _policy_data(policy):
         "evaluation_heartbeat_seconds": policy.evaluation_heartbeat_seconds if policy else 15,
         "evaluation_no_face_seconds": policy.evaluation_no_face_seconds if policy else 30,
         "evaluation_retention_days": policy.evaluation_retention_days if policy else 30,
+        "ai_evaluation_mode": policy.ai_evaluation_mode if policy else SecurityPolicy.AIEvaluationMode.DISABLED,
+        "ai_confidence_threshold": float(policy.ai_confidence_threshold) if policy else 85,
+        "ai_model_name": policy.ai_model_name if policy else "admiezo-ai-v1",
     }
 
 
@@ -87,8 +90,12 @@ def security_catalog(request):
     providers = OidcProvider.objects.filter(tenant_id=tenant_id).order_by("name")
     devices = DeviceAuthorization.objects.filter(tenant_id=tenant_id).select_related("device__user", "approved_by").order_by("-created_at")[:100]
     keys = EncryptionKeyMetadata.objects.order_by("purpose")
+    from apps.ai_evaluation.services import provider_status
+
+    ai_provider = provider_status(tenant_id, policy.ai_model_name if policy else "admiezo-ai-v1")
     return {
         "policy": _policy_data(policy),
+        "ai_provider": ai_provider,
         "devices": [
             {
                 "id": str(item.device_id),
@@ -168,7 +175,7 @@ def security_catalog(request):
                 "institution": item.institution.name,
                 "role": item.role,
                 "permissions": item.permissions,
-                "enabled_modules": item.enabled_modules,
+                "enabled_modules": allowed_modules_for_role(item.role, item.enabled_modules or (account.enabled_modules if account else [])),
                 "custom_fields": item.custom_fields,
                 "is_active": item.is_active,
             }
@@ -240,6 +247,10 @@ def _validate_membership_access(actor_membership, role, enabled_modules):
         raise HttpError(422, "One or more selected modules are not enabled for this university")
     if role == Membership.Role.EVALUATOR and requested != {"evaluation"}:
         raise HttpError(422, "Evaluator accounts can access only the Evaluation module")
+    scoped_modules = ROLE_MODULES.get(role)
+    if scoped_modules is not None and role != Membership.Role.EVALUATOR and requested != scoped_modules:
+        role_label = Membership.Role(role).label
+        raise HttpError(422, f"{role_label} accounts require exactly these modules: {', '.join(sorted(scoped_modules))}")
     return sorted(requested)
 
 
@@ -253,6 +264,8 @@ def create_membership(request, payload: MembershipCreateIn):
     except ValidationError as exc:
         raise HttpError(422, "Enter a valid email address") from exc
     modules = _validate_membership_access(actor_membership, payload.role, payload.enabled_modules)
+    if payload.role == Membership.Role.OPERATIONS_SUPERVISOR and payload.permissions:
+        raise HttpError(422, "Operations supervisors cannot receive additional permissions")
     custom_fields = validate_custom_values(
         tenant_id=actor_membership.institution.tenant_id,
         form_key="user_access",
@@ -507,6 +520,8 @@ def update_membership_access(request, membership_id: str, payload: MembershipAcc
     actor_membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
     require_step_up(request)
     modules = _validate_membership_access(actor_membership, payload.role, payload.enabled_modules)
+    if payload.role == Membership.Role.OPERATIONS_SUPERVISOR and payload.permissions:
+        raise HttpError(422, "Operations supervisors cannot receive additional permissions")
     with transaction.atomic():
         target = Membership.objects.select_for_update().filter(
             id=membership_id, institution__tenant_id=actor_membership.institution.tenant_id

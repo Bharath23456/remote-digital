@@ -4,7 +4,7 @@ from django.utils import timezone
 from ninja import Router
 from ninja.errors import HttpError
 
-from apps.core.authz import membership_for, require_roles
+from apps.core.authz import require_roles
 from apps.core.services import record_event
 from apps.receiving.models import Packet
 from apps.tenancy.custom_fields import persist_custom_values, validate_custom_values
@@ -16,11 +16,24 @@ from .services import decide_transfer, reconcile_packet, register_script, scan_b
 
 
 router = Router(tags=["Script identification and chain of custody"])
+CUSTODY_ROLES = (
+    Membership.Role.PLATFORM_ADMIN,
+    Membership.Role.UNIVERSITY_ADMIN,
+    Membership.Role.EXAM_CONTROLLER,
+    Membership.Role.CUSTODY_OFFICER,
+    Membership.Role.OPERATIONS_SUPERVISOR,
+)
+CUSTODY_INTAKE_ROLES = CUSTODY_ROLES + (
+    Membership.Role.RECEIVING_OFFICER,
+    Membership.Role.SCRIPT_RECEIVER,
+    Membership.Role.INTAKE_RECEIVER,
+)
+CUSTODY_SCAN_ROLES = CUSTODY_INTAKE_ROLES + (Membership.Role.SCANNER_OPERATOR, Membership.Role.SCAN_OPERATOR)
 
 
 @router.get("/catalog")
 def custody_catalog(request, state: str | None = None):
-    tenant_id = membership_for(request).institution.tenant_id
+    tenant_id = require_roles(request, *CUSTODY_ROLES).institution.tenant_id
     scripts = Script.objects.filter(tenant_id=tenant_id, removed_at__isnull=True).select_related("paper", "packet")
     if state:
         scripts = scripts.filter(state=state)
@@ -47,7 +60,7 @@ def custody_catalog(request, state: str | None = None):
 
 @router.post("/scripts/{script_id}/remove")
 def remove_script(request, script_id: str, payload: ScriptRemovalIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER)
+    membership = require_roles(request, *CUSTODY_ROLES)
     from apps.allocation.models import Assignment
 
     with transaction.atomic():
@@ -71,7 +84,7 @@ def remove_script(request, script_id: str, payload: ScriptRemovalIn):
 
 @router.post("/scripts/{script_id}/restore")
 def restore_script(request, script_id: str, payload: ScriptRemovalIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER)
+    membership = require_roles(request, *CUSTODY_ROLES)
     with transaction.atomic():
         script = Script.objects.select_for_update().filter(id=script_id, tenant_id=membership.institution.tenant_id, removed_at__isnull=False).first()
         if not script:
@@ -92,10 +105,10 @@ def restore_script(request, script_id: str, payload: ScriptRemovalIn):
 
 @router.post("/scripts")
 def create_script(request, payload: ScriptRegisterIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
+    membership = require_roles(request, *CUSTODY_INTAKE_ROLES)
     tenant_id = membership.institution.tenant_id
     custom_fields = validate_custom_values(tenant_id=tenant_id, form_key="script", values=payload.custom_fields)
-    packet = Packet.objects.filter(id=payload.packet_id, tenant_id=tenant_id).select_related("dispatch__paper").first()
+    packet = Packet.objects.filter(id=payload.packet_id, tenant_id=tenant_id, dispatch__intake_mode="legacy").select_related("dispatch__paper").first()
     if not packet:
         raise HttpError(404, "Packet not found")
     script = register_script(tenant_id=tenant_id, actor_id=request.auth.id, packet=packet, primary_barcode=payload.primary_barcode, supplements=payload.supplement_barcodes, bundle_barcode=payload.bundle_barcode, centre_barcode=payload.centre_barcode, location=payload.location)
@@ -105,22 +118,22 @@ def create_script(request, payload: ScriptRegisterIn):
 
 @router.post("/scripts/{script_id}/transition")
 def change_script_state(request, script_id: str, payload: ScriptTransitionIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER, Membership.Role.EVALUATOR)
+    membership = require_roles(request, *CUSTODY_SCAN_ROLES, Membership.Role.EVALUATOR)
     script = transition_script(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, script_id=script_id, expected_version=payload.version, to_state=payload.to_state, location=payload.location, metadata=payload.metadata)
     return {"id": str(script.id), "state": script.state, "version": script.version}
 
 
 @router.post("/barcodes/scan")
 def validate_barcode(request, payload: BarcodeScanIn):
-    membership = membership_for(request)
+    membership = require_roles(request, *CUSTODY_SCAN_ROLES)
     scan, barcode = scan_barcode(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, barcode=payload.barcode, purpose=payload.purpose, location=payload.location)
     return {"scan_id": str(scan.id), "result": scan.result, "kind": barcode.kind if barcode else None, "script_id": str(barcode.script_id) if barcode and barcode.script_id else None}
 
 
 @router.post("/packets/{packet_id}/reconcile")
 def run_packet_reconciliation(request, packet_id: str, payload: ReconcilePacketIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.RECEIVING_OFFICER)
-    packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id).first()
+    membership = require_roles(request, *CUSTODY_INTAKE_ROLES)
+    packet = Packet.objects.filter(id=packet_id, tenant_id=membership.institution.tenant_id, dispatch__intake_mode="legacy").first()
     if not packet:
         raise HttpError(404, "Packet not found")
     run = reconcile_packet(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, packet=packet, manifest_barcodes=payload.manifest_barcodes, observed_barcodes=payload.observed_barcodes)
@@ -129,7 +142,7 @@ def run_packet_reconciliation(request, packet_id: str, payload: ReconcilePacketI
 
 @router.post("/transfers")
 def request_transfer(request, payload: TransferRequestIn):
-    membership = membership_for(request)
+    membership = require_roles(request, *CUSTODY_ROLES)
     tenant_id = membership.institution.tenant_id
     script = Script.objects.filter(id=payload.script_id, tenant_id=tenant_id).first()
     if not script:
@@ -144,14 +157,14 @@ def request_transfer(request, payload: TransferRequestIn):
 
 @router.post("/transfers/{transfer_id}/decision")
 def transfer_decision(request, transfer_id: str, payload: TransferDecisionIn):
-    membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER)
+    membership = require_roles(request, *CUSTODY_ROLES)
     transfer = decide_transfer(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, transfer_id=transfer_id, version=payload.version, authorize=payload.authorize, rejection_reason=payload.rejection_reason)
     return {"id": str(transfer.id), "status": transfer.status, "version": transfer.version}
 
 
 @router.post("/transfers/{transfer_id}/dispatch")
 def dispatch_transfer(request, transfer_id: str, payload: TransferReceiveIn):
-    membership = membership_for(request)
+    membership = require_roles(request, *CUSTODY_ROLES)
     with transaction.atomic():
         transfer = CustodyTransfer.objects.select_for_update().filter(id=transfer_id, tenant_id=membership.institution.tenant_id).first()
         if not transfer or transfer.version != payload.version:
@@ -168,7 +181,7 @@ def dispatch_transfer(request, transfer_id: str, payload: TransferReceiveIn):
 
 @router.post("/transfers/{transfer_id}/receive")
 def receive_transfer(request, transfer_id: str, payload: TransferReceiveIn):
-    membership = membership_for(request)
+    membership = require_roles(request, *CUSTODY_ROLES)
     with transaction.atomic():
         transfer = CustodyTransfer.objects.select_for_update().select_related("script").filter(id=transfer_id, tenant_id=membership.institution.tenant_id).first()
         if not transfer or transfer.version != payload.version:

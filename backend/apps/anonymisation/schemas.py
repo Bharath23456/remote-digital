@@ -31,6 +31,7 @@ class MaskRegionIn(Schema):
 class MaskingDecisionIn(Schema):
     version: int
     notes: str = ""
+    passed: bool = True
 
 
 class ResolutionRequestIn(Schema):

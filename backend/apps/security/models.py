@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.contrib.auth.models import User
 from django.db import models
 
@@ -5,6 +7,11 @@ from apps.core.models import TenantModel, TimeStampedModel
 
 
 class SecurityPolicy(TenantModel):
+    class AIEvaluationMode(models.TextChoices):
+        DISABLED = "disabled", "No AI"
+        ASSISTIVE = "assistive", "AI assistance"
+        AUTONOMOUS = "autonomous", "Autonomous AI"
+
     session_timeout_minutes = models.PositiveIntegerField(default=30)
     maximum_concurrent_sessions = models.PositiveSmallIntegerField(default=3)
     step_up_minutes = models.PositiveSmallIntegerField(default=10)
@@ -24,6 +31,9 @@ class SecurityPolicy(TenantModel):
     evaluation_heartbeat_seconds = models.PositiveSmallIntegerField(default=15)
     evaluation_no_face_seconds = models.PositiveSmallIntegerField(default=30)
     evaluation_retention_days = models.PositiveSmallIntegerField(default=30)
+    ai_evaluation_mode = models.CharField(max_length=16, choices=AIEvaluationMode.choices, default=AIEvaluationMode.DISABLED)
+    ai_confidence_threshold = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("85.00"))
+    ai_model_name = models.CharField(max_length=80, default="admiezo-ai-v1")
     siem_webhook_ciphertext = models.TextField(blank=True)
     version = models.PositiveIntegerField(default=1)
 

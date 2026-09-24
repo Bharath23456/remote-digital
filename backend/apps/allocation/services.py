@@ -15,12 +15,28 @@ from apps.eligibility.models import EligibilityRecord
 from apps.evaluators.models import Evaluator, EvaluatorAvailability, Expertise
 from apps.phase4.services import create_notification, notification_action
 from apps.tenancy.models import Membership
+from apps.valuation.services import required_valuation_rounds
 
 from .models import AllocationPolicy, AllocationProposal, AllocationRun, Assignment, AssignmentHistory
 
 
 DEFAULT_WEIGHTS = {"subject": 15, "qualification": 10, "expertise": 15, "experience": 10, "availability": 10, "capacity": 10, "workload": 10, "deadline": 5, "performance": 10, "risk": 5}
 ACTIVE_STATUSES = [Assignment.Status.ASSIGNED, Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS, Assignment.Status.REASSIGNED]
+
+
+def next_valuation_round(script):
+    if hasattr(script, "final_mark"):
+        return None
+    results = sorted((item for item in script.valuation_results.all() if item.is_locked), key=lambda item: item.valuation_round)
+    if any(item.valuation_round != index for index, item in enumerate(results, 1)):
+        return None
+    next_round = len(results) + 1
+    required_rounds = required_valuation_rounds(script, results[0]) if results else script.paper.valuation_rounds
+    if next_round > required_rounds:
+        return None
+    if any(item.valuation_round == next_round for item in script.assignments.all()):
+        return None
+    return next_round
 
 
 def evaluator_work_history(*, tenant_id, evaluator_id):
@@ -161,11 +177,17 @@ def score_evaluator(*, tenant_id, evaluator, script, policy, projected_load, rou
 
 
 def build_plan(*, tenant_id, actor_id, paper, algorithm, valuation_round, maximum_scripts, mode):
-    if algorithm not in AllocationPolicy.Algorithm.values or not 1 <= valuation_round <= paper.valuation_rounds or not 1 <= maximum_scripts <= 5000:
+    maximum_round = max(paper.valuation_rounds, 2 if paper.valuation_rounds == 1 and paper.rules.get("second_valuation_mark_threshold") is not None else 1)
+    if algorithm not in AllocationPolicy.Algorithm.values or not 1 <= valuation_round <= maximum_round or not 1 <= maximum_scripts <= 5000:
         raise HttpError(422, "Allocation algorithm, valuation round or batch size is invalid")
     policy = _policy_for(tenant_id, paper)
-    scripts = list(Script.objects.filter(tenant_id=tenant_id, paper=paper, state__in=[Script.State.STORED, Script.State.ASSIGNED]).exclude(assignments__valuation_round=valuation_round).select_related("paper__subject", "packet__dispatch").distinct().order_by("created_at")[:maximum_scripts])
-    evaluators = list(Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE).order_by("evaluator_code"))
+    scripts = []
+    for script in Script.objects.filter(tenant_id=tenant_id, paper=paper, state__in=[Script.State.STORED, Script.State.ASSIGNED, Script.State.SUBMITTED]).select_related("paper__subject", "packet__dispatch").prefetch_related("valuation_results", "assignments", "final_mark").order_by("created_at").iterator(chunk_size=500):
+        if next_valuation_round(script) == valuation_round:
+            scripts.append(script)
+            if len(scripts) == maximum_scripts:
+                break
+    evaluators = list(Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE, is_system_ai=False).order_by("evaluator_code"))
     active_loads = defaultdict(int, dict(Assignment.objects.filter(tenant_id=tenant_id, status__in=ACTIVE_STATUSES).values_list("evaluator_id").annotate(count=Count("id"))))
     rows = []
     randomizer = secrets.SystemRandom()
@@ -247,8 +269,6 @@ def _notify_assignment(*, assignment, actor_id):
 def create_assignment(*, tenant_id, actor_id, script, evaluator, backup_evaluator, valuation_round, due_at, source, quality_score, score_breakdown, priority=3):
     if script.tenant_id != tenant_id or evaluator.tenant_id != tenant_id or (backup_evaluator and backup_evaluator.tenant_id != tenant_id):
         raise HttpError(404, "Allocation inputs were not found in this tenant")
-    if script.state not in [Script.State.STORED, Script.State.ASSIGNED]:
-        raise HttpError(409, "Only stored scripts can be allocated")
     policy = _policy_for(tenant_id, script.paper)
     prior_ids = set(Assignment.objects.filter(script=script).values_list("evaluator_id", flat=True))
     score, breakdown, blockers = score_evaluator(tenant_id=tenant_id, evaluator=evaluator, script=script, policy=policy, projected_load=Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator, status__in=ACTIVE_STATUSES).count(), round_evaluator_ids=prior_ids)
@@ -260,7 +280,11 @@ def create_assignment(*, tenant_id, actor_id, script, evaluator, backup_evaluato
             raise HttpError(409, f"Backup evaluator is blocked: {', '.join(backup_blockers)}")
     try:
         with transaction.atomic():
-            locked = Script.objects.select_for_update().get(id=script.id, tenant_id=tenant_id)
+            locked = Script.objects.select_for_update().select_related("paper").get(id=script.id, tenant_id=tenant_id)
+            if locked.state not in [Script.State.STORED, Script.State.ASSIGNED, Script.State.SUBMITTED]:
+                raise HttpError(409, "Only stored or submitted scripts can be allocated")
+            if next_valuation_round(locked) != valuation_round:
+                raise HttpError(409, "This valuation round is not required or its prior round is incomplete")
             assignment = Assignment.objects.create(tenant_id=tenant_id, script=locked, evaluator=evaluator, backup_evaluator=backup_evaluator, valuation_round=valuation_round, due_at=due_at, source=source, quality_score=quality_score or score, score_breakdown=score_breakdown or breakdown, priority=priority)
             AssignmentHistory.objects.create(tenant_id=tenant_id, assignment=assignment, action="assigned", actor_id=actor_id, to_evaluator_id=evaluator.id, snapshot=_assignment_snapshot(assignment))
             if locked.state == Script.State.STORED:
@@ -310,7 +334,7 @@ def redistribute_assignment(*, tenant_id, actor_id, assignment_id, expected_vers
                 replacement = None
         if not replacement:
             candidates = []
-            for evaluator in Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE).exclude(id=previous.id):
+            for evaluator in Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE, is_system_ai=False).exclude(id=previous.id):
                 score, breakdown, blockers = score_evaluator(tenant_id=tenant_id, evaluator=evaluator, script=assignment.script, policy=_policy_for(tenant_id, assignment.script.paper), projected_load=Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator, status__in=ACTIVE_STATUSES).count(), round_evaluator_ids={previous.id})
                 if not blockers:
                     candidates.append((score, evaluator, breakdown))

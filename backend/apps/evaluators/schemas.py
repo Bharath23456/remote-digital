@@ -1,5 +1,6 @@
 from datetime import date
 from typing import Any
+from uuid import UUID
 
 from ninja import Field, Schema
 
@@ -23,6 +24,7 @@ class EvaluatorCreateIn(Schema):
     available_to: date | None = None
     create_login: bool = True
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+    subject_ids: list[UUID] = Field(default_factory=list)
 
 
 class EvaluatorUpdateIn(Schema):
@@ -62,3 +64,16 @@ class AvailabilityIn(Schema):
     ends_on: date
     daily_capacity: int
     notes: str = ""
+
+
+class FaceCaptureIn(Schema):
+    image_base64: str
+    liveness_passed: bool = False
+    face_count: int = 1
+    quality: dict[str, Any] = Field(default_factory=dict)
+    model_version: str = "opencv-sface-v1"
+    device_fingerprint: str = ""
+
+
+class FaceAccessIn(FaceCaptureIn):
+    assignment_id: str

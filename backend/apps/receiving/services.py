@@ -34,7 +34,7 @@ def create_dispatch(*, tenant_id, actor, paper, payload):
 
 def verify_dispatch(*, tenant_id, actor, dispatch_id, version, dispatched_at=None):
     with transaction.atomic():
-        dispatch = Dispatch.objects.select_for_update().filter(id=dispatch_id, tenant_id=tenant_id).first()
+        dispatch = Dispatch.objects.select_for_update().filter(id=dispatch_id, tenant_id=tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
         if not dispatch:
             raise HttpError(404, "Dispatch not found")
         if dispatch.version != version:
@@ -58,7 +58,7 @@ def verify_dispatch(*, tenant_id, actor, dispatch_id, version, dispatched_at=Non
 
 def receive_packet(*, tenant_id, actor, packet_id, version, received_scripts, condition, handed_over_by):
     with transaction.atomic():
-        packet = Packet.objects.select_for_update().select_related("dispatch").filter(id=packet_id, tenant_id=tenant_id).first()
+        packet = Packet.objects.select_for_update().select_related("dispatch").filter(id=packet_id, tenant_id=tenant_id, dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).first()
         if not packet:
             raise HttpError(404, "Packet not found")
         if packet.version != version:
@@ -82,7 +82,7 @@ def receive_packet(*, tenant_id, actor, packet_id, version, received_scripts, co
 
 def receive_bundle(*, tenant_id, actor, bundle_id, version, received_scripts, condition):
     with transaction.atomic():
-        bundle = Bundle.objects.select_for_update().select_related("packet__dispatch").filter(id=bundle_id, tenant_id=tenant_id).first()
+        bundle = Bundle.objects.select_for_update().select_related("packet__dispatch").filter(id=bundle_id, tenant_id=tenant_id, packet__dispatch__intake_mode=Dispatch.IntakeMode.LEGACY).first()
         if not bundle:
             raise HttpError(404, "Bundle not found")
         if bundle.version != version:
@@ -105,7 +105,7 @@ def receive_bundle(*, tenant_id, actor, bundle_id, version, received_scripts, co
 
 def reconcile_dispatch(*, tenant_id, actor, dispatch_id, version):
     with transaction.atomic():
-        dispatch = Dispatch.objects.select_for_update().filter(id=dispatch_id, tenant_id=tenant_id).first()
+        dispatch = Dispatch.objects.select_for_update().filter(id=dispatch_id, tenant_id=tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
         if not dispatch:
             raise HttpError(404, "Dispatch not found")
         if dispatch.version != version:
@@ -138,7 +138,7 @@ def confirm_receipt(*, tenant_id, actor, dispatch, confirmation_type, notes):
 
 def close_dispatch(*, tenant_id, actor, dispatch_id, version):
     with transaction.atomic():
-        dispatch = Dispatch.objects.select_for_update().filter(id=dispatch_id, tenant_id=tenant_id).first()
+        dispatch = Dispatch.objects.select_for_update().filter(id=dispatch_id, tenant_id=tenant_id, intake_mode=Dispatch.IntakeMode.LEGACY).first()
         if not dispatch or dispatch.version != version:
             raise HttpError(409, "Dispatch is missing or stale")
         if dispatch.status != Dispatch.Status.RECONCILED:

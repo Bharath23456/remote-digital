@@ -7,6 +7,7 @@ const context = {
   permissions: [],
   must_change_password: false,
   enabled_modules: ["configuration", "evaluators", "receiving", "custody", "digitization", "anonymisation", "repository", "allocation", "assignment_governance", "rubrics", "evaluation", "valuation", "assessment", "operations", "services", "security", "audit", "enterprise"],
+  ai_evaluation: { mode: "disabled", confidence_threshold: 85, model_name: "admiezo-ai-v1", provider: { available: false }, available: false },
   tenants: [{ id: "northbridge", name: "Northbridge University", role: "university_admin" }],
   session: { id: "language-test", timeout_minutes: 60 },
 };
@@ -59,7 +60,7 @@ test("language menu translates the dashboard and persists the choice", async ({ 
 
   await page.getByRole("button", { name: "ಮೌಲ್ಯಮಾಪಕರ ಮಾಸ್ಟರ್", exact: true }).click();
   await expect(page.getByText("ಡಾ. ಕಾವ್ಯ ರಾವ್", { exact: true })).toBeVisible();
-  await expect(page.getByText("ನಾರ್ತ್‌ಬ್ರಿಡ್ಜ್ ವಿಶ್ವವಿದ್ಯಾಲಯ", { exact: true })).toBeVisible();
+  await expect(page.getByRole("banner").getByText("ನಾರ್ತ್‌ಬ್ರಿಡ್ಜ್ ವಿಶ್ವವಿದ್ಯಾಲಯ", { exact: true })).toBeVisible();
   await expect(page.getByText("ಕಂಪ್ಯೂಟರ್ ವಿಜ್ಞಾನ", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "ಮೌಲ್ಯಮಾಪನ ಡೆಸ್ಕ್", exact: true }).click();

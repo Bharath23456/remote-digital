@@ -10,7 +10,12 @@ from .services import create_manifest, transition_alert, verify_manifest
 
 
 router = Router(tags=["Script integrity and anti-tampering"])
-ROLES = (Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER, Membership.Role.AUDITOR)
+ROLES = (
+    Membership.Role.UNIVERSITY_ADMIN,
+    Membership.Role.EXAM_CONTROLLER,
+    Membership.Role.SCANNER_OPERATOR,
+    Membership.Role.AUDITOR,
+)
 
 
 class AlertIn(Schema):

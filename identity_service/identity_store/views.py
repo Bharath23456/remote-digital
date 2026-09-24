@@ -76,7 +76,8 @@ def create_candidate(request):
         if "institution_name" in claims:
             pii["institution"] = claims["institution_name"]
             pii["college"] = claims.get("college_name", "")
-        if any(not str(pii[key]).strip() for key in ("candidate_name", "register_number", "institution")):
+        required = ("register_number", "institution") if claims.get("purpose") == "Automated OMR intake" else ("candidate_name", "register_number", "institution")
+        if any(not str(pii[key]).strip() for key in required):
             return JsonResponse({"detail": "Candidate name, register number and institution are required"}, status=422)
         signature_image = _encrypted_image(request.FILES.get("signature_image"))
         photo_image = _encrypted_image(request.FILES.get("photo_image"))
@@ -95,6 +96,17 @@ def create_candidate(request):
             IdentityAccessLog.objects.create(tenant_id=identity.tenant_id, identity_reference=identity.identity_reference, action="create", authorization_id=claims["jti"], actor_id=claims["actor_id"], purpose=claims.get("purpose", "script registration"))
         return JsonResponse({"identity_reference": str(identity.identity_reference), "stored": True, "receipt": issue_receipt(claims)}, status=201)
     except IntegrityError:
+        if claims.get("purpose") == "Automated OMR intake":
+            existing = CandidateIdentity.objects.filter(tenant_id=claims["tenant_id"], identity_reference=claims["identity_reference"], script_id=claims["script_id"]).first()
+            expected_hash = hashlib.sha256(str(pii["register_number"]).strip().upper().encode()).hexdigest()
+            if existing and existing.register_number_hash == expected_hash:
+                try:
+                    with transaction.atomic():
+                        ConsumedAuthorization.objects.create(jti=claims["jti"])
+                        IdentityAccessLog.objects.create(tenant_id=existing.tenant_id, identity_reference=existing.identity_reference, action="create_retry", authorization_id=claims["jti"], actor_id=claims["actor_id"], purpose=claims["purpose"])
+                    return JsonResponse({"identity_reference": str(existing.identity_reference), "stored": True, "receipt": issue_receipt(claims)})
+                except IntegrityError:
+                    pass
         return JsonResponse({"detail": "Identity authorization was already used or the script is already linked"}, status=409)
     except (AuthorizationError, ValueError) as exc:
         return JsonResponse({"detail": str(exc)}, status=401 if isinstance(exc, AuthorizationError) else 400)

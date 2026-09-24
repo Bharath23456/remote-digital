@@ -20,6 +20,7 @@ from apps.evaluators import services as evaluator_services
 from apps.eligibility.api import router as eligibility_router
 from apps.identity_auth.api import router as auth_router
 from apps.receiving.api import router as receiving_router
+from apps.receiving.guided_api import router as guided_receiving_router
 from apps.receiving.models import Dispatch, ReceivingException
 from apps.repository.api import router as repository_router
 from apps.repository.models import ScriptAsset
@@ -38,6 +39,7 @@ from apps.valuation.api import router as valuation_router
 from apps.discrepancy.api import router as discrepancy_router
 from apps.integrity.api import router as integrity_router
 from apps.phase4.api import router as phase4_router
+from apps.ai_evaluation.api import router as ai_evaluation_router
 
 
 api = NinjaAPI(
@@ -53,6 +55,7 @@ api.add_router("/v1/eligibility", eligibility_router)
 api.add_router("/v1/auth", auth_router)
 api.add_router("/v1/security", security_router)
 api.add_router("/v1/receiving", receiving_router)
+api.add_router("/v1/receiving/guided", guided_receiving_router)
 api.add_router("/v1/custody", custody_router)
 api.add_router("/v1/repository", repository_router)
 api.add_router("/v1/anonymisation", anonymisation_router)
@@ -67,6 +70,7 @@ api.add_router("/v1/valuation", valuation_router)
 api.add_router("/v1/discrepancy", discrepancy_router)
 api.add_router("/v1/integrity", integrity_router)
 api.add_router("/v1/phase4", phase4_router)
+api.add_router("/v1/ai-evaluation", ai_evaluation_router)
 
 
 class EvaluatorIn(Schema):

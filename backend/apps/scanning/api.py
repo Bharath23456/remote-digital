@@ -2,7 +2,7 @@ from ninja import Router, Schema
 from ninja.errors import HttpError
 
 from apps.configuration.models import Paper
-from apps.core.authz import membership_for, require_roles
+from apps.core.authz import require_roles
 from apps.custody.models import Script
 from apps.tenancy.models import Membership
 
@@ -11,7 +11,11 @@ from .services import assign_next_batch, complete_job, create_batch, fail_job, f
 
 
 router = Router(tags=["High-speed scanning"])
-ROLES = (Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER)
+ROLES = (
+    Membership.Role.UNIVERSITY_ADMIN,
+    Membership.Role.EXAM_CONTROLLER,
+    Membership.Role.SCANNER_OPERATOR,
+)
 
 
 class ScannerIn(Schema):
@@ -61,7 +65,7 @@ class FailJobIn(Schema):
 
 @router.get("/catalog")
 def catalog(request):
-    tenant_id = membership_for(request).institution.tenant_id
+    tenant_id = require_roles(request, *ROLES).institution.tenant_id
     scanners = ScannerDevice.objects.filter(tenant_id=tenant_id).order_by("code")
     batches = ScanBatch.objects.filter(tenant_id=tenant_id).select_related("paper", "scanner").order_by("priority", "created_at")
     return {

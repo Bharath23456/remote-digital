@@ -4,7 +4,7 @@
     "groups": { "operations": "संचालन", "administration": "प्रशासन", "evaluation": "मूल्यांकन", "governance": "शासन", "platform": "प्लेटफ़ॉर्म" },
     "items": {
       "dashboard": "कमांड सेंटर", "receiving": "उत्तर-पुस्तिका प्राप्ति", "custody": "अभिरक्षा श्रृंखला", "digitization": "डिजिटलीकरण", "liveControl": "लाइव संचालन",
-      "configuration": "परीक्षा कॉन्फ़िगरेशन", "evaluators": "मूल्यांकनकर्ता मास्टर", "allocation": "आवंटन इंजन", "assignmentGovernance": "असाइनमेंट नियंत्रण", "serviceControl": "परिणाम और सेवाएँ",
+      "configuration": "परीक्षा कॉन्फ़िगरेशन", "evaluators": "मूल्यांकनकर्ता मास्टर", "allocation": "आवंटन इंजन", "assignmentGovernance": "आवंटन इतिहास", "serviceControl": "परिणाम और सेवाएँ",
       "anonymisation": "गुमनामीकरण", "repository": "उत्तर-पुस्तिका भंडार", "rubrics": "अंकन योजनाएँ", "evaluation": "मूल्यांकन डेस्क", "valuation": "मूल्यांकन समीक्षा", "assessmentControl": "आकलन नियंत्रण",
       "security": "पहुँच शासन", "tenancy": "उद्यम सेटिंग्स", "audit": "ऑडिट ट्रेल", "platformControl": "प्लेटफ़ॉर्म संचालन", "platformAdmin": "विश्वविद्यालय", "backToControlPlane": "नियंत्रण पटल पर वापस जाएँ"
     }
@@ -33,7 +33,7 @@
     "anonymisation": { "title": "अभ्यर्थी गुमनामीकरण", "description": "व्यक्तिगत जानकारी अलगाव, स्थायी मास्किंग और दोहरी-अधिकृत समाधान।" },
     "allocation": { "title": "आवंटन इंजन", "description": "क्षमता और मूल्यांकन दौर से नियंत्रित गुप्त आवंटन।" },
     "rubrics": { "title": "अंकन योजनाएँ", "description": "संस्करणबद्ध मानदंड, मार्गदर्शन, अनुमोदन और स्पष्टीकरण।" },
-    "assignmentGovernance": { "title": "असाइनमेंट शासन", "description": "गुप्त पहुँच, समवर्ती लॉक, समाप्ति और नियंत्रित कार्यप्रवाह।" },
+    "assignmentGovernance": { "title": "आवंटन इतिहास", "description": "आवंटन सिमुलेशन और मूल्यांकनकर्ता मिलान का केवल-पढ़ने योग्य रिकॉर्ड।" },
     "evaluation": { "title": "मूल्यांकन डेस्क", "description": "सुरक्षित उत्तर-पुस्तिका समीक्षा, डिजिटल टिप्पणियाँ और प्रश्नवार अंकन।" },
     "valuation": { "title": "मूल्यांकन समीक्षा", "description": "स्वतंत्र दौर तुलना, विसंगति समाधान और अंतिम अंक नियंत्रण।" },
     "assessmentControl": { "title": "आकलन नियंत्रण", "description": "मॉडरेशन, पुनर्मूल्यांकन और हस्ताक्षरित पूर्णता कार्यप्रवाह।" },
