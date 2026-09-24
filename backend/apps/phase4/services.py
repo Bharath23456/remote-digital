@@ -278,15 +278,60 @@ def sample_moderation_cases(*, tenant_id, actor_id, policy):
     return created
 
 
+def _apply_moderation_final_mark(*, tenant_id, actor_id, item):
+    authoritative = FinalMark.objects.select_for_update().filter(
+        tenant_id=tenant_id,
+        script=item.script,
+        status=FinalMark.Status.LOCKED,
+    ).first()
+    if not authoritative or authoritative.mark != item.original_mark:
+        raise HttpError(409, "The authoritative final mark changed while moderation was in progress")
+
+    previous_mark = authoritative.mark
+    calculation = dict(authoritative.calculation or {})
+    revisions = list(calculation.get("moderation", []))
+    revisions.append({"case_id": str(item.id), "original_mark": str(item.original_mark), "adjusted_mark": str(item.adjusted_mark), "reason": item.adjustment_reason})
+    calculation["moderation"] = revisions
+    authoritative.mark = item.adjusted_mark
+    authoritative.rule = FinalMark.Rule.APPROVED
+    authoritative.calculation = calculation
+    authoritative.approved_by_id = actor_id
+    authoritative.approved_at = timezone.now()
+    authoritative.locked_by_id = actor_id
+    authoritative.locked_at = timezone.now()
+    authoritative.checksum = hashlib.sha256(f"{authoritative.script_id}:{authoritative.mark}:{authoritative.rule}:{authoritative.approved_by_id}".encode()).hexdigest()
+    authoritative.version += 1
+    authoritative.save()
+
+    completion = CompletionRecord.objects.select_for_update().filter(final_mark=authoritative).first()
+    if completion:
+        completion.checks = {**(completion.checks or {}), "ready": False, "moderation_resign_required": True}
+        completion.examiner_declaration = ""
+        completion.declaration_by_id = None
+        completion.signature_digest = ""
+        completion.signed_by_id = None
+        completion.status = CompletionRecord.Status.PENDING
+        completion.version += 1
+        completion.save()
+
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="valuation.final_mark.moderated", aggregate="FinalMark", aggregate_id=authoritative.id, payload={"case_id": str(item.id), "script_id": str(item.script_id), "previous_mark": str(previous_mark), "final_mark": str(authoritative.mark), "checksum": authoritative.checksum})
+    return authoritative
+
+
 @transaction.atomic
 def transition_moderation(*, tenant_id, actor_id, case_id, expected_version, target, moderator=None, adjusted_mark=None, reason="", snapshot=None):
-    item = ModerationCase.objects.select_for_update().select_related("script__paper").filter(id=case_id, tenant_id=tenant_id).first()
+    item = ModerationCase.objects.select_for_update().select_related("script__paper", "source_result__evaluation__assignment__evaluator").filter(id=case_id, tenant_id=tenant_id).first()
     if not item:
         raise HttpError(404, "Moderation case not found")
     previous = _transition(item, target, ADMIN_TRANSITIONS, expected_version)
     if target == ModerationCase.Status.ASSIGNED:
         if not moderator:
             raise HttpError(422, "A moderator is required")
+        if moderator.status != Evaluator.Status.ACTIVE:
+            raise HttpError(409, "The moderator must be active")
+        source_evaluator = item.source_result.evaluation.assignment.evaluator
+        if source_evaluator and source_evaluator.id == moderator.id:
+            raise HttpError(409, "The original evaluator cannot moderate the same script")
         item.moderator = moderator
     if target == ModerationCase.Status.DECIDED:
         adjusted_mark = Decimal(str(adjusted_mark)) if adjusted_mark is not None else None
@@ -299,6 +344,7 @@ def transition_moderation(*, tenant_id, actor_id, case_id, expected_version, tar
     if target == ModerationCase.Status.APPROVED:
         if item.decided_by_id == actor_id:
             raise HttpError(409, "Moderator decision requires independent approval")
+        _apply_moderation_final_mark(tenant_id=tenant_id, actor_id=actor_id, item=item)
         item.approved_by_id = actor_id
     item.save()
     record_event(tenant_id=tenant_id, actor_id=actor_id, action=f"moderation.case.{target}", aggregate="ModerationCase", aggregate_id=item.id, payload={"from": previous, "script_id": str(item.script_id), "adjusted_mark": str(item.adjusted_mark) if item.adjusted_mark is not None else None})
