@@ -179,6 +179,7 @@ def _uuid(value, label):
 
 
 def _create_simple(*, model, tenant_id, actor_id, action, aggregate, values, idempotency_key=""):
+    _validate_text_lengths(model, values)
     try:
         with transaction.atomic():
             record = None
@@ -194,6 +195,13 @@ def _create_simple(*, model, tenant_id, actor_id, action, aggregate, values, ide
             return item
     except IntegrityError as exc:
         raise ConfigurationConflict(f"{aggregate} already exists") from exc
+
+
+def _validate_text_lengths(model, values):
+    for name, value in values.items():
+        field = model._meta.get_field(name)
+        if isinstance(value, str) and field.max_length and len(value) > field.max_length:
+            raise ConfigurationError(f"{name} must be at most {field.max_length} characters")
 
 
 def _record_master_revision(item, actor_id, change_type, reason=""):
@@ -499,6 +507,7 @@ def update_master(*, tenant_id, actor_id, entity, item_id, version, changes, rea
         raise ConfigurationError("Give a reason of at least 8 characters")
     if changes.get("is_active") is False and _master_dependencies(item):
         raise ConfigurationConflict("This record has active dependencies and cannot be retired")
+    _validate_text_lengths(model, changes)
     for field, value in changes.items():
         model_field = item._meta.get_field(field)
         try:

@@ -14,6 +14,7 @@ from ninja.errors import HttpError
 from apps.allocation.models import AllocationPolicy, Assignment
 from apps.configuration.models import ExamSession, Paper
 from apps.core.models import AuditEvent, OutboxEvent
+from apps.core.testing import create_operational_fixtures
 from apps.custody.models import Script
 from apps.eligibility.models import EligibilityRecord
 from apps.evaluators.models import Evaluator, Expertise
@@ -72,6 +73,7 @@ class RemainingModulesTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
         cls.admin = User.objects.get(username="admin@admiezo.local")
         cls.controller = User.objects.get(username="controller@admiezo.local")
         cls.paper = Paper.objects.get(code="CS401-A")

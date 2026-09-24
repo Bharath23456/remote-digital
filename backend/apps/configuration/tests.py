@@ -399,7 +399,7 @@ class ConfigurationWorkflowTests(TestCase):
         self.assertEqual(self.client.get("/api/v1/configuration/readiness").json()["decision"], "not_ready")
 
     def test_calendar_overlap_requires_independent_one_use_exception(self):
-        payload = {"label": "2027-calendar-exception", "starts_on": "2027-01-01", "ends_on": "2027-12-31"}
+        payload = {"label": "2027-exception", "starts_on": "2027-01-01", "ends_on": "2027-12-31"}
         self.assertEqual(self.post("/api/v1/configuration/academic-years", payload).status_code, 409)
         requested = self.post("/api/v1/configuration/calendar-exceptions", {"entity": "academic_year", "starts_on": payload["starts_on"], "ends_on": payload["ends_on"], "reason": "University approved parallel academic calendar"})
         self.assertEqual(requested.status_code, 200)
@@ -408,8 +408,26 @@ class ConfigurationWorkflowTests(TestCase):
         approved = self.authenticated_client("controller@admiezo.local").post(f"/api/v1/configuration/calendar-exceptions/{exception_id}/decision", data=json.dumps({"approve": True}), content_type="application/json")
         self.assertEqual(approved.status_code, 200)
         self.assertEqual(self.post("/api/v1/configuration/academic-years", payload).status_code, 200)
-        second = {**payload, "label": "same-window-second-use"}
+        second = {**payload, "label": "same-window-reuse"}
         self.assertEqual(self.post("/api/v1/configuration/academic-years", second).status_code, 409)
+
+    def test_oversized_master_labels_are_rejected_without_writes(self):
+        before = AcademicYear.objects.count()
+        response = self.post("/api/v1/configuration/academic-years", {
+            "label": "x" * 21, "starts_on": "2035-01-01", "ends_on": "2035-12-31",
+        })
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(AcademicYear.objects.count(), before)
+        year = AcademicYear.objects.first()
+        original_label, original_version = year.label, year.version
+        response = self.client.patch(
+            f"/api/v1/configuration/masters/academic-years/{year.id}",
+            data=json.dumps({"version": year.version, "changes": {"label": "x" * 21}, "reason": "Validate label length"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 422)
+        year.refresh_from_db()
+        self.assertEqual((year.label, year.version), (original_label, original_version))
 
     def test_linked_session_create_retry_is_idempotent(self):
         year = AcademicYear.objects.first()
