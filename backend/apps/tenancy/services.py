@@ -36,7 +36,7 @@ DEFAULT_MODULES = [
     "configuration", "evaluators", "receiving", "custody", "digitization",
     "anonymisation", "repository", "allocation", "assignment_governance",
     "rubrics", "evaluation", "valuation", "assessment", "operations",
-    "security", "audit", "enterprise",
+    "services", "security", "audit", "enterprise",
 ]
 
 

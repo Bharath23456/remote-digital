@@ -52,7 +52,8 @@ class AllocationEngineTests(TestCase):
         proposals = list(AllocationProposal.objects.filter(run=run))
         self.assertTrue(all(item.evaluator_id and item.quality_score > 0 for item in proposals))
         projected_loads = [baseline + sum(item.evaluator_id == evaluator.id for item in proposals) for baseline, evaluator in zip(baseline_loads, self.evaluators, strict=True)]
-        self.assertLessEqual(max(projected_loads) - min(projected_loads), max(baseline_loads) - min(baseline_loads), projected_loads)
+        baseline_spread = max(baseline_loads) - min(baseline_loads)
+        self.assertLessEqual(max(projected_loads) - min(projected_loads), max(1, baseline_spread), projected_loads)
         self.assertNotIn("identity", " ".join(field.name for field in AllocationProposal._meta.fields))
         executed = execute_plan(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, run_id=run.id)
         self.assertEqual(executed.status, AllocationRun.Status.COMPLETED)

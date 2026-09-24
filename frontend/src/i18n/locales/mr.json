@@ -4,7 +4,7 @@
     "groups": { "operations": "कार्यप्रणाली", "administration": "प्रशासन", "evaluation": "मूल्यमापन", "governance": "शासन", "platform": "प्लॅटफॉर्म" },
     "items": {
       "dashboard": "कमांड सेंटर", "receiving": "उत्तरपत्रिका प्राप्ती", "custody": "ताबा साखळी", "digitization": "डिजिटायझेशन", "liveControl": "थेट कार्यप्रणाली",
-      "configuration": "परीक्षा संरचना", "evaluators": "मूल्यमापक मास्टर", "allocation": "वाटप इंजिन", "assignmentGovernance": "वाटप इतिहास",
+      "configuration": "परीक्षा संरचना", "evaluators": "मूल्यमापक मास्टर", "allocation": "वाटप इंजिन", "assignmentGovernance": "वाटप इतिहास", "serviceControl": "निकाल आणि सेवा",
       "anonymisation": "अनामिकीकरण", "repository": "उत्तरपत्रिका भांडार", "rubrics": "गुणांकन योजना", "evaluation": "मूल्यमापन डेस्क", "valuation": "मूल्यांकन पुनरावलोकन", "assessmentControl": "असेसमेंट नियंत्रण",
       "security": "प्रवेश शासन", "tenancy": "एंटरप्राइझ सेटिंग्ज", "audit": "ऑडिट ट्रेल", "platformControl": "प्लॅटफॉर्म कार्यप्रणाली", "platformAdmin": "विद्यापीठे", "backToControlPlane": "नियंत्रण पटलावर परत जा"
     }
@@ -28,6 +28,7 @@
     "valuation": { "title": "मूल्यांकन पुनरावलोकन", "description": "स्वतंत्र फेरी तुलना, विसंगती निराकरण आणि अंतिम गुण नियंत्रण." },
     "assessmentControl": { "title": "असेसमेंट नियंत्रण", "description": "मॉडरेशन, पुनर्मूल्यांकन आणि स्वाक्षरीकृत पूर्णता कार्यप्रवाह." },
     "liveControl": { "title": "थेट कार्यप्रणाली", "description": "सुरक्षित दूरस्थ मूल्यमापन, देखरेख, पुनर्प्राप्ती आणि केंद्र कार्यप्रणाली." },
+    "serviceControl": { "title": "निकाल आणि विद्यार्थी सेवा", "description": "मानधन आणि संरक्षित विद्यार्थी उत्तरपत्रिका सेवा." },
     "platformControl": { "title": "प्लॅटफॉर्म कार्यप्रणाली", "description": "फॉरेन्सिक्स, एकत्रीकरण, इंटरफेस भाषा आणि पुनर्प्राप्ती सराव." },
     "security": { "title": "प्रवेश शासन", "description": "प्रमाणीकरण सत्रे, किमान विशेषाधिकार आणि संरक्षित कार्यप्रणाली." },
     "tenancy": { "title": "एंटरप्राइझ सेटिंग्ज", "description": "विद्यापीठ श्रेणी, संस्थात्मक धोरणे आणि स्वतंत्र नोंदी." },

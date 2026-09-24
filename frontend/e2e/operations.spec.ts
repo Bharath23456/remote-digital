@@ -107,6 +107,7 @@ test("administrator can open every implemented operational module", async ({ pag
     ["Valuation review", "Valuation review"],
     ["Assessment control", "Assessment control"],
     ["Live operations", "Live operations"],
+    ["Results & services", "Results & student services"],
     ["Access governance", "Access governance"],
     ["Enterprise settings", "Enterprise settings"],
   ];
@@ -188,6 +189,7 @@ test("remaining modules expose focused operational workspaces", async ({ page })
   const groups: [string, string[]][] = [
     ["Assessment control", ["Moderation", "Revaluation", "Completion control"]],
     ["Live operations", ["Remote security", "Live monitoring", "Productivity & workload", "Issue management", "Runtime recovery", "Notifications", "Centres & camps", "Low-bandwidth continuity"]],
+    ["Results & services", ["Remuneration", "Student services"]],
   ];
   for (const [navigation, tabs] of groups) {
     await navigate(page, navigation);

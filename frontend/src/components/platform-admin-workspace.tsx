@@ -19,7 +19,7 @@ const MODULES = [
   ["custody", "Chain of custody"], ["digitization", "Digitization"], ["anonymisation", "Anonymization"],
   ["repository", "Script repository"], ["allocation", "Allocation"], ["assignment_governance", "Allocation history"],
   ["rubrics", "Marking schemes"], ["evaluation", "Evaluation"], ["valuation", "Valuation"],
-  ["assessment", "Assessment control"], ["operations", "Live operations"],
+  ["assessment", "Assessment control"], ["operations", "Live operations"], ["services", "Results and services"],
   ["security", "Security governance"], ["audit", "Audit and forensics"], ["enterprise", "University hierarchy"],
 ];
 

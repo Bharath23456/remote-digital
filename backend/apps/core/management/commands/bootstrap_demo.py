@@ -25,6 +25,7 @@ from apps.phase4.models import (
     OperationalIssue,
     RecoveryDrill,
     RecoveryPlan,
+    RemunerationRule,
     RuntimeIncident,
 )
 from apps.receiving.models import Dispatch, Packet, ReceivingException
@@ -351,6 +352,12 @@ class Command(BaseCommand):
                 paper=paper,
                 defaults={"sample_percentage": Decimal("10"), "sampling_modes": ["percentage_random", "failed_script", "high_score"], "high_score_threshold": Decimal("85"), "mandatory": paper.moderation_required},
             )
+        RemunerationRule.objects.update_or_create(
+            tenant_id=tenant_id,
+            paper=papers[0],
+            centre=None,
+            defaults={"per_script": Decimal("28"), "per_page": Decimal("0.50"), "per_question": Decimal("1.25"), "moderator_rate": Decimal("45"), "revaluation_rate": Decimal("90"), "slabs": [{"minimum": 100, "bonus": 500}], "minimum_payment": Decimal("500"), "maximum_payment": Decimal("25000"), "tax_percentage": Decimal("10")},
+        )
         # Keep Live Operations empty until real operational activity creates records.
         # Remove only the known demo centre/readiness/camp records from older bootstrap runs.
         demo_centres = CentreProfile.objects.filter(

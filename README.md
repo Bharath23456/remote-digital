@@ -46,6 +46,8 @@ Role and module assignment is administrator-only. Do not put administrator or te
 - 35 Notification Management
 - 36 Evaluation Centres and Camps
 - 37 Offline and Low-Bandwidth Continuity
+- 38 Evaluator Remuneration
+- 39 Student Script Services
 - 40 Data Security and Access Governance
 - 41 Script Integrity and Anti-Tampering
 - 42 Audit and Forensics
@@ -339,6 +341,18 @@ Browser security has a deliberate boundary: standard web APIs can observe displa
 - Retries queued progress against the latest optimistic version when connectivity returns.
 - Never stores marks, script images, identity data, authentication material, or storage URLs in browser persistence.
 
+### Module 38: Evaluator Remuneration
+
+- Defines paper or centre rates per script, page, question, moderation, revaluation, and configured slabs.
+- Calculates payable units only from submitted assignments with verified attendance.
+- Applies minimums, maximums, bonuses, and tax deductions with decimal-safe arithmetic.
+- Requires independent approval before payment and tracks payment reference and reconciliation.
+
+### Module 39: Student Script Services
+
+- Accepts copy or revaluation requests using an opaque identity-service reference.
+- Verifies finalized custody, locked final mark, and masked evaluation assets before approval.
+- Provides watermarked, non-downloadable page access through signed URLs valid for five minutes.
 - Tracks approval, expiry, availability, and access count without placing candidate PII in evaluation-core.
 
 ### Module 42: Audit and Forensics
@@ -417,6 +431,7 @@ This module allows one deployment to serve multiple institutions while keeping t
 9. Modules 23 and 25 compare blind valuation rounds and reconcile differences.
 10. Modules 24, 27, and 28 moderate, revalue, verify, sign, and release the final result under independent authorization.
 11. Modules 29 and 31 through 37 protect and monitor live evaluation operations, workload, issues, notifications, centres, and interrupted connectivity.
+12. Modules 38 and 39 calculate evaluator remuneration and provide expiring student script services.
 13. Modules 42, 46, 48, and 49 supply forensic evidence, controlled result integration, interface locale preferences, and tested recovery plans. Module 40 applies security governance throughout, while each domain write creates audit and outbox records in the same transaction.
 
 ## Docker development

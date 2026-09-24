@@ -109,6 +109,8 @@ class TenantEntitlementMiddleware:
         ("/api/v1/phase4/issues", "operations"),
         ("/api/v1/phase4/notifications", "operations"),
         ("/api/v1/phase4/centres", "operations"),
+        ("/api/v1/phase4/remuneration/", "services"),
+        ("/api/v1/phase4/student/", "services"),
     )
 
     def __init__(self, get_response):
