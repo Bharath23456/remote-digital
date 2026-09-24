@@ -298,6 +298,10 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .row-menu summary::-webkit-details-marker { display: none; }
 .row-menu summary svg { width: 17px; }
 .row-menu > div { position: absolute; z-index: 12; top: 36px; right: 0; display: grid; width: 190px; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: white; box-shadow: 0 14px 34px rgba(18, 34, 27, .15); }
+.evaluator-table-wrap { overflow: visible; }
+.evaluator-table-wrap tbody tr:has(.row-menu[open]) { position: relative; z-index: 20; }
+.evaluator-table-wrap .row-menu[open] { z-index: 30; }
+.evaluator-table-wrap .row-menu > div { max-height: min(360px, calc(100vh - 32px)); overflow-y: auto; }
 .row-menu > div button { display: flex; align-items: center; gap: 9px; border: 0; border-bottom: 1px solid var(--line); background: white; padding: 9px 12px; cursor: pointer; text-align: left; }
 .row-menu > div button:last-child { border-bottom: 0; }
 .row-menu > div button:hover { background: var(--subtle); }

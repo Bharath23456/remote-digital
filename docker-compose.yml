@@ -152,6 +152,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  photocopy-expiry-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "manage.py", "expire_photocopy_requests", "--forever", "--interval", "60"]
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-only-change-before-deploy}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DATABASE_URL: postgresql://admiezo:${POSTGRES_PASSWORD:-admiezo-local}@db:5432/admiezo
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      LOAD_DEMO_DATA: "false"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
   identity-service:
     build:
       context: .

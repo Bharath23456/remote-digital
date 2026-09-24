@@ -598,6 +598,7 @@ class StudentScriptRequest(TenantModel):
         DELIVERED = "delivered", "Delivered to university"
         EXPIRED = "expired", "Expired"
         REJECTED = "rejected", "Rejected"
+        REVOKED = "revoked", "Revoked"
 
     class ReleaseMode(models.TextChoices):
         MASKED = "masked", "Masked student copy"
@@ -616,6 +617,8 @@ class StudentScriptRequest(TenantModel):
     approved_by_id = models.PositiveBigIntegerField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
     delivery_reference = models.CharField(max_length=160, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    reissued_from = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="reissues")
 
     source_system = models.CharField(max_length=50, default="admiezo", db_index=True)
     external_application_id = models.CharField(max_length=128, blank=True, db_index=True)
