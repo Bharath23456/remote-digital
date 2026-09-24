@@ -317,7 +317,7 @@ def execute_plan(*, tenant_id, actor_id, run_id):
     return current
 
 
-def redistribute_assignment(*, tenant_id, actor_id, assignment_id, expected_version, reason, replacement_evaluator=None):
+def redistribute_assignment(*, tenant_id, actor_id, assignment_id, expected_version, reason, replacement_evaluator=None, assign_backup=False):
     if len(reason.strip()) < 8:
         raise HttpError(422, "A specific redistribution reason is required")
     with transaction.atomic():
@@ -344,8 +344,17 @@ def redistribute_assignment(*, tenant_id, actor_id, assignment_id, expected_vers
             score, replacement, breakdown = candidates[0]
             assignment.quality_score = score
             assignment.score_breakdown = breakdown
+        backup = None
+        if assign_backup:
+            candidates = []
+            for evaluator in Evaluator.objects.filter(tenant_id=tenant_id, status=Evaluator.Status.ACTIVE, is_system_ai=False).exclude(id__in=[previous.id, replacement.id]):
+                score, _, blockers = score_evaluator(tenant_id=tenant_id, evaluator=evaluator, script=assignment.script, policy=_policy_for(tenant_id, assignment.script.paper), projected_load=Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator, status__in=ACTIVE_STATUSES).count(), round_evaluator_ids={previous.id, replacement.id})
+                if not blockers:
+                    candidates.append((score, evaluator))
+            if candidates:
+                backup = max(candidates, key=lambda item: item[0])[1]
         assignment.evaluator = replacement
-        assignment.backup_evaluator = None
+        assignment.backup_evaluator = backup
         assignment.status = Assignment.Status.REASSIGNED
         assignment.version += 1
         assignment.save()

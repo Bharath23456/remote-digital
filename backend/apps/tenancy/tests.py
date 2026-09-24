@@ -6,6 +6,7 @@ from django.test import Client, TestCase, override_settings
 
 from apps.core.models import AuditEvent, OutboxEvent
 from apps.ai_evaluation.models import AIProviderConfiguration
+from apps.ai_evaluation.provider import AdmiezoAIError
 from apps.evaluators.models import Evaluator
 from apps.security.crypto import decrypt_secret
 from apps.security.models import SecurityPolicy
@@ -174,6 +175,28 @@ class InstitutionHierarchyTests(TestCase):
         university_row = next(item for item in platform.get("/api/v1/enterprise/control-plane").json()["universities"] if item["id"] == tenant_id)
         self.assertTrue(university_row["ai_provider"]["configured"])
         self.assertNotIn("api_key", university_row["ai_provider"])
+
+        with patch("apps.ai_evaluation.provider.AdmiezoAIClient.validate_model") as validate_model:
+            updated = platform.patch(
+                f"/api/v1/enterprise/tenants/{tenant_id}",
+                data=json.dumps({"version": account.version, "ai_model_name": "models/provider-custom"}),
+                content_type="application/json",
+            )
+        self.assertEqual(updated.status_code, 200)
+        validate_model.assert_called_with("models/provider-custom")
+        policy.refresh_from_db()
+        self.assertEqual(policy.ai_model_name, "models/provider-custom")
+        account.refresh_from_db()
+        with patch("apps.ai_evaluation.provider.AdmiezoAIClient.validate_model", side_effect=AdmiezoAIError("Unsupported AI model")):
+            unsupported = platform.patch(
+                f"/api/v1/enterprise/tenants/{tenant_id}",
+                data=json.dumps({"version": account.version, "ai_model_name": "unsupported-model"}),
+                content_type="application/json",
+            )
+        self.assertEqual(unsupported.status_code, 422)
+        self.assertIn("Unsupported AI model", unsupported.json()["detail"])
+        policy.refresh_from_db()
+        self.assertEqual(policy.ai_model_name, "models/provider-custom")
 
         disabled = platform.patch(
             f"/api/v1/enterprise/tenants/{tenant_id}",

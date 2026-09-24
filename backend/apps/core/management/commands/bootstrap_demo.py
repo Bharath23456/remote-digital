@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
 from apps.allocation.models import Assignment
@@ -302,49 +303,36 @@ class Command(BaseCommand):
         demo_script_ids = list(dict.fromkeys(demo_script_ids))
 
         if demo_script_ids:
-            ProcessingRun.objects.filter(
-                tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
-            ).delete()
-            ScanJob.objects.filter(
-                tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
-            ).delete()
-            Assignment.objects.filter(
-                tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
-            ).delete()
-            ScriptAsset.objects.filter(
-                tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
-            ).delete()
-            CustodyEvent.objects.filter(
-                tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
-            ).delete()
-            Script.objects.filter(
-                tenant_id=tenant_id,
-                id__in=demo_script_ids,
-            ).delete()
+            for script_id in demo_script_ids:
+                try:
+                    # Keep all records for a script if another workflow protects it.
+                    with transaction.atomic():
+                        ProcessingRun.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
+                        ScanJob.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
+                        Assignment.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
+                        ScriptAsset.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
+                        CustodyEvent.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
+                        Script.objects.filter(tenant_id=tenant_id, id=script_id).delete()
+                except ProtectedError:
+                    self.stdout.write(f"Preserved demo script {script_id}: referenced by another workflow")
 
         ScanBatch.objects.filter(
             tenant_id=tenant_id,
             reference__in=["SCAN-DEMO-QUEUED", "SCAN-DEMO-COMPLETE"],
         ).delete()
 
-        demo_dispatches = Dispatch.objects.filter(
+        demo_dispatch_ids = list(Dispatch.objects.filter(
             tenant_id=tenant_id,
             reference__in=demo_dispatch_refs,
-        )
-        ReceivingException.objects.filter(
-            tenant_id=tenant_id,
-            dispatch__in=demo_dispatches,
-        ).delete()
-        Packet.objects.filter(
-            tenant_id=tenant_id,
-            dispatch__in=demo_dispatches,
-        ).delete()
-        demo_dispatches.delete()
+        ).values_list("id", flat=True))
+        for dispatch_id in demo_dispatch_ids:
+            try:
+                with transaction.atomic():
+                    ReceivingException.objects.filter(tenant_id=tenant_id, dispatch_id=dispatch_id).delete()
+                    Packet.objects.filter(tenant_id=tenant_id, dispatch_id=dispatch_id).delete()
+                    Dispatch.objects.filter(tenant_id=tenant_id, id=dispatch_id).delete()
+            except ProtectedError:
+                self.stdout.write(f"Preserved demo dispatch {dispatch_id}: referenced by another workflow")
 
         for paper in papers:
             ModerationPolicy.objects.update_or_create(
@@ -360,20 +348,22 @@ class Command(BaseCommand):
         )
         # Keep Live Operations empty until real operational activity creates records.
         # Remove only the known demo centre/readiness/camp records from older bootstrap runs.
-        demo_centres = CentreProfile.objects.filter(
+        demo_centre_ids = list(CentreProfile.objects.filter(
             tenant_id=tenant_id,
             code="NBU-CENTRAL",
-        )
-        EvaluationCamp.objects.filter(
-            tenant_id=tenant_id,
-            centre__in=demo_centres,
-            name="November 2026 Central Evaluation Camp",
-        ).delete()
-        CentreReadiness.objects.filter(
-            tenant_id=tenant_id,
-            centre__in=demo_centres,
-        ).delete()
-        demo_centres.delete()
+        ).values_list("id", flat=True))
+        for centre_id in demo_centre_ids:
+            try:
+                with transaction.atomic():
+                    EvaluationCamp.objects.filter(
+                        tenant_id=tenant_id,
+                        centre_id=centre_id,
+                        name="November 2026 Central Evaluation Camp",
+                    ).delete()
+                    CentreReadiness.objects.filter(tenant_id=tenant_id, centre_id=centre_id).delete()
+                    CentreProfile.objects.filter(tenant_id=tenant_id, id=centre_id).delete()
+            except ProtectedError:
+                self.stdout.write(f"Preserved demo centre {centre_id}: referenced by another workflow")
 
         IntegrationEndpoint.objects.update_or_create(
             tenant_id=tenant_id,
