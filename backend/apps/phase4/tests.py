@@ -11,11 +11,12 @@ from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from ninja.errors import HttpError
 
-from apps.allocation.models import Assignment
+from apps.allocation.models import AllocationPolicy, Assignment
 from apps.configuration.models import ExamSession, Paper
 from apps.core.models import AuditEvent, OutboxEvent
 from apps.custody.models import Script
-from apps.evaluators.models import Evaluator
+from apps.eligibility.models import EligibilityRecord
+from apps.evaluators.models import Evaluator, Expertise
 from apps.evaluators.services import enroll_face_template, verify_evaluator_access
 from apps.identity_auth.models import AccessSession
 from apps.marking.models import Evaluation
@@ -345,6 +346,29 @@ class RemainingModulesTests(TestCase):
         previous_assignment = Assignment.objects.get(id=previous_assignment.id)
         evaluator = Evaluator.objects.filter(tenant_id=self.tenant_id, status=Evaluator.Status.ACTIVE).exclude(id=previous_assignment.evaluator_id).first()
         self.assertIsNotNone(evaluator)
+        policy, _ = AllocationPolicy.objects.get_or_create(tenant_id=self.tenant_id, paper=script.paper)
+        Expertise.objects.update_or_create(
+            tenant_id=self.tenant_id,
+            evaluator=evaluator,
+            subject=script.paper.subject,
+            defaults={"level": policy.minimum_expertise_level, "verified": True, "years_experience": evaluator.years_experience},
+        )
+        eligibility, _ = EligibilityRecord.objects.update_or_create(
+            tenant_id=self.tenant_id,
+            evaluator=evaluator,
+            subject=script.paper.subject,
+            defaults={
+                "status": EligibilityRecord.Status.ELIGIBLE,
+                "qualification_ok": True,
+                "experience_ok": True,
+                "institution_ok": True,
+                "expertise_ok": True,
+                "has_conflict": False,
+                "is_debarred": False,
+                "is_blacklisted": False,
+                "expires_on": timezone.localdate() + timedelta(days=90),
+            },
+        )
 
         script.state = Script.State.MASKED
         script.save(update_fields=["state", "updated_at"])
@@ -367,6 +391,12 @@ class RemainingModulesTests(TestCase):
         item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.APPROVED)
         with self.assertRaises(HttpError):
             transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.ASSIGNED, evaluator=previous_assignment.evaluator)
+        eligibility.status = EligibilityRecord.Status.INELIGIBLE
+        eligibility.save(update_fields=["status", "updated_at"])
+        with self.assertRaises(HttpError):
+            transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.ASSIGNED, evaluator=evaluator)
+        eligibility.status = EligibilityRecord.Status.ELIGIBLE
+        eligibility.save(update_fields=["status", "updated_at"])
         item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.ASSIGNED, evaluator=evaluator)
         self.assertEqual(item.assignment.source, "revaluation")
         self.assertEqual(item.assignment.evaluator_id, evaluator.id)
@@ -378,9 +408,33 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(item.mark_difference, Decimal("6.00"))
         item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.DECIDED)
         self.assertEqual(item.final_mark, Decimal("78.00"))
+        authoritative = FinalMark.objects.get(id=item.original_final_mark_id)
+        original_checksum = authoritative.checksum
+        original_version = authoritative.version
+        completion = CompletionRecord.objects.create(
+            tenant_id=self.tenant_id,
+            script=script,
+            final_mark=authoritative,
+            checks={"ready": True},
+            examiner_declaration="Original result declaration",
+            declaration_by_id=self.admin.id,
+            signature_digest="9" * 64,
+            signed_by_id=self.admin.id,
+            status=CompletionRecord.Status.SIGNED,
+        )
         item = transition_revaluation(tenant_id=self.tenant_id, actor_id=self.controller.id, request_id=item.id, expected_version=item.version, target=item.Status.CLOSED)
         self.assertEqual(item.status, item.Status.CLOSED)
+        authoritative.refresh_from_db()
+        completion.refresh_from_db()
+        self.assertEqual(authoritative.mark, Decimal("78.00"))
+        self.assertEqual(authoritative.version, original_version + 1)
+        self.assertNotEqual(authoritative.checksum, original_checksum)
+        self.assertEqual(authoritative.calculation["revaluations"][-1]["request_id"], str(item.id))
+        self.assertEqual(completion.status, CompletionRecord.Status.PENDING)
+        self.assertEqual(completion.signature_digest, "")
+        self.assertTrue(completion.checks["revaluation_resign_required"])
         self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(item.id), action="revaluation.closed").exists())
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(authoritative.id), action="valuation.final_mark.revalued").exists())
 
     def test_remuneration_uses_completed_work_and_independent_approval(self):
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id).select_related("evaluator").first()
