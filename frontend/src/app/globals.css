@@ -1036,3 +1036,34 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .flag-question-row .flag-question { width: 100%; justify-content: center; }
 .quick-comments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .quick-comments button { border: 1px solid #d7ded9; border-radius: 999px; background: white; padding: 7px 11px; color: #53696d; cursor: pointer; font-size: 11px; font-weight: 750; }
+
+/* Document toolbar visibility: keep icon size, improve contrast only */
+.viewer-toolbar .tool-group {
+  border-color: #9aa9a1;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 41, 44, .14);
+}
+.viewer-toolbar .tool-group button {
+  border: 1px solid #9aa9a1;
+  background: #ffffff;
+  color: #0b2f35;
+}
+.viewer-toolbar .tool-group button:hover,
+.viewer-toolbar .tool-group button.active {
+  border-color: #006b55;
+  background: #dff3ec;
+  color: #004b3c;
+}
+.viewer-toolbar .tool-group button:focus-visible {
+  outline: 3px solid rgba(0, 107, 85, .35);
+  outline-offset: 2px;
+}
+.viewer-toolbar .tool-group label {
+  color: #0b2f35;
+  font-weight: 900;
+}
+.viewer-toolbar .tool-group span {
+  background: #dff3ec;
+  color: #005846;
+  font-weight: 900;
+}
