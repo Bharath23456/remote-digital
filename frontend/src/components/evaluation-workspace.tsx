@@ -1348,59 +1348,6 @@ export function EvaluationWorkspace({
       setSaving(false);
     }
   }
-  async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
-    if (
-      !annotationTool ||
-      !marking ||
-      !manifest ||
-      !lockToken ||
-      security.paused
-    )
-      return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const rawX = Math.max(
-      0,
-      Math.min(1, (event.clientX - rect.left) / rect.width),
-    );
-    const rawY = Math.max(
-      0,
-      Math.min(1, (event.clientY - rect.top) / rect.height),
-    );
-    let geometry: Record<string, number | { x: number; y: number }[]>;
-    if (annotationTool === "arrow") {
-      geometry = {
-        points: [
-          { x: Math.max(0, rawX - 0.08), y: rawY },
-          { x: rawX, y: rawY },
-        ],
-      };
-    } else {
-      const isSymbol = ["tick", "cross"].includes(annotationTool);
-      const boxX = isSymbol ? rawX : Math.max(0, rawX - 0.06);
-      const boxY = isSymbol ? rawY : Math.max(0, rawY - 0.025);
-      const width = isSymbol
-        ? 0.04
-        : Math.min(0.12, 1 - Math.max(0, rawX - 0.06));
-      const height = isSymbol
-        ? 0.04
-        : Math.min(0.05, 1 - Math.max(0, rawY - 0.025));
-      const safe = getSafeAnnotationPosition(
-        { x: boxX, y: boxY, width, height },
-        pageAnnotations
-          .filter((item) => item.kind !== "arrow")
-          .map((item) => ({
-            x: Number(item.geometry.x || 0),
-            y: Number(item.geometry.y || 0),
-            width: Number(item.geometry.width || 0.04),
-            height: Number(item.geometry.height || 0.04),
-          })),
-        15 / rect.height,
-      );
-      geometry = isSymbol
-        ? { x: safe.x, y: safe.y }
-        : { x: safe.x, y: safe.y, width, height };
-    }
-
   const pointFromEvent = (
     event: { clientX: number; clientY: number },
     rect: DOMRect,
@@ -2525,6 +2472,7 @@ function AIAssistPanel({
       )}
     </aside>
   );
+}
 
 function geometryStyle(geometry: {
   x: number;
