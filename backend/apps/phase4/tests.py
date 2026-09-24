@@ -497,3 +497,22 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(acknowledge.status_code, 200)
         self.assertEqual(acknowledge.json()["status"], StudentScriptRequest.Status.DELIVERED)
         self.assertTrue(AuditEvent.objects.filter(aggregate_id=request_id, action="student.copy.delivered").exists())
+
+    def test_photocopy_expiry_worker_closes_release_window(self):
+        item = create_student_request(
+            tenant_id=self.tenant_id,
+            actor_id=self.admin.id,
+            identity_reference="STUDENT-EXPIRY-001",
+            script=self.phase4_script,
+            purpose="copy",
+        )
+        item.status = StudentScriptRequest.Status.APPROVED
+        item.expires_at = timezone.now() - timedelta(minutes=1)
+        item.save(update_fields=["status", "expires_at"])
+
+        call_command("expire_photocopy_requests")
+
+        item.refresh_from_db()
+        self.assertEqual(item.status, StudentScriptRequest.Status.EXPIRED)
+        self.assertFalse(item.download_allowed)
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(item.id), action="student.copy.expired").exists())
