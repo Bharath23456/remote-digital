@@ -6,6 +6,26 @@ import django.db.models.deletion
 from django.db import migrations, models
 
 
+REMOVED_RESULT_SERVICE_MODELS = (
+    "RemunerationRule",
+    "RemunerationStatement",
+    "StudentScriptRequest",
+)
+
+
+def restore_removed_result_service_tables(apps, schema_editor):
+    """Repair databases that ran the short-lived destructive Phase 4 migration."""
+    existing_tables = set(schema_editor.connection.introspection.table_names())
+
+    for model_name in REMOVED_RESULT_SERVICE_MODELS:
+        model = apps.get_model("phase4", model_name)
+        table_name = model._meta.db_table
+        if table_name in existing_tables:
+            continue
+        schema_editor.create_model(model)
+        existing_tables.add(table_name)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -13,6 +33,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(
+            restore_removed_result_service_tables,
+            reverse_code=migrations.RunPython.noop,
+        ),
         migrations.AddField(
             model_name="revaluationrequest",
             name="remarking_notes",
