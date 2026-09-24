@@ -541,7 +541,7 @@ def catalog(request, section: str = ""):
         "camps": _serialize(EvaluationCamp.objects.filter(tenant_id=tenant_id), ["centre_id", "session_id", "name", "starts_at", "ends_at", "status", "performance", "version"]),
         "remuneration_rules": _serialize(RemunerationRule.objects.filter(tenant_id=tenant_id), ["paper_id", "centre_id", "per_script", "per_page", "per_question", "minimum_payment", "maximum_payment", "tax_percentage", "version"]),
         "statements": _serialize(RemunerationStatement.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["evaluator_id", "session_id", "units", "gross_amount", "deductions", "net_amount", "status", "payment_reference", "version"]),
-        "student_requests": _serialize(StudentScriptRequest.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["script_id", "purpose", "release_mode", "source_system", "external_application_id", "eligibility", "status", "expires_at", "download_allowed", "access_count", "delivered_at", "delivery_reference", "created_at", "received_at", "version"]),
+        "student_requests": _serialize(StudentScriptRequest.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["script_id", "purpose", "release_mode", "source_system", "external_application_id", "eligibility", "status", "expires_at", "download_allowed", "access_count", "delivered_at", "delivery_reference", "revoked_at", "reissued_from_id", "created_at", "received_at", "version"]),
         "evidence_packages": _serialize(EvidencePackage.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["script_id", "purpose", "event_count", "digest", "status", "version"]),
         "integrations": _serialize(IntegrationEndpoint.objects.filter(tenant_id=tenant_id), ["name", "kind", "base_url", "authentication", "rate_limit_per_minute", "webhook_events", "status", "version"]),
         "university_api_keys": _serialize(UniversityApiKey.objects.filter(tenant_id=tenant_id), ["name", "key_prefix", "source_system", "integration_endpoint_id", "scopes", "status", "last_used_at", "version"]),
@@ -988,11 +988,44 @@ def student_decision(request, request_id: str, payload: DecisionIn):
     return {"id": str(item.id), "status": item.status, "expires_at": item.expires_at.isoformat() if item.expires_at else None, "version": item.version}
 
 
+@router.post("/student/requests/{request_id}/action")
+def student_request_action(request, request_id: str, payload: VersionActionIn):
+    tenant_id = _tenant(request, *ADMIN_ROLES)
+    with transaction.atomic():
+        item = StudentScriptRequest.objects.select_for_update().filter(id=request_id, tenant_id=tenant_id).first()
+        if not item or item.version != payload.version:
+            raise HttpError(409, "Photocopy request is missing or stale")
+        if payload.target == "revoke":
+            if item.status not in {StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE}:
+                raise HttpError(409, "Only an approved or available photocopy can be revoked")
+            item.status = StudentScriptRequest.Status.REVOKED
+            item.revoked_at = timezone.now()
+            item.download_allowed = False
+            item.version += 1
+            item.save(update_fields=["status", "revoked_at", "download_allowed", "version", "updated_at"])
+            record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="student.copy.revoked", aggregate="StudentScriptRequest", aggregate_id=item.id, payload={"reason": payload.reason})
+            return {"id": str(item.id), "status": item.status, "version": item.version}
+        if payload.target == "reissue":
+            if item.status not in {StudentScriptRequest.Status.EXPIRED, StudentScriptRequest.Status.REVOKED}:
+                raise HttpError(409, "Only an expired or revoked photocopy can be reissued")
+            replacement = create_student_request(tenant_id=tenant_id, actor_id=request.auth.id, identity_reference=item.identity_reference, script=item.script, purpose=item.purpose, source_system=item.source_system, external_payload={**item.external_payload, "reissued_from": str(item.id)}, integration_endpoint=item.integration_endpoint, release_mode=item.release_mode)
+            replacement.reissued_from = item
+            replacement.save(update_fields=["reissued_from", "updated_at"])
+            record_event(tenant_id=tenant_id, actor_id=request.auth.id, action="student.copy.reissued", aggregate="StudentScriptRequest", aggregate_id=replacement.id, payload={"reissued_from": str(item.id), "reason": payload.reason})
+            return {"id": str(replacement.id), "reissued_from": str(item.id), "status": replacement.status, "version": replacement.version}
+        raise HttpError(422, "Unsupported photocopy action")
+
+
 @router.get("/student/requests/{request_id}/viewer")
 def student_viewer(request, request_id: str):
     tenant_id = _tenant(request, *READ_ROLES)
     item = StudentScriptRequest.objects.filter(id=request_id, tenant_id=tenant_id, status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE]).select_related("script").first()
-    if not item or not item.expires_at or item.expires_at <= timezone.now():
+    if not item:
+        raise HttpError(404, "Student access is unavailable or expired")
+    if not item.expires_at:
+        raise HttpError(404, "Student access is unavailable or expired")
+    if item.expires_at <= timezone.now():
+        StudentScriptRequest.objects.filter(id=item.id, status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE]).update(status=StudentScriptRequest.Status.EXPIRED, download_allowed=False, version=item.version + 1, updated_at=timezone.now())
         raise HttpError(404, "Student access is unavailable or expired")
     assets = ScriptAsset.objects.filter(tenant_id=tenant_id, script=item.script, kind=ScriptAsset.Kind.EVALUATION, deleted_at__isnull=True).order_by("page_number")
     pages = []
@@ -1017,7 +1050,10 @@ def official_portal_photocopy_download(request, request_id: str):
         source_system=api_key.source_system,
         status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE, StudentScriptRequest.Status.DELIVERED],
     ).select_related("script").first()
-    if not item or not item.expires_at or item.expires_at <= timezone.now():
+    if not item or not item.expires_at:
+        raise HttpError(404, "Approved photocopy delivery is unavailable or expired")
+    if item.expires_at <= timezone.now():
+        StudentScriptRequest.objects.filter(id=item.id, status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE]).update(status=StudentScriptRequest.Status.EXPIRED, download_allowed=False, version=item.version + 1, updated_at=timezone.now())
         raise HttpError(404, "Approved photocopy delivery is unavailable or expired")
     if item.release_mode == StudentScriptRequest.ReleaseMode.UNMASKED_IDENTITY:
         raise HttpError(409, "Unmasked identity delivery is blocked until a verified evaluator-redacted release asset exists")
@@ -1041,6 +1077,13 @@ def official_portal_photocopy_acknowledge(request, request_id: str, payload: Del
         item = StudentScriptRequest.objects.select_for_update().filter(id=request_id, tenant_id=api_key.tenant_id, source_system=api_key.source_system, status__in=[StudentScriptRequest.Status.APPROVED, StudentScriptRequest.Status.AVAILABLE]).first()
         if not item:
             raise HttpError(404, "Photocopy request is not ready for acknowledgement")
+        if not item.expires_at or item.expires_at <= timezone.now():
+            item.status = StudentScriptRequest.Status.EXPIRED
+            item.download_allowed = False
+            item.version += 1
+            item.save(update_fields=["status", "download_allowed", "version", "updated_at"])
+            record_event(tenant_id=item.tenant_id, actor_id=0, action="student.copy.expired", aggregate="StudentScriptRequest", aggregate_id=item.id, payload={"expired_at": item.expires_at.isoformat() if item.expires_at else None})
+            raise HttpError(404, "Photocopy request is expired")
         reference = payload.delivery_reference.strip()
         if len(reference) < 3:
             raise HttpError(422, "A delivery reference is required")

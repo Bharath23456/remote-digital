@@ -37,6 +37,8 @@ from .models import (
     ControlledAuthorization,
     EvidencePackage,
     IntegrationEndpoint,
+    ModerationCase,
+    ModerationPolicy,
     NotificationDelivery,
     ProctoringReview,
     RecoveryDrill,
@@ -61,10 +63,12 @@ from .services import (
     notification_action,
     queue_handover,
     request_authorization,
+    sample_moderation_cases,
     seal_evidence,
     set_locale,
     transition_centre,
     transition_drill,
+    transition_moderation,
     transition_handover,
     transition_statement,
     transition_revaluation,
@@ -576,3 +580,85 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(acknowledge.status_code, 200)
         self.assertEqual(acknowledge.json()["status"], StudentScriptRequest.Status.DELIVERED)
         self.assertTrue(AuditEvent.objects.filter(aggregate_id=request_id, action="student.copy.delivered").exists())
+
+    def test_photocopy_expiry_worker_closes_release_window(self):
+        item = create_student_request(
+            tenant_id=self.tenant_id,
+            actor_id=self.admin.id,
+            identity_reference="STUDENT-EXPIRY-001",
+            script=self.phase4_script,
+            purpose="copy",
+        )
+        item.status = StudentScriptRequest.Status.APPROVED
+        item.expires_at = timezone.now() - timedelta(minutes=1)
+        item.save(update_fields=["status", "expires_at"])
+
+        call_command("expire_photocopy_requests")
+
+        item.refresh_from_db()
+        self.assertEqual(item.status, StudentScriptRequest.Status.EXPIRED)
+        self.assertFalse(item.download_allowed)
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(item.id), action="student.copy.expired").exists())
+
+    def test_moderation_end_to_end_applies_approved_mark(self):
+        moderator = Evaluator.objects.filter(tenant_id=self.tenant_id, status=Evaluator.Status.ACTIVE).exclude(id=self.evaluator.id).first()
+        self.assertIsNotNone(moderator)
+        policy, _ = ModerationPolicy.objects.update_or_create(tenant_id=self.tenant_id, paper=self.paper, defaults={"sample_percentage": Decimal("100"), "sampling_modes": ["percentage_random"], "mandatory": True})
+        case = sample_moderation_cases(tenant_id=self.tenant_id, actor_id=self.admin.id, policy=policy)[0]
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.admin.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.ASSIGNED, moderator=moderator)
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.admin.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.REVIEW)
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.admin.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.DECIDED, adjusted_mark=Decimal("74"), reason="Question evidence supports the revised total mark.", snapshot={"source": "moderator_review"})
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.controller.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.APPROVED)
+        final_mark = FinalMark.objects.get(script=self.phase4_script)
+        self.assertEqual(case.status, ModerationCase.Status.APPROVED)
+        self.assertEqual(final_mark.mark, Decimal("74"))
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(final_mark.id), action="valuation.final_mark.moderated").exists())
+
+    def test_moderation_samples_multi_round_final_mark_once(self):
+        second_evaluator = Evaluator.objects.filter(
+            tenant_id=self.tenant_id,
+            status=Evaluator.Status.ACTIVE,
+        ).exclude(id=self.evaluator.id).first()
+        self.assertIsNotNone(second_evaluator)
+        second_assignment = Assignment.objects.create(
+            tenant_id=self.tenant_id,
+            script=self.phase4_script,
+            evaluator=second_evaluator,
+            valuation_round=2,
+            status=Assignment.Status.SUBMITTED,
+            due_at=timezone.now() + timedelta(days=3),
+        )
+        second_evaluation = Evaluation.objects.create(
+            tenant_id=self.tenant_id,
+            assignment=second_assignment,
+            scheme=MarkingScheme.objects.filter(tenant_id=self.tenant_id, paper=self.paper).first(),
+            status=Evaluation.Status.LOCKED,
+            total_marks=Decimal("80"),
+            checksum="6" * 64,
+        )
+        ValuationResult.objects.create(
+            tenant_id=self.tenant_id,
+            evaluation=second_evaluation,
+            script=self.phase4_script,
+            valuation_round=2,
+            total_marks=Decimal("80"),
+            checksum="7" * 64,
+            is_locked=True,
+            locked_by_id=self.controller.id,
+            locked_at=timezone.now(),
+        )
+        final_mark = FinalMark.objects.get(script=self.phase4_script)
+        final_mark.mark = Decimal("76")
+        final_mark.calculation = {"totals": ["72", "80"], "rule": "average"}
+        final_mark.save(update_fields=["mark", "calculation", "updated_at"])
+        policy, _ = ModerationPolicy.objects.update_or_create(
+            tenant_id=self.tenant_id,
+            paper=self.paper,
+            defaults={"sample_percentage": Decimal("100"), "sampling_modes": ["percentage_random"], "mandatory": True},
+        )
+
+        cases = sample_moderation_cases(tenant_id=self.tenant_id, actor_id=self.admin.id, policy=policy)
+
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(ModerationCase.objects.filter(script=self.phase4_script).count(), 1)
+        self.assertEqual(cases[0].original_mark, Decimal("76"))
