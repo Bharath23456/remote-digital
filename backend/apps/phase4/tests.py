@@ -613,3 +613,52 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(case.status, ModerationCase.Status.APPROVED)
         self.assertEqual(final_mark.mark, Decimal("74"))
         self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(final_mark.id), action="valuation.final_mark.moderated").exists())
+
+    def test_moderation_samples_multi_round_final_mark_once(self):
+        second_evaluator = Evaluator.objects.filter(
+            tenant_id=self.tenant_id,
+            status=Evaluator.Status.ACTIVE,
+        ).exclude(id=self.evaluator.id).first()
+        self.assertIsNotNone(second_evaluator)
+        second_assignment = Assignment.objects.create(
+            tenant_id=self.tenant_id,
+            script=self.phase4_script,
+            evaluator=second_evaluator,
+            valuation_round=2,
+            status=Assignment.Status.SUBMITTED,
+            due_at=timezone.now() + timedelta(days=3),
+        )
+        second_evaluation = Evaluation.objects.create(
+            tenant_id=self.tenant_id,
+            assignment=second_assignment,
+            scheme=MarkingScheme.objects.filter(tenant_id=self.tenant_id, paper=self.paper).first(),
+            status=Evaluation.Status.LOCKED,
+            total_marks=Decimal("80"),
+            checksum="6" * 64,
+        )
+        ValuationResult.objects.create(
+            tenant_id=self.tenant_id,
+            evaluation=second_evaluation,
+            script=self.phase4_script,
+            valuation_round=2,
+            total_marks=Decimal("80"),
+            checksum="7" * 64,
+            is_locked=True,
+            locked_by_id=self.controller.id,
+            locked_at=timezone.now(),
+        )
+        final_mark = FinalMark.objects.get(script=self.phase4_script)
+        final_mark.mark = Decimal("76")
+        final_mark.calculation = {"totals": ["72", "80"], "rule": "average"}
+        final_mark.save(update_fields=["mark", "calculation", "updated_at"])
+        policy, _ = ModerationPolicy.objects.update_or_create(
+            tenant_id=self.tenant_id,
+            paper=self.paper,
+            defaults={"sample_percentage": Decimal("100"), "sampling_modes": ["percentage_random"], "mandatory": True},
+        )
+
+        cases = sample_moderation_cases(tenant_id=self.tenant_id, actor_id=self.admin.id, policy=policy)
+
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(ModerationCase.objects.filter(script=self.phase4_script).count(), 1)
+        self.assertEqual(cases[0].original_mark, Decimal("76"))

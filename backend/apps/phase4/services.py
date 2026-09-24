@@ -252,25 +252,46 @@ def save_moderation_policy(*, tenant_id, actor_id, paper, values, expected_versi
 @transaction.atomic
 def sample_moderation_cases(*, tenant_id, actor_id, policy):
     created = []
-    results = ValuationResult.objects.filter(tenant_id=tenant_id, script__paper=policy.paper, is_locked=True).select_related("script__paper")
+    results = ValuationResult.objects.filter(
+        tenant_id=tenant_id,
+        script__paper=policy.paper,
+        is_locked=True,
+    ).select_related("script__paper").order_by("script_id", "valuation_round")
+    final_marks = {
+        item.script_id: item
+        for item in FinalMark.objects.filter(
+            tenant_id=tenant_id,
+            script__paper=policy.paper,
+            status=FinalMark.Status.LOCKED,
+        )
+    }
+    processed_scripts = set()
     for result in results:
+        if result.script_id in processed_scripts:
+            continue
+        processed_scripts.add(result.script_id)
+        final_mark = final_marks.get(result.script_id)
+        if not final_mark:
+            continue
         reasons = []
         score = int(hashlib.sha256(str(result.script_id).encode()).hexdigest()[:8], 16) % 10_000 / 100
         if policy.mandatory or score < float(policy.sample_percentage):
             reasons.append("percentage_random")
-        if policy.high_score_threshold is not None and result.total_marks >= policy.high_score_threshold:
+        if policy.high_score_threshold is not None and final_mark.mark >= policy.high_score_threshold:
             reasons.append("high_score")
-        if policy.low_score_threshold is not None and result.total_marks <= policy.low_score_threshold:
+        if policy.low_score_threshold is not None and final_mark.mark <= policy.low_score_threshold:
             reasons.append("low_score")
-        if "failed_script" in policy.sampling_modes and result.total_marks < result.script.paper.pass_marks:
+        if "failed_script" in policy.sampling_modes and final_mark.mark < result.script.paper.pass_marks:
             reasons.append("failed_script")
         if not reasons:
+            continue
+        if ModerationCase.objects.filter(tenant_id=tenant_id, script=result.script).exists():
             continue
         item, was_created = ModerationCase.objects.get_or_create(
             tenant_id=tenant_id,
             script=result.script,
             source_result=result,
-            defaults={"sample_reasons": sorted(set(reasons)), "original_mark": result.total_marks},
+            defaults={"sample_reasons": sorted(set(reasons)), "original_mark": final_mark.mark},
         )
         if was_created:
             created.append(item)
