@@ -1,13 +1,16 @@
 from datetime import timedelta
 from decimal import Decimal
 import hashlib
+import importlib
 
+from django.apps import apps as django_apps
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.db import connection
 import json
 from unittest.mock import patch
 
-from django.test import Client, TestCase, override_settings
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -67,6 +70,26 @@ from .services import (
     transition_revaluation,
     transition_workload,
 )
+
+
+class ResultServiceMigrationRepairTests(TransactionTestCase):
+    def test_recreates_removed_tables_and_is_idempotent(self):
+        migration = importlib.import_module(
+            "apps.phase4.migrations.0006_university_api_keys_official_requests"
+        )
+        models = [
+            django_apps.get_model("phase4", model_name)
+            for model_name in migration.REMOVED_RESULT_SERVICE_MODELS
+        ]
+
+        with connection.schema_editor() as schema_editor:
+            for model in reversed(models):
+                schema_editor.delete_model(model)
+            migration.restore_removed_result_service_tables(django_apps, schema_editor)
+            migration.restore_removed_result_service_tables(django_apps, schema_editor)
+
+        table_names = set(connection.introspection.table_names())
+        self.assertTrue(all(model._meta.db_table in table_names for model in models))
 
 
 class RemainingModulesTests(TestCase):
