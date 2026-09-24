@@ -9,11 +9,12 @@ from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
 from ninja.errors import HttpError
 
-from apps.allocation.models import Assignment
+from apps.allocation.models import AllocationPolicy, Assignment
 from apps.core.services import record_event
 from apps.custody.models import Script
 from apps.discrepancy.models import DiscrepancyCase
-from apps.evaluators.models import Evaluator
+from apps.eligibility.models import EligibilityRecord
+from apps.evaluators.models import Evaluator, Expertise
 from apps.integrity.models import IntegrityAlert
 from apps.marking.models import Evaluation
 from apps.repository.models import ScriptAsset
@@ -113,6 +114,121 @@ def _transition(item, target, transitions, expected_version):
     item.status = target
     item.version += 1
     return previous
+
+
+def _validate_revaluation_evaluator(*, tenant_id, evaluator, script):
+    if evaluator.tenant_id != tenant_id or evaluator.status != Evaluator.Status.ACTIVE:
+        raise HttpError(409, "Only an active evaluator from this university can receive revaluation work")
+
+    policy = AllocationPolicy.objects.filter(tenant_id=tenant_id, paper=script.paper).first()
+    minimum_experience = policy.minimum_experience_years if policy else 2
+    minimum_expertise = policy.minimum_expertise_level if policy else 2
+    eligibility = EligibilityRecord.objects.filter(
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+        subject=script.paper.subject,
+    ).first()
+    expertise = Expertise.objects.filter(
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+        subject=script.paper.subject,
+        verified=True,
+        level__gte=minimum_expertise,
+    ).first()
+    eligible = (
+        eligibility
+        and eligibility.status == EligibilityRecord.Status.ELIGIBLE
+        and eligibility.expires_on
+        and eligibility.expires_on > timezone.localdate()
+        and not eligibility.has_conflict
+        and not eligibility.is_debarred
+        and not eligibility.is_blacklisted
+        and evaluator.years_experience >= minimum_experience
+        and expertise
+    )
+    if not eligible:
+        raise HttpError(409, "Evaluator is not eligible for this subject under the allocation policy")
+
+    allow_same_institution = policy.allow_same_institution if policy else False
+    if not allow_same_institution:
+        source_centre = script.packet.dispatch.source_centre.strip().casefold()
+        if source_centre and source_centre == evaluator.institution_name.strip().casefold():
+            raise HttpError(409, "Evaluator has a source-institution conflict for this script")
+
+
+def _apply_revaluation_final_mark(*, tenant_id, actor_id, item):
+    authoritative = (
+        FinalMark.objects
+        .select_for_update()
+        .filter(
+            id=item.original_final_mark_id,
+            tenant_id=tenant_id,
+            status=FinalMark.Status.LOCKED,
+        )
+        .first()
+    )
+    if not authoritative or authoritative.mark != item.original_mark_snapshot:
+        raise HttpError(409, "The authoritative final mark changed while revaluation was in progress")
+
+    previous_mark = authoritative.mark
+    previous_checksum = authoritative.checksum
+    calculation = dict(authoritative.calculation or {})
+    revisions = list(calculation.get("revaluations", []))
+    revisions.append({
+        "request_id": str(item.id),
+        "request_type": item.request_type,
+        "result_id": str(item.new_result_id),
+        "rule": item.rule,
+        "original_mark": str(item.original_mark_snapshot),
+        "new_mark": str(item.new_mark),
+        "final_mark": str(item.final_mark),
+    })
+    calculation["revaluations"] = revisions
+
+    authoritative.mark = item.final_mark
+    authoritative.rule = FinalMark.Rule.APPROVED
+    authoritative.calculation = calculation
+    authoritative.approved_by_id = actor_id
+    authoritative.approved_at = timezone.now()
+    authoritative.locked_by_id = actor_id
+    authoritative.locked_at = timezone.now()
+    authoritative.checksum = hashlib.sha256(
+        f"{authoritative.script_id}:{authoritative.mark}:{authoritative.rule}:{authoritative.approved_by_id}".encode()
+    ).hexdigest()
+    authoritative.version += 1
+    authoritative.save()
+
+    completion = CompletionRecord.objects.select_for_update().filter(final_mark=authoritative).first()
+    if completion:
+        completion.checks = {
+            **(completion.checks or {}),
+            "ready": False,
+            "revaluation_resign_required": True,
+        }
+        completion.examiner_declaration = ""
+        completion.declaration_by_id = None
+        completion.signature_digest = ""
+        completion.signed_by_id = None
+        completion.status = CompletionRecord.Status.PENDING
+        completion.version += 1
+        completion.save()
+
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="valuation.final_mark.revalued",
+        aggregate="FinalMark",
+        aggregate_id=authoritative.id,
+        payload={
+            "revaluation_request_id": str(item.id),
+            "script_id": str(item.script_id),
+            "previous_mark": str(previous_mark),
+            "final_mark": str(authoritative.mark),
+            "previous_checksum": previous_checksum,
+            "checksum": authoritative.checksum,
+        },
+    )
+    return authoritative
 
 
 @transaction.atomic
@@ -354,7 +470,7 @@ def transition_revaluation(
 ):
     item = (
         RevaluationRequest.objects
-        .select_for_update()
+        .select_for_update(of=("self",))
         .select_related(
             "script__paper",
             "assigned_evaluator",
@@ -386,8 +502,11 @@ def transition_revaluation(
         if not evaluator:
             raise HttpError(422, "An independent evaluator is required")
 
-        if getattr(evaluator, "status", None) != "active":
-            raise HttpError(409, "Only an active evaluator can receive revaluation work")
+        _validate_revaluation_evaluator(
+            tenant_id=tenant_id,
+            evaluator=evaluator,
+            script=item.script,
+        )
 
         if item.assignment_id:
             raise HttpError(409, "This revaluation request is already assigned")
@@ -512,6 +631,11 @@ def transition_revaluation(
                 409,
                 "Revaluation must have a final mark before closing",
             )
+        _apply_revaluation_final_mark(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            item=item,
+        )
         item.closed_by_id = actor_id
 
     elif target == RevaluationRequest.Status.REJECTED:
