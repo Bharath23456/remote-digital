@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from apps.core.testing import create_operational_fixtures
 from django.test import TestCase
 from django.utils import timezone
 from ninja.errors import HttpError
@@ -17,6 +18,7 @@ class AssignmentLockTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def test_same_access_session_can_resume_but_another_session_is_blocked(self):
         assignment = Assignment.objects.exclude(status=Assignment.Status.SUBMITTED).select_related("evaluator").first()

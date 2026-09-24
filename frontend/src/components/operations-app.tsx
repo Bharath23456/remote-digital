@@ -3,7 +3,7 @@
 import {
   AlertTriangle, Archive, ArrowUpRight, BookOpenCheck, Boxes, Check,
   ChevronRight, ClipboardCheck, FileCheck2, FileSearch, Files, Fingerprint, Gauge, History,
-  EyeOff, KeyRound, LayoutDashboard, LogOut, Menu, Network, RefreshCw, ShieldCheck, SlidersHorizontal,
+  Eye, EyeOff, KeyRound, LayoutDashboard, LogOut, Menu, Network, RefreshCw, ShieldCheck, SlidersHorizontal,
   UserRoundCheck, Users, X, ScanLine, ScrollText, GitCompareArrows, Workflow, ServerCog, BrainCircuit,
 } from "lucide-react";
 import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -182,6 +182,7 @@ function formatValue(value: unknown) {
 function Login({ onSuccess, notice }: { onSuccess: () => void; notice?: string }) {
   const [email, setEmail] = useState("admin@admiezo.local");
   const [password, setPassword] = useState("ChangeMe123!");
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -272,7 +273,7 @@ function Login({ onSuccess, notice }: { onSuccess: () => void; notice?: string }
     <section className="login-form-wrap"><form className="login-form" onSubmit={mfaEnrollment ? enrollMfa : mfaRequired ? verifyMfa : submit}>
       <h2>{mfaEnrollment ? "Set up authenticator" : mfaRequired ? "Verify it’s you" : "Welcome back"}</h2><p>{mfaEnrollment ? "Scan this QR code with your authenticator app, then enter its six-digit code." : mfaRequired ? "Enter the six-digit code from your authenticator." : "Sign in to the evaluation control room."}</p>
       {!mfaRequired && !mfaEnrollment && <><label className="field"><span>Email address</span><input type="email" autoComplete="username" value={email} onChange={(event) => { loginEdited.current = true; setEmail(event.target.value); }} required /></label>
-        <label className="field"><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => { loginEdited.current = true; setPassword(event.target.value); }} required /></label></>}
+        <label className="field"><span>Password</span><div style={{ position: "relative" }}><input type={showPassword ? "text" : "password"} autoComplete="current-password" value={password} onChange={(event) => { loginEdited.current = true; setPassword(event.target.value); }} required style={{ paddingRight: "2.75rem" }} /><button type="button" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? "Hide password" : "Show password"} title={showPassword ? "Hide password" : "Show password"} style={{ position: "absolute", right: "0.75rem", top: "50%", transform: "translateY(-50%)", border: "none", background: "transparent", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label></>}
       {mfaRequired && <label className="field"><span>Authenticator code</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} minLength={6} maxLength={6} required autoFocus /></label>}
       {mfaEnrollment && <div className="totp-setup login-totp-setup"><QRCodeSVG value={mfaEnrollment.provisioning_uri} size={164} level="M" /><div><span>Manual setup key</span><code>{mfaEnrollment.secret}</code><label className="field"><span>Six-digit code</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} minLength={6} maxLength={6} required autoFocus /></label></div></div>}
       {(error || notice) && <div className="form-error" role="alert">{error || notice}</div>}

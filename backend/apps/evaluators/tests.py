@@ -2,6 +2,7 @@ import json
 from unittest.mock import patch
 
 from django.core.management import call_command
+from apps.core.testing import create_operational_fixtures
 from django.test import Client, TestCase
 
 from apps.allocation.models import Assignment
@@ -15,6 +16,7 @@ class EvaluatorManagementTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
 
     def setUp(self):
         self.client = Client()

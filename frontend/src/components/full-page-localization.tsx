@@ -196,6 +196,9 @@ function translateInputValue(input: HTMLInputElement, language: LanguageCode) {
     else input.setAttribute("type", originalType);
     if (original.inputMode === null) input.removeAttribute("inputmode");
     else input.setAttribute("inputmode", original.inputMode);
+    if (localizable && input.value !== original.output && input.value !== original.source) {
+      original.source = input.value;
+    }
     original.output = input.value;
     return;
   }

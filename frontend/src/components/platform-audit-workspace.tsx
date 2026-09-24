@@ -27,21 +27,22 @@ export function PlatformAuditWorkspace({ refreshToken = 0 }: { refreshToken?: nu
     try {
       const response = await csrfFetch("/api/v1/enterprise/control-plane/audit?limit=200", { signal });
       const body = await response.json().catch(() => []);
+      if (signal?.aborted) return;
       if (!response.ok) throw new Error(body.detail || "Could not load the platform audit trail");
       setRows(body as AuditRow[]);
       setError("");
       if (showNotice) setNotice("Audit trail reloaded and updated with the most recent immutable actions.");
     } catch (reason) {
-      if (reason instanceof Error && reason.name !== "AbortError") setError(reason.message);
+      if (!signal?.aborted && reason instanceof Error && reason.name !== "AbortError") setError(reason.message);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadAudit(controller.signal, refreshToken > 0);
-    return () => controller.abort();
+    const timer = window.setTimeout(() => void loadAudit(controller.signal, refreshToken > 0), 0);
+    return () => { window.clearTimeout(timer); controller.abort(); };
   }, [loadAudit, refreshToken]);
 
   useEffect(() => {
