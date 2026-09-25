@@ -9,7 +9,7 @@ from django.db import transaction
 from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
-from apps.allocation.models import Assignment
+from apps.allocation.models import Assignment, AssignmentHistory
 from apps.assignment.models import AssignmentGovernancePolicy
 from apps.configuration.models import AcademicYear, ExamSession, Paper, Programme, Question, Subject, Term, Regulation
 from apps.custody.models import CustodyEvent, Script
@@ -24,10 +24,14 @@ from apps.phase4.models import (
     ModerationPolicy,
     NotificationDelivery,
     OperationalIssue,
+    PresenceSecurityEvent,
+    ProctoringEvidence,
+    ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
     RemunerationRule,
     RuntimeIncident,
+    SecureEvaluationSession,
 )
 from apps.receiving.models import Dispatch, Packet, ReceivingException
 from apps.repository.models import ScriptAsset
@@ -309,6 +313,14 @@ class Command(BaseCommand):
                     with transaction.atomic():
                         ProcessingRun.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
                         ScanJob.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
+                        assignment_ids = Assignment.objects.filter(
+                            tenant_id=tenant_id,
+                            script_id=script_id,
+                        ).values_list("id", flat=True)
+                        AssignmentHistory.objects.filter(
+                            tenant_id=tenant_id,
+                            assignment_id__in=assignment_ids,
+                        ).delete()
                         Assignment.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
                         ScriptAsset.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
                         CustodyEvent.objects.filter(tenant_id=tenant_id, script_id=script_id).delete()
@@ -361,6 +373,7 @@ class Command(BaseCommand):
                         name="November 2026 Central Evaluation Camp",
                     ).delete()
                     CentreReadiness.objects.filter(tenant_id=tenant_id, centre_id=centre_id).delete()
+                    RemunerationRule.objects.filter(tenant_id=tenant_id, centre_id=centre_id).delete()
                     CentreProfile.objects.filter(tenant_id=tenant_id, id=centre_id).delete()
             except ProtectedError:
                 self.stdout.write(f"Preserved demo centre {centre_id}: referenced by another workflow")

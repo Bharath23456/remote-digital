@@ -252,25 +252,46 @@ def save_moderation_policy(*, tenant_id, actor_id, paper, values, expected_versi
 @transaction.atomic
 def sample_moderation_cases(*, tenant_id, actor_id, policy):
     created = []
-    results = ValuationResult.objects.filter(tenant_id=tenant_id, script__paper=policy.paper, is_locked=True).select_related("script__paper")
+    results = ValuationResult.objects.filter(
+        tenant_id=tenant_id,
+        script__paper=policy.paper,
+        is_locked=True,
+    ).select_related("script__paper").order_by("script_id", "valuation_round")
+    final_marks = {
+        item.script_id: item
+        for item in FinalMark.objects.filter(
+            tenant_id=tenant_id,
+            script__paper=policy.paper,
+            status=FinalMark.Status.LOCKED,
+        )
+    }
+    processed_scripts = set()
     for result in results:
+        if result.script_id in processed_scripts:
+            continue
+        processed_scripts.add(result.script_id)
+        final_mark = final_marks.get(result.script_id)
+        if not final_mark:
+            continue
         reasons = []
         score = int(hashlib.sha256(str(result.script_id).encode()).hexdigest()[:8], 16) % 10_000 / 100
         if policy.mandatory or score < float(policy.sample_percentage):
             reasons.append("percentage_random")
-        if policy.high_score_threshold is not None and result.total_marks >= policy.high_score_threshold:
+        if policy.high_score_threshold is not None and final_mark.mark >= policy.high_score_threshold:
             reasons.append("high_score")
-        if policy.low_score_threshold is not None and result.total_marks <= policy.low_score_threshold:
+        if policy.low_score_threshold is not None and final_mark.mark <= policy.low_score_threshold:
             reasons.append("low_score")
-        if "failed_script" in policy.sampling_modes and result.total_marks < result.script.paper.pass_marks:
+        if "failed_script" in policy.sampling_modes and final_mark.mark < result.script.paper.pass_marks:
             reasons.append("failed_script")
         if not reasons:
+            continue
+        if ModerationCase.objects.filter(tenant_id=tenant_id, script=result.script).exists():
             continue
         item, was_created = ModerationCase.objects.get_or_create(
             tenant_id=tenant_id,
             script=result.script,
             source_result=result,
-            defaults={"sample_reasons": sorted(set(reasons)), "original_mark": result.total_marks},
+            defaults={"sample_reasons": sorted(set(reasons)), "original_mark": final_mark.mark},
         )
         if was_created:
             created.append(item)
@@ -278,15 +299,60 @@ def sample_moderation_cases(*, tenant_id, actor_id, policy):
     return created
 
 
+def _apply_moderation_final_mark(*, tenant_id, actor_id, item):
+    authoritative = FinalMark.objects.select_for_update().filter(
+        tenant_id=tenant_id,
+        script=item.script,
+        status=FinalMark.Status.LOCKED,
+    ).first()
+    if not authoritative or authoritative.mark != item.original_mark:
+        raise HttpError(409, "The authoritative final mark changed while moderation was in progress")
+
+    previous_mark = authoritative.mark
+    calculation = dict(authoritative.calculation or {})
+    revisions = list(calculation.get("moderation", []))
+    revisions.append({"case_id": str(item.id), "original_mark": str(item.original_mark), "adjusted_mark": str(item.adjusted_mark), "reason": item.adjustment_reason})
+    calculation["moderation"] = revisions
+    authoritative.mark = item.adjusted_mark
+    authoritative.rule = FinalMark.Rule.APPROVED
+    authoritative.calculation = calculation
+    authoritative.approved_by_id = actor_id
+    authoritative.approved_at = timezone.now()
+    authoritative.locked_by_id = actor_id
+    authoritative.locked_at = timezone.now()
+    authoritative.checksum = hashlib.sha256(f"{authoritative.script_id}:{authoritative.mark}:{authoritative.rule}:{authoritative.approved_by_id}".encode()).hexdigest()
+    authoritative.version += 1
+    authoritative.save()
+
+    completion = CompletionRecord.objects.select_for_update().filter(final_mark=authoritative).first()
+    if completion:
+        completion.checks = {**(completion.checks or {}), "ready": False, "moderation_resign_required": True}
+        completion.examiner_declaration = ""
+        completion.declaration_by_id = None
+        completion.signature_digest = ""
+        completion.signed_by_id = None
+        completion.status = CompletionRecord.Status.PENDING
+        completion.version += 1
+        completion.save()
+
+    record_event(tenant_id=tenant_id, actor_id=actor_id, action="valuation.final_mark.moderated", aggregate="FinalMark", aggregate_id=authoritative.id, payload={"case_id": str(item.id), "script_id": str(item.script_id), "previous_mark": str(previous_mark), "final_mark": str(authoritative.mark), "checksum": authoritative.checksum})
+    return authoritative
+
+
 @transaction.atomic
 def transition_moderation(*, tenant_id, actor_id, case_id, expected_version, target, moderator=None, adjusted_mark=None, reason="", snapshot=None):
-    item = ModerationCase.objects.select_for_update().select_related("script__paper").filter(id=case_id, tenant_id=tenant_id).first()
+    item = ModerationCase.objects.select_for_update().select_related("script__paper", "source_result__evaluation__assignment__evaluator").filter(id=case_id, tenant_id=tenant_id).first()
     if not item:
         raise HttpError(404, "Moderation case not found")
     previous = _transition(item, target, ADMIN_TRANSITIONS, expected_version)
     if target == ModerationCase.Status.ASSIGNED:
         if not moderator:
             raise HttpError(422, "A moderator is required")
+        if moderator.status != Evaluator.Status.ACTIVE:
+            raise HttpError(409, "The moderator must be active")
+        source_evaluator = item.source_result.evaluation.assignment.evaluator
+        if source_evaluator and source_evaluator.id == moderator.id:
+            raise HttpError(409, "The original evaluator cannot moderate the same script")
         item.moderator = moderator
     if target == ModerationCase.Status.DECIDED:
         adjusted_mark = Decimal(str(adjusted_mark)) if adjusted_mark is not None else None
@@ -299,6 +365,7 @@ def transition_moderation(*, tenant_id, actor_id, case_id, expected_version, tar
     if target == ModerationCase.Status.APPROVED:
         if item.decided_by_id == actor_id:
             raise HttpError(409, "Moderator decision requires independent approval")
+        _apply_moderation_final_mark(tenant_id=tenant_id, actor_id=actor_id, item=item)
         item.approved_by_id = actor_id
     item.save()
     record_event(tenant_id=tenant_id, actor_id=actor_id, action=f"moderation.case.{target}", aggregate="ModerationCase", aggregate_id=item.id, payload={"from": previous, "script_id": str(item.script_id), "adjusted_mark": str(item.adjusted_mark) if item.adjusted_mark is not None else None})
@@ -826,7 +893,11 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
     policy = security_policy_snapshot(tenant_id)
     if not consent:
         raise HttpError(422, "Security monitoring consent is required")
-    if policy["camera_required"] and not preflight.get("camera_ready"):
+    if policy["camera_required"] and (
+        not preflight.get("camera_ready")
+        or not isinstance(device_inventory.get("video_inputs"), int)
+        or device_inventory.get("video_inputs") < 1
+    ):
         raise HttpError(409, "A working webcam is required")
     if policy["fullscreen_required"] and not preflight.get("fullscreen_active"):
         raise HttpError(409, "Fullscreen mode is required")

@@ -31,6 +31,7 @@ from .api import analysis_data
 from .provider import AdmiezoAIClient, AdmiezoAIError, AdmiezoAITransientError, _provider_model
 from .services import (
     _analysis_input,
+    _validated_assessments,
     assign_all_ready_scripts_to_ai,
     assign_paper_to_ai,
     finalize_reference_upload,
@@ -47,7 +48,7 @@ class AdmiezoAIProviderTests(SimpleTestCase):
     def test_assistant_alias_resolves_to_configured_provider_model(self):
         self.assertEqual(_provider_model("admiezo-ai-v1"), "gemini-3.8-flash")
         self.assertEqual(_provider_model("gemini-3.7-flash"), "gemini-3.7-flash")
-        self.assertEqual(_provider_model("admiezo-unknown"), "admiezo-unknown")
+        self.assertEqual(_provider_model("admiezo-unknown"), "gemini-3.8-flash")
 
     def test_model_must_support_configured_provider_generation(self):
         from io import BytesIO
@@ -240,7 +241,7 @@ class AIEvaluationTests(TestCase):
         self.assertFalse(status["available"])
         self.assertEqual(status["message"], "Model unsupported")
 
-    def result(self, *, marks="8", confidence="92"):
+    def result(self, *, marks="8", confidence="92", feedback="Good coverage.", reasoning="The response satisfies most configured criteria."):
         return {
             "overall_confidence": confidence,
             "summary": "The answer addresses the required concepts.",
@@ -249,8 +250,8 @@ class AIEvaluationTests(TestCase):
                     "question_id": str(self.question.id),
                     "marks": marks,
                     "confidence": confidence,
-                    "feedback": "Good coverage.",
-                    "reasoning": "The response matches the reference criteria.",
+                    "feedback": feedback,
+                    "reasoning": reasoning,
                 }
             ],
         }
@@ -277,14 +278,17 @@ class AIEvaluationTests(TestCase):
         self.assertFalse(readiness["ready"])
         self.assertEqual(readiness["missing_evaluation_guidance"], 1)
 
-    def test_reference_assets_remain_valid_when_guidance_is_blank(self):
+    def test_reference_assets_do_not_replace_question_guidance(self):
         self.guide.evaluation_guidance = ""
         self.guide.save(update_fields=["evaluation_guidance"])
-        self.assertTrue(pack_readiness(self.pack)["ready"])
-        self.pack.assets.filter(kind=AIReferenceUpload.Kind.REFERENCE_ANSWER, slot=3).delete()
         readiness = pack_readiness(self.pack)
         self.assertFalse(readiness["ready"])
-        self.assertEqual(readiness["reference_answers"], 2)
+        self.assertEqual(readiness["missing_evaluation_guidance"], 1)
+
+    def test_ai_assessment_requires_feedback_and_mark_justification(self):
+        result = self.result(marks="6", feedback="", reasoning="")
+        with self.assertRaisesMessage(AdmiezoAIError, "did not justify the mark"):
+            _validated_assessments([self.guide], result)
 
     @patch("apps.ai_evaluation.services.delete_object")
     @patch("apps.ai_evaluation.services.read_object_metadata")
@@ -436,8 +440,9 @@ class AIEvaluationTests(TestCase):
         with patch("apps.ai_evaluation.services.read_object", side_effect=read):
             guides, prompt, media = _analysis_input(analysis, self.pack)
         self.assertEqual(guides, [self.guide])
-        self.assertEqual(len(media), 5)
-        self.assertIn("masked-evaluation-page", read_keys)
+        self.assertEqual(len(media), 1)
+        self.assertEqual(read_keys, ["masked-evaluation-page"])
+        self.assertNotIn("reference answer", prompt.casefold())
         self.assertNotIn("identity-bearing-raw-page", read_keys)
         self.assertNotIn(self.script.script_code, prompt)
         self.assertNotIn(self.script.primary_barcode, prompt)
@@ -446,7 +451,7 @@ class AIEvaluationTests(TestCase):
         self.set_ai_policy(SecurityPolicy.AIEvaluationMode.AUTONOMOUS)
         with patch("apps.ai_evaluation.services.provider_status", return_value={"available": True}):
             analysis = assign_paper_to_ai(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, paper=self.paper, maximum_scripts=1)[0]
-        with patch("apps.ai_evaluation.services._analysis_input", side_effect=self.analysis_input), patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"), patch("apps.ai_evaluation.services.AdmiezoAIClient.extract_answer", return_value={"answer_text": "test answer"}), patch("apps.ai_evaluation.services.AdmiezoAIClient.evaluate", return_value=self.result(confidence="92")):
+        with patch("apps.ai_evaluation.services._analysis_input", side_effect=self.analysis_input), patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"), patch("apps.ai_evaluation.services.AdmiezoAIClient.extract_answer", return_value={"answer_text": "test answer"}), patch("apps.ai_evaluation.services.AdmiezoAIClient.evaluate", return_value=self.result(marks="8.25", confidence="92")):
             processed = process_next_analysis()
         processed.refresh_from_db()
         assignment = processed.assignment
@@ -459,9 +464,9 @@ class AIEvaluationTests(TestCase):
         self.assertEqual(self.script.state, Script.State.SUBMITTED)
         evaluation = Evaluation.objects.get(assignment=assignment)
         self.assertEqual(evaluation.status, Evaluation.Status.LOCKED)
-        self.assertEqual(evaluation.total_marks, Decimal("8"))
-        self.assertEqual(ValuationResult.objects.get(evaluation=evaluation).total_marks, Decimal("8"))
-        self.assertEqual(FinalMark.objects.get(script=self.script).mark, Decimal("8"))
+        self.assertEqual(evaluation.total_marks, Decimal("8.3"))
+        self.assertEqual(ValuationResult.objects.get(evaluation=evaluation).total_marks, Decimal("8.3"))
+        self.assertEqual(FinalMark.objects.get(script=self.script).mark, Decimal("8.3"))
 
     def test_bulk_autonomous_assignment_queues_every_ready_script(self):
         self.pack.assets.all().delete()
@@ -481,9 +486,41 @@ class AIEvaluationTests(TestCase):
 
     def test_low_confidence_autonomous_result_routes_only_to_a_human(self):
         self.set_ai_policy(SecurityPolicy.AIEvaluationMode.AUTONOMOUS)
+        second = Question.objects.create(
+            tenant_id=self.paper.tenant_id,
+            paper=self.paper,
+            number="2",
+            max_marks=10,
+            position=2,
+        )
+        second_guide = AIQuestionGuide.objects.create(
+            tenant_id=self.paper.tenant_id,
+            pack=self.pack,
+            question=second,
+            question_text="Explain question two.",
+            evaluation_guidance="Award up to ten marks for correctness.",
+            max_marks=10,
+        )
+        Evaluator.objects.filter(
+            tenant_id=self.paper.tenant_id,
+            status=Evaluator.Status.ACTIVE,
+            is_system_ai=False,
+        ).exclude(id=self.human.id).update(status=Evaluator.Status.INACTIVE)
         with patch("apps.ai_evaluation.services.provider_status", return_value={"available": True}):
             analysis = assign_paper_to_ai(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, paper=self.paper, maximum_scripts=1)[0]
-        with patch("apps.ai_evaluation.services._analysis_input", side_effect=self.analysis_input), patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"), patch("apps.ai_evaluation.services.AdmiezoAIClient.extract_answer", return_value={"answer_text": "test answer"}), patch("apps.ai_evaluation.services.AdmiezoAIClient.evaluate", return_value=self.result(confidence="70")):
+
+        def evaluate(*, prompt, **kwargs):
+            is_second = "answer two" in prompt
+            result = self.result(
+                marks="4" if is_second else "8",
+                confidence="70" if is_second else "92",
+                feedback="The answer omits a required step." if is_second else "The answer covers the required concepts.",
+                reasoning="Four of ten marks: the missing step costs six marks." if is_second else "Eight of ten marks: one minor detail is missing.",
+            )
+            result["assessments"][0]["question_id"] = str(second.id if is_second else self.question.id)
+            return result
+
+        with patch("apps.ai_evaluation.services._analysis_input", return_value=([self.guide, second_guide], "", [{"mime_type": "image/png", "data": b"masked"}])), patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"), patch("apps.ai_evaluation.services.AdmiezoAIClient.extract_answer", side_effect=[{"answer_text": "answer one"}, {"answer_text": "answer two"}]), patch("apps.ai_evaluation.services.AdmiezoAIClient.evaluate", side_effect=evaluate):
             processed = process_next_analysis()
         processed.refresh_from_db()
         assignment = processed.assignment
@@ -494,9 +531,24 @@ class AIEvaluationTests(TestCase):
         self.assertEqual(assignment.status, Assignment.Status.REASSIGNED)
         self.assertEqual(assignment.source, "ai_low_confidence")
         self.assertTrue(assignment.is_flagged)
+        self.assertEqual(assignment.progress_percent, 50)
         self.assertEqual(analysis_data(processed)["assignment_status"], Assignment.Status.REASSIGNED)
-        self.assertEqual(analysis_data(processed)["backup_evaluator"], assignment.backup_evaluator.display_name)
-        self.assertFalse(Evaluation.objects.filter(assignment=assignment).exists())
+        self.assertIsNone(assignment.backup_evaluator_id)
+        self.assertIsNone(analysis_data(processed)["backup_evaluator"])
+        evaluation = Evaluation.objects.get(assignment=assignment)
+        self.assertEqual(evaluation.status, Evaluation.Status.DRAFT)
+        self.assertEqual(evaluation.total_marks, Decimal("8"))
+        self.assertEqual(evaluation.last_question_id, second.id)
+        prefilled = QuestionMark.objects.get(evaluation=evaluation)
+        self.assertEqual(prefilled.question_id, self.question.id)
+        self.assertEqual(prefilled.marks, Decimal("8"))
+        self.assertEqual(prefilled.answer_selection["source"], "admiezo_ai_prefill")
+        self.assertFalse(prefilled.examiner_confirmed)
+        self.assertFalse(QuestionMark.objects.filter(evaluation=evaluation, question=second).exists())
+        self.assertEqual(processed.question_assessments.get(question=second).reasoning, "Four of ten marks: the missing step costs six marks.")
+        payload = analysis_data(processed)
+        self.assertEqual(len(payload["assessments"]), 2)
+        self.assertEqual(payload["assessments"][1]["reasoning"], "Four of ten marks: the missing step costs six marks.")
         self.assertFalse(ValuationResult.objects.filter(script=self.script).exists())
 
     def test_questions_are_extracted_evaluated_and_stored_in_order(self):
@@ -507,7 +559,6 @@ class AIEvaluationTests(TestCase):
         with patch("apps.ai_evaluation.services.provider_status", return_value={"available": True}):
             analysis, _ = queue_assistive_analysis(tenant_id=self.paper.tenant_id, actor_id=self.actor.id, assignment=assignment)
         steps = []
-        reference_media = [{"mime_type": "application/pdf", "data": b"reference"}] * 4
         script_media = [{"mime_type": "image/png", "data": b"masked-script"}]
 
         def extract(*, question, media, **kwargs):
@@ -520,19 +571,20 @@ class AIEvaluationTests(TestCase):
         def evaluate(*, prompt, media, **kwargs):
             number = "1" if "answer 1" in prompt else "2"
             steps.append(f"evaluate:{number}")
-            self.assertEqual(media, reference_media)
+            self.assertEqual(media, [])
             self.assertIn(f"Extracted answer: answer {number}", prompt)
             result = self.result(marks="8" if number == "1" else "7")
             result["assessments"][0]["question_id"] = str(self.question.id if number == "1" else second.id)
             return result
 
-        with patch("apps.ai_evaluation.services._analysis_input", return_value=([self.guide, second_guide], "", reference_media + script_media)), patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"), patch("apps.ai_evaluation.services.AdmiezoAIClient.extract_answer", side_effect=extract), patch("apps.ai_evaluation.services.AdmiezoAIClient.evaluate", side_effect=evaluate), self.assertLogs("apps.ai_evaluation.services", level="INFO") as logs:
+        with patch("apps.ai_evaluation.services._analysis_input", return_value=([self.guide, second_guide], "", script_media)), patch("apps.ai_evaluation.services.AdmiezoAIClient.validate_model"), patch("apps.ai_evaluation.services.AdmiezoAIClient.extract_answer", side_effect=extract), patch("apps.ai_evaluation.services.AdmiezoAIClient.evaluate", side_effect=evaluate), self.assertLogs("apps.ai_evaluation.services", level="INFO") as logs:
             processed = process_next_analysis()
         self.assertEqual(processed.status, AIAnalysis.Status.COMPLETED)
         self.assertEqual(steps, ["extract:1", "evaluate:1", "extract:2", "evaluate:2"])
         self.assertTrue(any("Question 1 attempt 1/3 extracting" in line for line in logs.output))
-        self.assertTrue(any("Extracted Q1: answer 1" in line for line in logs.output))
-        self.assertTrue(any("Q1 marks: 8/10" in line for line in logs.output))
+        self.assertTrue(any("Extracted Q1 answer text (8 characters)" in line for line in logs.output))
+        self.assertFalse(any("answer 1" in line for line in logs.output))
+        self.assertTrue(any("Q1 marks: 8.0/10" in line for line in logs.output))
         self.assertEqual(list(analysis.question_assessments.order_by("question__position").values_list("marks", flat=True)), [Decimal("8"), Decimal("7")])
 
     def test_exhausted_question_retries_keep_prior_marks_and_route_to_human(self):
@@ -549,9 +601,11 @@ class AIEvaluationTests(TestCase):
         self.assertEqual(processed.question_assessments.count(), 1)
         self.assertEqual(processed.question_assessments.first().marks, Decimal("8"))
         self.assertFalse(processed.assignment.evaluator.is_system_ai)
-        self.assertIsNotNone(processed.assignment.backup_evaluator_id)
-        self.assertNotEqual(processed.assignment.evaluator_id, processed.assignment.backup_evaluator_id)
-        self.assertFalse(Evaluation.objects.filter(assignment=processed.assignment).exists())
+        self.assertIsNone(processed.assignment.backup_evaluator_id)
+        evaluation = Evaluation.objects.get(assignment=processed.assignment)
+        self.assertEqual(evaluation.total_marks, Decimal("8"))
+        self.assertEqual(evaluation.last_question_id, second.id)
+        self.assertEqual(list(evaluation.question_marks.values_list("question_id", flat=True)), [self.question.id])
 
     def test_paper_deadline_routes_to_manual_before_extraction(self):
         self.set_ai_policy(SecurityPolicy.AIEvaluationMode.AUTONOMOUS)

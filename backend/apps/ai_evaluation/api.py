@@ -59,6 +59,7 @@ class AssignAllAIIn(Schema):
 
 
 def analysis_data(item):
+    question_summaries = item.raw_response.get("question_summaries", {})
     return {
         "id": str(item.id),
         "assignment_id": str(item.assignment_id),
@@ -76,6 +77,18 @@ def analysis_data(item):
         "created_at": item.created_at.isoformat(),
         "started_at": item.started_at.isoformat() if item.started_at else None,
         "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+        "assessments": [
+            {
+                "question_id": str(assessment.question_id),
+                "question": assessment.question.number,
+                "marks": float(assessment.marks),
+                "confidence": float(assessment.confidence),
+                "feedback": assessment.feedback,
+                "reasoning": assessment.reasoning,
+                "summary": question_summaries.get(str(assessment.question_id), ""),
+            }
+            for assessment in item.question_assessments.select_related("question").all()
+        ],
     }
 
 
@@ -142,7 +155,7 @@ def catalog(request):
     membership, policy, provider = _governance(request)
     tenant_id = membership.institution.tenant_id
     papers = Paper.objects.filter(tenant_id=tenant_id).select_related("subject").prefetch_related("questions", "ai_reference_pack__assets", "ai_reference_pack__question_guides").order_by("code")
-    analyses = AIAnalysis.objects.filter(tenant_id=tenant_id).select_related("assignment__script__paper", "assignment__evaluator", "assignment__backup_evaluator").order_by("-created_at")[:200]
+    analyses = AIAnalysis.objects.filter(tenant_id=tenant_id).select_related("assignment__script__paper", "assignment__evaluator", "assignment__backup_evaluator").prefetch_related("question_assessments__question").order_by("-created_at")[:200]
     return {
         "provider": provider,
         "governance": {

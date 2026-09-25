@@ -46,7 +46,12 @@ def _row(item, fields):
         elif isinstance(value, Decimal):
             value = str(value)
         elif hasattr(value, "isoformat"):
-            value = value.isoformat()
+            text = value.isoformat()
+            if "T" in text:
+                text = text.replace("T", " ")
+            if text.endswith("Z"):
+                text = text[:-1]
+            value = text
         result[field] = value
     return result
 

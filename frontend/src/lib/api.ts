@@ -1,4 +1,5 @@
 export const SESSION_EXPIRED_EVENT = "admiezo:session-expired";
+const REQUEST_TIMEOUT_MS = 15_000;
 
 function sessionExpired(response: Response, url: string) {
   if (response.status !== 401 || /^\/api\/v1\/auth\/(login|mfa\/|passkeys\/login|sso\/|step-up|password\/change)/.test(url)) return;
@@ -15,7 +16,7 @@ export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}
     headers.set("X-Secure-Evaluation-Session", secureSessionId);
   }
   if (protectedWrite) {
-    const tokenResponse = await fetch("/api/v1/auth/csrf", { credentials: "same-origin" });
+    const tokenResponse = await fetchWithTimeout("/api/v1/auth/csrf", { credentials: "same-origin" });
     const contentType = tokenResponse.headers.get("content-type") || "";
     const tokenBody = contentType.includes("application/json")
       ? await tokenResponse.json().catch(() => ({}))
@@ -34,7 +35,23 @@ export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}
       headers.set("Idempotency-Key", crypto.randomUUID());
     }
   }
-  const response = await fetch(input, { ...init, headers, credentials: init.credentials || "same-origin" });
+  const response = await fetchWithTimeout(input, { ...init, headers, credentials: init.credentials || "same-origin" });
   if (typeof window !== "undefined") sessionExpired(response, url);
   return response;
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const abortRequest = () => controller.abort();
+  init.signal?.addEventListener("abort", abortRequest, { once: true });
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (reason) {
+    if (controller.signal.aborted && !init.signal?.aborted) throw new Error("The request timed out. Please refresh and try again.");
+    throw reason;
+  } finally {
+    clearTimeout(timeout);
+    init.signal?.removeEventListener("abort", abortRequest);
+  }
 }

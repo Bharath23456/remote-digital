@@ -1,13 +1,16 @@
 from datetime import timedelta
 from decimal import Decimal
 import hashlib
+import importlib
 
+from django.apps import apps as django_apps
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.db import connection
 import json
 from unittest.mock import patch
 
-from django.test import Client, TestCase, override_settings
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -34,6 +37,8 @@ from .models import (
     ControlledAuthorization,
     EvidencePackage,
     IntegrationEndpoint,
+    ModerationCase,
+    ModerationPolicy,
     NotificationDelivery,
     ProctoringReview,
     RecoveryDrill,
@@ -58,15 +63,37 @@ from .services import (
     notification_action,
     queue_handover,
     request_authorization,
+    sample_moderation_cases,
     seal_evidence,
     set_locale,
     transition_centre,
     transition_drill,
+    transition_moderation,
     transition_handover,
     transition_statement,
     transition_revaluation,
     transition_workload,
 )
+
+
+class ResultServiceMigrationRepairTests(TransactionTestCase):
+    def test_recreates_removed_tables_and_is_idempotent(self):
+        migration = importlib.import_module(
+            "apps.phase4.migrations.0006_university_api_keys_official_requests"
+        )
+        models = [
+            django_apps.get_model("phase4", model_name)
+            for model_name in migration.REMOVED_RESULT_SERVICE_MODELS
+        ]
+
+        with connection.schema_editor() as schema_editor:
+            for model in reversed(models):
+                schema_editor.delete_model(model)
+            migration.restore_removed_result_service_tables(django_apps, schema_editor)
+            migration.restore_removed_result_service_tables(django_apps, schema_editor)
+
+        table_names = set(connection.introspection.table_names())
+        self.assertTrue(all(model._meta.db_table in table_names for model in models))
 
 
 class RemainingModulesTests(TestCase):
@@ -188,6 +215,25 @@ class RemainingModulesTests(TestCase):
             self.assertEqual(started.status_code, 200)
             self.assertEqual(started.json()["policy"]["identity_verification_required"], False)
             self.assertEqual(SecureEvaluationSession.objects.get(id=started.json()["id"]).evaluator_id, evaluator.id)
+
+    def test_secure_evaluation_rejects_unavailable_camera(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "camera-gate-test"}), content_type="application/json").status_code, 200)
+        base = {
+            "assignment_id": str(assignment.id),
+            "session_fingerprint": "a" * 64,
+            "device_fingerprint": "b" * 64,
+            "consent": True,
+            "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
+            "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
+        }
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            unavailable = {**base, "preflight": {**base["preflight"], "camera_ready": False}}
+            self.assertEqual(client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(unavailable), content_type="application/json").status_code, 409)
+            no_camera = {**base, "device_inventory": {"video_inputs": 0, "digest": "c" * 64}}
+            self.assertEqual(client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(no_camera), content_type="application/json").status_code, 409)
 
     def test_workload_actions_require_independent_approval(self):
         item = create_workload_action(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator=self.evaluator, action="rebalance", reason="Deadline capacity requires redistribution.", metrics={"remaining": 28})
@@ -553,3 +599,85 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(acknowledge.status_code, 200)
         self.assertEqual(acknowledge.json()["status"], StudentScriptRequest.Status.DELIVERED)
         self.assertTrue(AuditEvent.objects.filter(aggregate_id=request_id, action="student.copy.delivered").exists())
+
+    def test_photocopy_expiry_worker_closes_release_window(self):
+        item = create_student_request(
+            tenant_id=self.tenant_id,
+            actor_id=self.admin.id,
+            identity_reference="STUDENT-EXPIRY-001",
+            script=self.phase4_script,
+            purpose="copy",
+        )
+        item.status = StudentScriptRequest.Status.APPROVED
+        item.expires_at = timezone.now() - timedelta(minutes=1)
+        item.save(update_fields=["status", "expires_at"])
+
+        call_command("expire_photocopy_requests")
+
+        item.refresh_from_db()
+        self.assertEqual(item.status, StudentScriptRequest.Status.EXPIRED)
+        self.assertFalse(item.download_allowed)
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(item.id), action="student.copy.expired").exists())
+
+    def test_moderation_end_to_end_applies_approved_mark(self):
+        moderator = Evaluator.objects.filter(tenant_id=self.tenant_id, status=Evaluator.Status.ACTIVE).exclude(id=self.evaluator.id).first()
+        self.assertIsNotNone(moderator)
+        policy, _ = ModerationPolicy.objects.update_or_create(tenant_id=self.tenant_id, paper=self.paper, defaults={"sample_percentage": Decimal("100"), "sampling_modes": ["percentage_random"], "mandatory": True})
+        case = sample_moderation_cases(tenant_id=self.tenant_id, actor_id=self.admin.id, policy=policy)[0]
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.admin.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.ASSIGNED, moderator=moderator)
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.admin.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.REVIEW)
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.admin.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.DECIDED, adjusted_mark=Decimal("74"), reason="Question evidence supports the revised total mark.", snapshot={"source": "moderator_review"})
+        case = transition_moderation(tenant_id=self.tenant_id, actor_id=self.controller.id, case_id=case.id, expected_version=case.version, target=ModerationCase.Status.APPROVED)
+        final_mark = FinalMark.objects.get(script=self.phase4_script)
+        self.assertEqual(case.status, ModerationCase.Status.APPROVED)
+        self.assertEqual(final_mark.mark, Decimal("74"))
+        self.assertTrue(AuditEvent.objects.filter(aggregate_id=str(final_mark.id), action="valuation.final_mark.moderated").exists())
+
+    def test_moderation_samples_multi_round_final_mark_once(self):
+        second_evaluator = Evaluator.objects.filter(
+            tenant_id=self.tenant_id,
+            status=Evaluator.Status.ACTIVE,
+        ).exclude(id=self.evaluator.id).first()
+        self.assertIsNotNone(second_evaluator)
+        second_assignment = Assignment.objects.create(
+            tenant_id=self.tenant_id,
+            script=self.phase4_script,
+            evaluator=second_evaluator,
+            valuation_round=2,
+            status=Assignment.Status.SUBMITTED,
+            due_at=timezone.now() + timedelta(days=3),
+        )
+        second_evaluation = Evaluation.objects.create(
+            tenant_id=self.tenant_id,
+            assignment=second_assignment,
+            scheme=MarkingScheme.objects.filter(tenant_id=self.tenant_id, paper=self.paper).first(),
+            status=Evaluation.Status.LOCKED,
+            total_marks=Decimal("80"),
+            checksum="6" * 64,
+        )
+        ValuationResult.objects.create(
+            tenant_id=self.tenant_id,
+            evaluation=second_evaluation,
+            script=self.phase4_script,
+            valuation_round=2,
+            total_marks=Decimal("80"),
+            checksum="7" * 64,
+            is_locked=True,
+            locked_by_id=self.controller.id,
+            locked_at=timezone.now(),
+        )
+        final_mark = FinalMark.objects.get(script=self.phase4_script)
+        final_mark.mark = Decimal("76")
+        final_mark.calculation = {"totals": ["72", "80"], "rule": "average"}
+        final_mark.save(update_fields=["mark", "calculation", "updated_at"])
+        policy, _ = ModerationPolicy.objects.update_or_create(
+            tenant_id=self.tenant_id,
+            paper=self.paper,
+            defaults={"sample_percentage": Decimal("100"), "sampling_modes": ["percentage_random"], "mandatory": True},
+        )
+
+        cases = sample_moderation_cases(tenant_id=self.tenant_id, actor_id=self.admin.id, policy=policy)
+
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(ModerationCase.objects.filter(script=self.phase4_script).count(), 1)
+        self.assertEqual(cases[0].original_mark, Decimal("76"))

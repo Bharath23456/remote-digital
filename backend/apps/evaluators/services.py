@@ -37,7 +37,7 @@ STATUS_TRANSITIONS = {
     Evaluator.Status.SUSPENDED: {Evaluator.Status.ACTIVE, Evaluator.Status.RETIRED},
     Evaluator.Status.RETIRED: set(),
 }
-ALLOWED_ACCESS_STATUSES = {Assignment.Status.ASSIGNED, Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS, Assignment.Status.REASSIGNED}
+ALLOWED_ACCESS_STATUSES = {Assignment.Status.ASSIGNED, Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS, Assignment.Status.REASSIGNED, Assignment.Status.SUBMITTED}
 
 
 def _decimal_setting(name, default):

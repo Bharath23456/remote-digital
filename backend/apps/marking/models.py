@@ -29,20 +29,16 @@ class QuestionMark(TenantModel):
     class Outcome(models.TextChoices):
         EVALUATED = "evaluated", "Evaluated"
         UNANSWERED = "unanswered", "Unanswered"
-        NOT_APPLICABLE = "not_applicable", "Not applicable"
-        SKIPPED = "skipped", "Skipped"
 
     class Adjustment(models.TextChoices):
         NONE = "none", "None"
         GRACE = "grace", "Grace"
-        NEGATIVE = "negative", "Negative"
-        BONUS = "bonus", "Bonus"
 
     evaluation = models.ForeignKey(Evaluation, on_delete=models.PROTECT, related_name="question_marks")
     question = models.ForeignKey(Question, on_delete=models.PROTECT, related_name="marks")
     sub_question = models.CharField(max_length=24, blank=True)
     sequence = models.PositiveIntegerField()
-    marks = models.DecimalField(max_digits=8, decimal_places=2)
+    marks = models.DecimalField(max_digits=5, decimal_places=1)
     outcome = models.CharField(max_length=20, choices=Outcome.choices, default=Outcome.EVALUATED)
     adjustment = models.CharField(max_length=16, choices=Adjustment.choices, default=Adjustment.NONE)
     step_marks = models.JSONField(default=list)

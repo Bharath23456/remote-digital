@@ -36,7 +36,7 @@ def _stored_api_key(tenant_id):
 
 
 def _provider_model(model):
-    if not model or model == "admiezo-ai-v1":
+    if not model or model.startswith("admiezo-"):
         return settings.ADMIEZO_AI_PROVIDER_MODEL
     return model.removeprefix("models/")
 
@@ -134,8 +134,14 @@ class AdmiezoAIClient:
                             "question_id": {"type": "STRING"},
                             "marks": {"type": "NUMBER"},
                             "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
-                            "feedback": {"type": "STRING"},
-                            "reasoning": {"type": "STRING"},
+                            "feedback": {
+                                "type": "STRING",
+                                "description": "Specific strengths, omissions, and incorrect points in the answer.",
+                            },
+                            "reasoning": {
+                                "type": "STRING",
+                                "description": "A concise mark calculation that explicitly explains every deduction from the maximum mark.",
+                            },
                         },
                         "required": ["question_id", "marks", "confidence", "feedback", "reasoning"],
                     },
@@ -150,15 +156,17 @@ class AdmiezoAIClient:
             schema=schema,
             system_instruction=(
                 "You are an independent university answer-script evaluator. Work only from the extracted masked-script answer, "
-                "question configuration, marking guidance, question paper, and reference answers. Award defensible "
-                "question-wise marks, never infer candidate identity, and lower confidence whenever pages or answers are unclear."
+                "question configuration, and marking guidance. Apply the configured maximum exactly and award defensible partial "
+                "credit for demonstrated knowledge. Feedback must identify specific strengths, omissions, or errors. Reasoning must "
+                "show how the awarded mark was calculated and explicitly justify every deduction when marks are below the maximum. "
+                "Never infer candidate identity, never invent evidence, and lower confidence whenever the answer or evaluation basis is unclear."
             ),
         )
 
     def extract_answer(self, *, model, question, media):
         return self._generate(
             model=model,
-            prompt=f"Extract only the answer to question {question['number']} ({question['text']}) from the masked script. Return an empty string if no answer is found.",
+            prompt=f"Extract only the complete answer to question {question['number']} ({question['text']}) from the masked script. Preserve formulas, tables, diagrams described in text, and continuation pages. Return an empty string only if no answer is found.",
             media=media,
             schema={"type": "OBJECT", "properties": {"answer_text": {"type": "STRING"}}, "required": ["answer_text"]},
             system_instruction="Transcribe only the requested answer from masked script pages. Do not evaluate it or include answers to other questions.",
