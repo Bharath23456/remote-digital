@@ -40,7 +40,7 @@ DEFAULT_MODULES = [
 ]
 
 
-def _validate_ai_governance(mode, confidence_threshold, model_name, *, tenant_id=None, api_key=""):
+def _validate_ai_governance(mode, confidence_threshold, model_name, *, tenant_id=None, api_key="", validate_model=True):
     if mode not in SecurityPolicy.AIEvaluationMode.values:
         raise TenancyError("Unsupported AI evaluation mode")
     try:
@@ -50,13 +50,18 @@ def _validate_ai_governance(mode, confidence_threshold, model_name, *, tenant_id
     model = str(model_name).strip()
     if not Decimal("1") <= threshold <= Decimal("100"):
         raise TenancyError("AI confidence threshold must be between 1 and 100")
-    if not re.fullmatch(r"[A-Za-z0-9._-]{3,80}", model):
+    if not re.fullmatch(r"(?:models/)?[A-Za-z0-9._-]{3,80}", model) or len(model) > 80:
         raise TenancyError("ADMIEZO AI Assistant model is invalid")
-    if mode != SecurityPolicy.AIEvaluationMode.DISABLED:
-        from apps.ai_evaluation.services import provider_status
+    from apps.ai_evaluation.provider import AdmiezoAIClient, AdmiezoAIError
 
-        if not api_key and (not tenant_id or not provider_status(tenant_id, model)["available"]):
-            raise TenancyError("A valid ADMIEZO AI Assistant API key must be configured for this university")
+    client = AdmiezoAIClient(api_key=api_key) if api_key else AdmiezoAIClient(tenant_id=tenant_id)
+    if client.configured and validate_model:
+        try:
+            client.validate_model(model)
+        except AdmiezoAIError as exc:
+            raise TenancyError(str(exc)) from exc
+    elif mode != SecurityPolicy.AIEvaluationMode.DISABLED or validate_model:
+        raise TenancyError("Configure this university’s AI provider API key before saving an AI model")
     return threshold, model
 
 
@@ -146,6 +151,7 @@ def provision_tenant(*, actor, name, code, admin_email, admin_first_name, admin_
         ai_confidence_threshold,
         ai_model_name,
         api_key=api_key,
+        validate_model=bool(api_key) or ai_model_name != "admiezo-ai-v1",
     )
     tenant_id = uuid.uuid4()
     root = Institution.objects.create(tenant_id=tenant_id, name=name.strip(), code=code.strip().lower(), kind=Institution.Kind.UNIVERSITY, policy=policy)
@@ -185,7 +191,7 @@ def provision_tenant(*, actor, name, code, admin_email, admin_first_name, admin_
     from apps.ai_evaluation.services import configure_provider, synchronize_ai_governance
 
     if api_key:
-        configure_provider(tenant_id=tenant_id, actor_id=actor.id, api_key=api_key, version=0)
+        configure_provider(tenant_id=tenant_id, actor_id=actor.id, api_key=api_key, version=0, model_name=ai_model_name)
 
     synchronize_ai_governance(tenant_id=tenant_id, mode=ai_evaluation_mode)
     record_event(tenant_id=tenant_id, actor_id=actor.id, action="tenancy.tenant.provisioned", aggregate="Institution", aggregate_id=root.id, payload={"code": root.code, "admin_user_id": admin.id, "hostname": domain.hostname, "plan": account.plan})
@@ -215,6 +221,14 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
         model_name,
         tenant_id=tenant_id,
         api_key=api_key,
+        validate_model=(
+            bool(api_key)
+            or model_name != policy.ai_model_name
+            or (
+                policy.ai_evaluation_mode == SecurityPolicy.AIEvaluationMode.DISABLED
+                and mode != SecurityPolicy.AIEvaluationMode.DISABLED
+            )
+        ),
     )
     for field in ("status", "plan", "enabled_modules", "data_region"):
         if changes.get(field) is not None:
@@ -250,6 +264,7 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
             actor_id=actor_id,
             api_key=api_key,
             version=provider_version,
+            model_name=model_name,
         )
 
     synchronize_ai_governance(tenant_id=tenant_id, mode=mode)

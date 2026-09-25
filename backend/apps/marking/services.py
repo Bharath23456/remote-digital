@@ -1,6 +1,6 @@
 import hashlib
 import json
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.db import transaction
 from django.utils import timezone
@@ -85,8 +85,9 @@ def _decimal(value, label):
 
 def _recalculate_total(evaluation):
     total = sum((item.marks for item in latest_marks(evaluation)), Decimal("0"))
-    evaluation.total_marks = total
-    return total
+    rounded_total = total.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    evaluation.total_marks = rounded_total
+    return rounded_total
 
 
 @transaction.atomic
@@ -104,15 +105,15 @@ def save_question_mark(*, tenant_id, actor_id, evaluation_id, evaluator, expecte
     if outcome not in QuestionMark.Outcome.values or adjustment not in QuestionMark.Adjustment.values:
         raise HttpError(422, "Unsupported marking outcome or adjustment")
     marks = _decimal(values.get("marks", 0), "Marks")
-    if outcome in (QuestionMark.Outcome.UNANSWERED, QuestionMark.Outcome.NOT_APPLICABLE, QuestionMark.Outcome.SKIPPED) and marks != 0:
-        raise HttpError(422, "Unanswered, skipped, and not-applicable outcomes must carry zero marks")
-    if adjustment != QuestionMark.Adjustment.NEGATIVE and marks < 0:
-        raise HttpError(422, "Negative marks require the negative adjustment")
+    if outcome == QuestionMark.Outcome.UNANSWERED and marks != 0:
+        raise HttpError(422, "Unanswered outcomes must carry zero marks")
+    if marks < 0:
+        raise HttpError(422, "Marks cannot be negative")
     criterion = values.get("rubric_criterion")
     if criterion and (criterion.scheme_id != evaluation.scheme_id or criterion.question_id != question.id):
         raise HttpError(422, "Rubric criterion does not belong to this evaluation question")
     maximum = criterion.max_marks if criterion else question.max_marks
-    if marks > maximum and adjustment != QuestionMark.Adjustment.BONUS:
+    if marks > maximum:
         raise HttpError(422, f"Marks cannot exceed {maximum}")
     steps = values.get("step_marks", [])
     if steps:
@@ -269,13 +270,13 @@ def evaluation_checksum(evaluation):
 
 def validate_submission(evaluation):
     marks = latest_marks(evaluation)
-    latest_questions = {item.question_id for item in marks if item.outcome != QuestionMark.Outcome.SKIPPED}
+    latest_questions = {item.question_id for item in marks}
     missing = [question.number for question in evaluation.assignment.script.paper.questions.filter(required=True) if question.id not in latest_questions]
     if missing:
         raise HttpError(422, f"Mandatory questions are not evaluated: {', '.join(missing)}")
     if any(item.requires_attention and not item.examiner_confirmed for item in marks):
         raise HttpError(422, "Marks requiring attention must be explicitly confirmed")
-    if evaluation.total_marks > evaluation.assignment.script.paper.max_marks and not any(item.adjustment == QuestionMark.Adjustment.BONUS for item in marks):
+    if evaluation.total_marks > evaluation.assignment.script.paper.max_marks:
         raise HttpError(422, "Total marks exceed the paper maximum")
     return marks
 

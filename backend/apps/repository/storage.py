@@ -88,9 +88,9 @@ def preview_mask_object(*, source_key: str, regions: list[dict]) -> bytes:
         return response.read(20_000_001)
 
 
-def read_object(key: str) -> bytes:
+def read_object(key: str, timeout: float = 15) -> bytes:
     url, _ = signed_object_url(method="GET", key=key, public=False)
-    with urlopen(Request(url, method="GET"), timeout=15) as response:
+    with urlopen(Request(url, method="GET"), timeout=timeout) as response:
         return response.read(20_000_001)
 
 
