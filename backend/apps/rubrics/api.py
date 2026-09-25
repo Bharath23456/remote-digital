@@ -8,7 +8,7 @@ from apps.tenancy.custom_fields import persist_custom_values, validate_custom_va
 from apps.tenancy.models import Membership
 
 from .models import MarkingScheme, RubricCriterion, SchemeClarification
-from .services import acknowledge, add_criterion, create_scheme, publish_clarification, transition_scheme
+from .services import acknowledge, add_criterion, create_scheme, delete_criterion, publish_clarification, transition_scheme
 
 
 router = Router(tags=["Marking schemes and rubrics"])
@@ -111,16 +111,10 @@ def create_criterion(request, scheme_id: str, payload: CriterionIn):
 
 
 @router.delete("/schemes/{scheme_id}/criteria/{criterion_id}")
-def delete_criterion(request, scheme_id: str, criterion_id: str):
+def remove_criterion(request, scheme_id: str, criterion_id: str):
     membership = require_roles(request, *ADMIN_ROLES)
     tenant_id = membership.institution.tenant_id
-    scheme = _scheme(tenant_id, scheme_id)
-    if scheme.status != MarkingScheme.Status.DRAFT:
-        raise HttpError(409, "Rubric criteria can only change while the scheme is in draft")
-    item = RubricCriterion.objects.filter(id=criterion_id, scheme=scheme, tenant_id=tenant_id).first()
-    if not item:
-        raise HttpError(404, "Rubric criterion not found")
-    item.delete()
+    delete_criterion(tenant_id=tenant_id, actor_id=request.auth.id, scheme_id=scheme_id, criterion_id=criterion_id)
     return {"deleted": True}
 
 
