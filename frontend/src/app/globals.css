@@ -766,6 +766,18 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 
 /* AI evaluation */
 .ai-evaluation-workspace { display: grid; gap: 14px; }
+.ai-evaluation-workspace, .ai-evaluation-workspace .panel, .ai-evaluation-workspace .table-wrap { min-width: 0; }
+.ai-evaluation-workspace table { min-width: 1200px; table-layout: fixed; }
+.ai-evaluation-workspace th:first-child { width: 20%; }
+.ai-evaluation-workspace th:nth-child(3) { width: 18%; }
+.ai-evaluation-workspace th:nth-child(5) { width: 17%; }
+.ai-evaluation-workspace th:last-child { width: 24%; }
+.ai-evaluation-workspace td:nth-child(5), .ai-evaluation-workspace td:nth-child(6) { white-space: normal; }
+.ai-analysis-status { overflow-wrap: anywhere; }
+.ai-analysis-status .status-pill { height: auto; min-height: 23px; max-width: 100%; white-space: normal; }
+.ai-analysis-status small { display: block; margin-top: 5px; line-height: 1.35; }
+.ai-analysis-status .analysis-state, .ai-analysis-status .analysis-note { color: var(--muted); }
+.ai-analysis-status .analysis-error { max-width: 100%; white-space: normal; }
 .ai-evaluation-workspace .workspace-toolbar { margin-bottom: 0; }
 .ai-paper-select { width: min(620px, 62%); margin: 0; }
 .provider-state { display: flex; min-width: 245px; align-items: center; gap: 11px; border: 1px solid var(--line); border-radius: 6px; background: white; padding: 9px 12px; }

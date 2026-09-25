@@ -16,6 +16,10 @@ class AdmiezoAIError(RuntimeError):
     pass
 
 
+class AdmiezoAITransientError(AdmiezoAIError):
+    pass
+
+
 def _stored_api_key(tenant_id):
     if not tenant_id:
         return ""
@@ -32,9 +36,9 @@ def _stored_api_key(tenant_id):
 
 
 def _provider_model(model):
-    if not model or model.startswith("admiezo-"):
+    if not model or model == "admiezo-ai-v1":
         return settings.ADMIEZO_AI_PROVIDER_MODEL
-    return model
+    return model.removeprefix("models/")
 
 
 class AdmiezoAIClient:
@@ -60,10 +64,19 @@ class AdmiezoAIClient:
             with urlopen(request, timeout=min(float(self.timeout), 5.0)) as response:
                 if response.status != 200:
                     raise AdmiezoAIError("ADMIEZO AI Assistant validation failed")
+                details = json.loads(response.read().decode())
+                if "generateContent" not in details.get("supportedGenerationMethods", []):
+                    raise AdmiezoAIError(f"Model {model} does not support evaluation with this provider")
         except HTTPError as exc:
-            raise AdmiezoAIError(f"ADMIEZO AI Assistant rejected the configured API key ({exc.code})") from exc
+            if exc.code == 404:
+                raise AdmiezoAIError(f"Model {model} is unsupported by the configured provider") from exc
+            if exc.code in (429, 503):
+                raise AdmiezoAITransientError(f"Provider model check temporarily failed ({exc.code})") from exc
+            raise AdmiezoAIError(f"ADMIEZO AI Assistant model validation failed ({exc.code})") from exc
         except (URLError, TimeoutError) as exc:
-            raise AdmiezoAIError("ADMIEZO AI Assistant could not be validated") from exc
+            raise AdmiezoAITransientError("Provider model check temporarily unavailable") from exc
+        except json.JSONDecodeError as exc:
+            raise AdmiezoAIError("ADMIEZO AI Assistant returned invalid model details") from exc
 
     def _generate(self, *, model, prompt, media, schema, system_instruction):
         if not self.configured:
@@ -93,7 +106,11 @@ class AdmiezoAIClient:
             with urlopen(request, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode())
         except HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:400]
+            raw_detail = exc.read().decode(errors="replace")
+            try:
+                detail = str(json.loads(raw_detail)["error"]["message"]).splitlines()[0][:300]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                detail = raw_detail[:300]
             raise AdmiezoAIError(f"ADMIEZO AI Assistant request failed ({exc.code}): {detail}") from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise AdmiezoAIError(f"ADMIEZO AI Assistant request failed: {exc}") from exc
@@ -132,10 +149,19 @@ class AdmiezoAIClient:
             media=media,
             schema=schema,
             system_instruction=(
-                "You are an independent university answer-script evaluator. Work only from the supplied masked script, "
+                "You are an independent university answer-script evaluator. Work only from the extracted masked-script answer, "
                 "question configuration, marking guidance, question paper, and reference answers. Award defensible "
                 "question-wise marks, never infer candidate identity, and lower confidence whenever pages or answers are unclear."
             ),
+        )
+
+    def extract_answer(self, *, model, question, media):
+        return self._generate(
+            model=model,
+            prompt=f"Extract only the answer to question {question['number']} ({question['text']}) from the masked script. Return an empty string if no answer is found.",
+            media=media,
+            schema={"type": "OBJECT", "properties": {"answer_text": {"type": "STRING"}}, "required": ["answer_text"]},
+            system_instruction="Transcribe only the requested answer from masked script pages. Do not evaluate it or include answers to other questions.",
         )
 
     def extract_questions(self, *, model, media):

@@ -8,11 +8,79 @@ from django.core.management import call_command
 from apps.core.testing import create_operational_fixtures
 from django.test import Client, TestCase
 
+from apps.allocation.models import AllocationProposal, AllocationRun
 from apps.configuration.models import Paper
 from apps.core.models import AuditEvent, OutboxEvent
 from apps.custody.models import Script
 from apps.core.outbox import publish_next
+from apps.phase4.models import CentreProfile, RemunerationRule
+from apps.receiving.models import Dispatch, Packet
 from apps.tenancy.models import Institution, Membership
+
+
+class DemoBootstrapCleanupTests(TestCase):
+    def test_preserves_demo_script_with_allocation_proposal(self):
+        call_command("bootstrap_demo", verbosity=0)
+        create_operational_fixtures()
+        protected_script = Script.objects.filter(assignments__isnull=False).first()
+        protected_script.script_code = "AS-000001"
+        dispatch = Dispatch.objects.create(
+            tenant_id=protected_script.tenant_id,
+            paper=protected_script.paper,
+            reference="DSP-2026-001",
+            source_centre="Old demo centre",
+            expected_packets=1,
+            expected_scripts=1,
+        )
+        packet = Packet.objects.create(
+            tenant_id=protected_script.tenant_id,
+            dispatch=dispatch,
+            barcode="OLD-DEMO-PACKET",
+            expected_scripts=1,
+        )
+        protected_script.packet = packet
+        protected_script.save(update_fields=["script_code", "packet", "updated_at"])
+        unprotected_script = Script.objects.filter(assignments__isnull=True).first()
+        unprotected_script.script_code = "AS-000002"
+        unprotected_script.save(update_fields=["script_code", "updated_at"])
+        run = AllocationRun.objects.create(
+            tenant_id=protected_script.tenant_id,
+            paper=protected_script.paper,
+            mode=AllocationRun.Mode.SIMULATION,
+            algorithm="intelligent",
+            created_by_id=1,
+        )
+        proposal = AllocationProposal.objects.create(
+            tenant_id=protected_script.tenant_id,
+            run=run,
+            script=protected_script,
+        )
+
+        call_command("bootstrap_demo", verbosity=0)
+
+        self.assertTrue(Script.objects.filter(id=protected_script.id).exists())
+        self.assertTrue(protected_script.assignments.exists())
+        self.assertTrue(AllocationProposal.objects.filter(id=proposal.id).exists())
+        self.assertTrue(Packet.objects.filter(id=packet.id).exists())
+        self.assertTrue(Dispatch.objects.filter(id=dispatch.id).exists())
+        self.assertFalse(Script.objects.filter(id=unprotected_script.id).exists())
+
+    def test_preserves_demo_centre_with_remuneration_rule(self):
+        call_command("bootstrap_demo", verbosity=0)
+        tenant_id = Institution.objects.get(code="northbridge-university").tenant_id
+        centre = CentreProfile.objects.create(
+            tenant_id=tenant_id,
+            code="NBU-CENTRAL",
+            name="Old demo centre",
+            location="Campus",
+            capacity=10,
+        )
+        RemunerationRule.objects.create(tenant_id=tenant_id, centre=centre)
+
+        call_command("bootstrap_demo", verbosity=0)
+
+        self.assertTrue(CentreProfile.objects.filter(id=centre.id).exists())
+        self.assertTrue(RemunerationRule.objects.filter(centre=centre).exists())
 
 
 class EvaluationCoreApiTests(TestCase):

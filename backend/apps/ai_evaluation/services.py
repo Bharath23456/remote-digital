@@ -2,6 +2,8 @@ import json
 import re
 import uuid
 import hashlib
+import logging
+import time
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -36,11 +38,15 @@ from .models import (
     AIReferencePack,
     AIReferenceUpload,
 )
-from .provider import AdmiezoAIClient, AdmiezoAIError
+from .provider import AdmiezoAIClient, AdmiezoAIError, AdmiezoAITransientError
 
 
 ALLOWED_REFERENCE_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
 MAX_REFERENCE_BYTES = 20 * 1024 * 1024
+PAPER_DEADLINE_SECONDS = 300
+QUESTION_ATTEMPTS = 3
+QUESTION_RETRY_SECONDS = 5
+logger = logging.getLogger(__name__)
 
 
 def provider_status(tenant_id, model_name="admiezo-ai-v1"):
@@ -54,8 +60,12 @@ def provider_status(tenant_id, model_name="admiezo-ai-v1"):
         return cached
     try:
         client.validate_model(model_name)
-        result = {"provider": "admiezo_ai", "configured": True, "valid": True, "available": True, "message": "ADMIEZO AI Assistant connection verified"}
+        result = {"provider": "admiezo_ai", "configured": True, "valid": True, "available": True, "message": "Model access verified; generation quota is checked per request"}
         cache.set(cache_key, result, 300)
+    except AdmiezoAITransientError as exc:
+        previously_verified = AIProviderConfiguration.objects.filter(tenant_id=tenant_id, is_active=True, verified_at__isnull=False).exists()
+        result = {"provider": "admiezo_ai", "configured": True, "valid": previously_verified, "available": previously_verified, "message": f"{exc}; using the last verified university configuration" if previously_verified else str(exc)}
+        cache.set(cache_key, result, 15)
     except AdmiezoAIError as exc:
         result = {"provider": "admiezo_ai", "configured": True, "valid": False, "available": False, "message": str(exc)}
         cache.set(cache_key, result, 60)
@@ -77,11 +87,11 @@ def provider_configuration_status(tenant_id):
     }
 
 
-def configure_provider(*, tenant_id, actor_id, api_key, version):
+def configure_provider(*, tenant_id, actor_id, api_key, version, model_name="admiezo-ai-v1"):
     secret = api_key.strip()
     candidate = AdmiezoAIClient(api_key=secret)
     try:
-        candidate.validate_model("admiezo-ai-v1")
+        candidate.validate_model(model_name)
     except AdmiezoAIError as exc:
         raise HttpError(422, str(exc)) from exc
     with transaction.atomic():
@@ -124,9 +134,15 @@ def pack_readiness(pack):
     answer_slots = set(pack.assets.filter(kind=AIReferenceUpload.Kind.REFERENCE_ANSWER).values_list("slot", flat=True))
     question_ids = set(pack.paper.questions.values_list("id", flat=True))
     guided_ids = set(pack.question_guides.exclude(question_text="").values_list("question_id", flat=True))
+    rubric_ids = set(pack.question_guides.exclude(question_text="").exclude(evaluation_guidance="").values_list("question_id", flat=True))
     missing_guides = len(question_ids - guided_ids)
+    missing_guidance = len(question_ids - rubric_ids)
+    guide_only_ready = bool(question_ids) and missing_guidance == 0
+    assets_ready = question_paper and answer_slots == {1, 2, 3}
     return {
-        "ready": question_paper and answer_slots == {1, 2, 3} and bool(question_ids) and missing_guides == 0,
+        "ready": bool(question_ids) and missing_guides == 0 and (assets_ready or guide_only_ready),
+        "guide_only_ready": guide_only_ready,
+        "missing_evaluation_guidance": missing_guidance,
         "question_paper": question_paper,
         "reference_answers": len(answer_slots & {1, 2, 3}),
         "configured_questions": len(guided_ids & question_ids),
@@ -353,6 +369,7 @@ def synchronize_ai_governance(*, tenant_id, mode):
         )
 
 
+@transaction.atomic
 def queue_assistive_analysis(*, tenant_id, actor_id, assignment):
     policy = tenant_ai_policy(tenant_id)
     if policy.ai_evaluation_mode != SecurityPolicy.AIEvaluationMode.ASSISTIVE:
@@ -457,7 +474,7 @@ def _latest_assets(script):
     return [latest[key] for key in sorted(latest)]
 
 
-def _analysis_input(analysis, pack):
+def _analysis_input(analysis, pack, deadline=None):
     guides = list(pack.question_guides.select_related("question").order_by("question__position"))
     reference_assets = list(pack.assets.order_by("kind", "slot"))
     script_assets = _latest_assets(analysis.assignment.script)
@@ -478,8 +495,18 @@ def _analysis_input(analysis, pack):
         "Media order is: question paper, reference answers 1-3, then masked script pages in page order.\n"
         f"Question configuration: {json.dumps(questions, separators=(',', ':'))}"
     )
-    media = [{"mime_type": item.mime_type, "data": read_object(item.storage_key)} for item in reference_assets]
-    media.extend({"mime_type": item.mime_type, "data": read_object(item.storage_key)} for item in script_assets)
+    def read_asset(item):
+        if deadline is None:
+            data = read_object(item.storage_key)
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AdmiezoAIError("AI paper deadline expired after 300 seconds")
+            data = read_object(item.storage_key, timeout=min(remaining, 15))
+        return {"mime_type": item.mime_type, "data": data}
+
+    media = [read_asset(item) for item in reference_assets]
+    media.extend(read_asset(item) for item in script_assets)
     return guides, prompt, media
 
 
@@ -520,54 +547,65 @@ def _validated_assessments(guides, result):
 
 
 @transaction.atomic
-def _store_assessments(analysis, result, assessments, effective_confidence):
-    AIQuestionAssessment.objects.filter(analysis=analysis).delete()
-    AIQuestionAssessment.objects.bulk_create([
-        AIQuestionAssessment(
-            tenant_id=analysis.tenant_id,
-            analysis=analysis,
-            question=item["guide"].question,
-            marks=item["marks"],
-            confidence=item["confidence"],
-            feedback=item["feedback"],
-            reasoning=item["reasoning"],
-        )
-        for item in assessments.values()
-    ])
-    analysis.effective_confidence = effective_confidence
-    analysis.raw_response = {"summary": str(result.get("summary", ""))[:4000]}
+def _store_assessment(analysis, result, item, confidence):
+    AIQuestionAssessment.objects.update_or_create(
+        analysis=analysis,
+        question=item["guide"].question,
+        defaults={
+            "tenant_id": analysis.tenant_id,
+            "marks": item["marks"],
+            "confidence": item["confidence"],
+            "feedback": item["feedback"],
+            "reasoning": item["reasoning"],
+        },
+    )
+    analysis.effective_confidence = min(analysis.effective_confidence, confidence) if analysis.effective_confidence is not None else confidence
+    summaries = analysis.raw_response.get("question_summaries", {})
+    summaries[str(item["guide"].question_id)] = str(result.get("summary", ""))[:4000]
+    analysis.raw_response = {"question_summaries": summaries}
     analysis.save(update_fields=["effective_confidence", "raw_response", "updated_at"])
 
 
-def _route_to_human(analysis, policy):
+def _route_to_human(analysis, policy, reason=None):
     assignment = analysis.assignment
-    reason = f"AI confidence {analysis.effective_confidence}% was below the configured {policy.ai_confidence_threshold}% threshold"
+    reason = reason or f"AI confidence {analysis.effective_confidence}% was below the configured {policy.ai_confidence_threshold}% threshold"
     try:
-        reassigned = redistribute_assignment(
-            tenant_id=analysis.tenant_id,
-            actor_id=analysis.requested_by_id,
-            assignment_id=assignment.id,
-            expected_version=assignment.version,
-            reason=reason,
-        )
+        # The allocation engine scores existing active, subject-eligible human evaluators.
+        # Keep redistribution and its audit event in one transaction so neither can
+        # commit if a primary or backup is unavailable.
+        with transaction.atomic():
+            reassigned = redistribute_assignment(
+                tenant_id=analysis.tenant_id,
+                actor_id=analysis.requested_by_id,
+                assignment_id=assignment.id,
+                expected_version=assignment.version,
+                reason=reason,
+                assign_backup=True,
+            )
+            if not reassigned.backup_evaluator_id:
+                raise HttpError(409, "No eligible registered backup evaluator is available for this subject")
+            reassigned.source = "ai_low_confidence"
+            reassigned.is_flagged = True
+            reassigned.flag_reason = reason[:240]
+            reassigned.save(update_fields=["source", "is_flagged", "flag_reason", "updated_at"])
+            analysis.status = AIAnalysis.Status.LOW_CONFIDENCE
+            analysis.error_message = reason[:500]
+            analysis.completed_at = timezone.now()
+            analysis.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
+            record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.routed_to_human", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "evaluator_id": str(reassigned.evaluator_id), "backup_evaluator_id": str(reassigned.backup_evaluator_id), "reason": reason})
     except HttpError as exc:
-        assignment.is_flagged = True
-        assignment.flag_reason = f"Human fallback required: {reason}"[:240]
-        assignment.save(update_fields=["is_flagged", "flag_reason", "updated_at"])
-        analysis.error_message = f"Human fallback is waiting for an eligible evaluator: {exc}"
-        analysis.status = AIAnalysis.Status.LOW_CONFIDENCE
-        analysis.completed_at = timezone.now()
-        analysis.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
+        with transaction.atomic():
+            assignment.refresh_from_db()
+            assignment.is_flagged = True
+            assignment.flag_reason = f"Human fallback required: {reason}"[:240]
+            assignment.save(update_fields=["is_flagged", "flag_reason", "updated_at"])
+            analysis.error_message = f"Manual fallback requires two eligible registered evaluators for this subject: {exc}"[:500]
+            analysis.status = AIAnalysis.Status.FAILED
+            analysis.completed_at = timezone.now()
+            analysis.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
+        logger.warning("Manual evaluation pending for script %s: %s", assignment.script_id, exc)
         return
-    reassigned.source = "ai_low_confidence"
-    reassigned.is_flagged = True
-    reassigned.flag_reason = reason[:240]
-    reassigned.save(update_fields=["source", "is_flagged", "flag_reason", "updated_at"])
-    analysis.status = AIAnalysis.Status.LOW_CONFIDENCE
-    analysis.completed_at = timezone.now()
-    analysis.save(update_fields=["status", "completed_at", "updated_at"])
-    record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.routed_to_human", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "evaluator_id": str(reassigned.evaluator_id), "confidence": str(analysis.effective_confidence), "threshold": str(policy.ai_confidence_threshold)})
-
+    logger.info("Assigned for manual evaluation: script %s, primary %s, backup %s", assignment.script_id, reassigned.evaluator_id, reassigned.backup_evaluator_id)
 
 @transaction.atomic
 def _commit_autonomous_result(analysis):
@@ -624,21 +662,85 @@ def _commit_autonomous_result(analysis):
 
 
 def process_analysis(analysis_id):
+    deadline = time.monotonic() + PAPER_DEADLINE_SECONDS
     analysis = AIAnalysis.objects.select_related("assignment__script__paper").get(id=analysis_id)
+    AdmiezoAIClient(tenant_id=analysis.tenant_id).validate_model(analysis.model_name)
     policy = tenant_ai_policy(analysis.tenant_id)
     pack = reference_pack_for(tenant_id=analysis.tenant_id, paper=analysis.assignment.script.paper)
     if not pack_readiness(pack)["ready"]:
         raise AdmiezoAIError("The AI reference pack is incomplete")
-    guides, prompt, media = _analysis_input(analysis, pack)
-    result = AdmiezoAIClient(tenant_id=analysis.tenant_id).evaluate(model=analysis.model_name, prompt=prompt, media=media)
-    assessments, confidence = _validated_assessments(guides, result)
-    _store_assessments(analysis, result, assessments, confidence)
+    guides, _, media = _analysis_input(analysis, pack, deadline=deadline)
+    reference_media = media[:pack.assets.count()]
+    script_media = media[pack.assets.count():]
+    for guide in guides:
+        if analysis.question_assessments.filter(question=guide.question).exists():
+            continue
+        number = re.sub(r"^[Qq]", "", str(guide.question.number))
+        question = {
+            "number": number,
+            "text": guide.question_text,
+            "max_marks": str(guide.max_marks),
+            "evaluation_guidance": guide.evaluation_guidance,
+        }
+        for attempt in range(1, QUESTION_ATTEMPTS + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if analysis.trigger == AIAnalysis.Trigger.AUTONOMOUS:
+                    _route_to_human(analysis, policy, "AI paper deadline expired after 300 seconds")
+                    return
+                raise AdmiezoAIError("AI paper deadline expired after 300 seconds")
+            try:
+                logger.info("Question %s attempt %s/3 extracting", number, attempt)
+                client = AdmiezoAIClient(tenant_id=analysis.tenant_id, timeout=min(remaining, 120))
+                extracted = client.extract_answer(model=analysis.model_name, question=question, media=script_media)
+                answer = str(extracted.get("answer_text", "")).strip() if isinstance(extracted, dict) else ""
+                if not answer:
+                    raise AdmiezoAIError(f"No answer extracted for Q{number}")
+                logger.info("Extracted Q%s: %s", number, answer)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AdmiezoAIError("AI paper deadline expired after 300 seconds")
+                prompt = (
+                    "Evaluate only this extracted answer against the question and supplied references. "
+                    "Return exactly one assessment for this question_id. "
+                    f"Question: {json.dumps({'question_id': str(guide.question_id), **question}, separators=(',', ':'))}. "
+                    f"Extracted answer: {answer}"
+                )
+                client = AdmiezoAIClient(tenant_id=analysis.tenant_id, timeout=min(remaining, 120))
+                result = client.evaluate(model=analysis.model_name, prompt=prompt, media=reference_media)
+                assessments, confidence = _validated_assessments([guide], result)
+            except (AdmiezoAIError, TimeoutError, ValueError, TypeError) as exc:
+                if time.monotonic() >= deadline or attempt == QUESTION_ATTEMPTS:
+                    reason = "AI paper deadline expired after 300 seconds" if time.monotonic() >= deadline else f"Q{number} failed after 3 attempts: {exc}"
+                    if analysis.trigger == AIAnalysis.Trigger.AUTONOMOUS:
+                        _route_to_human(analysis, policy, reason)
+                        return
+                    raise AdmiezoAIError(reason) from exc
+                if deadline - time.monotonic() <= QUESTION_RETRY_SECONDS:
+                    if analysis.trigger == AIAnalysis.Trigger.AUTONOMOUS:
+                        _route_to_human(analysis, policy, "AI paper deadline expired after 300 seconds")
+                        return
+                    raise AdmiezoAIError("AI paper deadline expired after 300 seconds") from exc
+                logger.warning("Retrying Q%s in 5 seconds: %s", number, exc)
+                time.sleep(QUESTION_RETRY_SECONDS)
+                continue
+            item = assessments[str(guide.question_id)]
+            _store_assessment(analysis, result, item, confidence)
+            logger.info("Q%s marks: %s/%s", number, format(item["marks"].normalize(), "f"), format(guide.max_marks.normalize(), "f"))
+            break
     analysis.refresh_from_db()
+    if time.monotonic() >= deadline:
+        if analysis.trigger == AIAnalysis.Trigger.AUTONOMOUS:
+            _route_to_human(analysis, policy, "AI paper deadline expired after 300 seconds")
+            return
+        raise AdmiezoAIError("AI paper deadline expired after 300 seconds")
+    confidence = analysis.effective_confidence
     if analysis.trigger == AIAnalysis.Trigger.ASSISTIVE:
-        analysis.status = AIAnalysis.Status.COMPLETED
-        analysis.completed_at = timezone.now()
-        analysis.save(update_fields=["status", "completed_at", "updated_at"])
-        record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.assistance.completed", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(analysis.assignment_id), "confidence": str(confidence)})
+        with transaction.atomic():
+            analysis.status = AIAnalysis.Status.COMPLETED
+            analysis.completed_at = timezone.now()
+            analysis.save(update_fields=["status", "completed_at", "updated_at"])
+            record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.assistance.completed", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(analysis.assignment_id), "confidence": str(confidence)})
     elif confidence < policy.ai_confidence_threshold:
         _route_to_human(analysis, policy)
     else:
@@ -659,7 +761,11 @@ def process_next_analysis():
     try:
         process_analysis(analysis_id)
     except Exception as exc:
-        AIAnalysis.objects.filter(id=analysis_id).update(status=AIAnalysis.Status.FAILED, error_message=str(exc)[:500], completed_at=timezone.now(), updated_at=timezone.now())
         analysis = AIAnalysis.objects.get(id=analysis_id)
-        record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.analysis.failed", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"error": analysis.error_message})
+        if analysis.trigger == AIAnalysis.Trigger.AUTONOMOUS and analysis.status == AIAnalysis.Status.RUNNING:
+            _route_to_human(analysis, tenant_ai_policy(analysis.tenant_id), f"AI processing failed: {exc}")
+        else:
+            with transaction.atomic():
+                AIAnalysis.objects.filter(id=analysis_id).update(status=AIAnalysis.Status.FAILED, error_message=str(exc)[:500], completed_at=timezone.now(), updated_at=timezone.now())
+                record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.analysis.failed", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"error": str(exc)[:500]})
     return AIAnalysis.objects.get(id=analysis_id)

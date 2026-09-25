@@ -69,8 +69,10 @@ def analysis_data(item):
         "status": item.status,
         "model_name": item.model_name,
         "effective_confidence": float(item.effective_confidence) if item.effective_confidence is not None else None,
-        "error_message": item.error_message,
+        "error_message": item.error_message or (item.assignment.flag_reason if item.status == AIAnalysis.Status.LOW_CONFIDENCE else ""),
         "evaluator": item.assignment.evaluator.display_name,
+        "backup_evaluator": item.assignment.backup_evaluator.display_name if item.assignment.backup_evaluator_id else None,
+        "assignment_status": item.assignment.status,
         "created_at": item.created_at.isoformat(),
         "started_at": item.started_at.isoformat() if item.started_at else None,
         "completed_at": item.completed_at.isoformat() if item.completed_at else None,
@@ -85,7 +87,7 @@ def _governance(request):
     if policy.ai_evaluation_mode == SecurityPolicy.AIEvaluationMode.DISABLED:
         raise HttpError(403, "AI evaluation is disabled for this university")
     if not provider["available"]:
-        raise HttpError(503, "ADMIEZO AI Assistant configuration is missing or invalid")
+        raise HttpError(503, provider["message"])
     return membership, policy, provider
 
 
@@ -140,7 +142,7 @@ def catalog(request):
     membership, policy, provider = _governance(request)
     tenant_id = membership.institution.tenant_id
     papers = Paper.objects.filter(tenant_id=tenant_id).select_related("subject").prefetch_related("questions", "ai_reference_pack__assets", "ai_reference_pack__question_guides").order_by("code")
-    analyses = AIAnalysis.objects.filter(tenant_id=tenant_id).select_related("assignment__script__paper", "assignment__evaluator").order_by("-created_at")[:200]
+    analyses = AIAnalysis.objects.filter(tenant_id=tenant_id).select_related("assignment__script__paper", "assignment__evaluator", "assignment__backup_evaluator").order_by("-created_at")[:200]
     return {
         "provider": provider,
         "governance": {
