@@ -8,11 +8,12 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from apps.allocation.models import Assignment
-from apps.assignment.models import AssignmentGovernancePolicy
+from apps.allocation.models import Assignment, AssignmentHistory
+from apps.assignment.models import AssignmentGovernancePolicy, AssignmentLock
 from apps.configuration.models import AcademicYear, ExamSession, Paper, Programme, Question, Subject, Term, Regulation
 from apps.custody.models import CustodyEvent, Script
 from apps.evaluators.models import Evaluator, Expertise
+from apps.marking.models import Evaluation
 from apps.eligibility.models import EligibilityRecord, VerificationApproval, VerificationCase
 from apps.phase4.models import (
     CentreProfile,
@@ -23,10 +24,12 @@ from apps.phase4.models import (
     ModerationPolicy,
     NotificationDelivery,
     OperationalIssue,
+    PresenceSecurityEvent,
     RecoveryDrill,
     RecoveryPlan,
     RemunerationRule,
     RuntimeIncident,
+    SecureEvaluationSession,
 )
 from apps.receiving.models import Dispatch, Packet, ReceivingException
 from apps.repository.models import ScriptAsset
@@ -36,6 +39,7 @@ from apps.scan_processing.models import ProcessingProfile, ProcessingRun
 from apps.scanning.models import ScanBatch, ScanJob, ScannerDevice
 from apps.tenancy.models import Institution, Membership, TenantAccount, TenantDomain
 from apps.tenancy.services import DEFAULT_MODULES
+from apps.workflow.models import EvaluationWorkflow
 
 
 class Command(BaseCommand):
@@ -302,29 +306,60 @@ class Command(BaseCommand):
         demo_script_ids = list(dict.fromkeys(demo_script_ids))
 
         if demo_script_ids:
+            demo_assignment_ids = list(
+                Assignment.objects.filter(
+                    tenant_id=tenant_id,
+                    script_id__in=demo_script_ids,
+                ).values_list("id", flat=True)
+            )
+            protected_assignment_ids = set(
+                Evaluation.objects.filter(tenant_id=tenant_id, assignment_id__in=demo_assignment_ids).values_list("assignment_id", flat=True)
+            )
+            protected_assignment_ids.update(
+                EvaluationWorkflow.objects.filter(tenant_id=tenant_id, assignment_id__in=demo_assignment_ids).values_list("assignment_id", flat=True)
+            )
+            protected_assignment_ids.update(
+                PresenceSecurityEvent.objects.filter(tenant_id=tenant_id, assignment_id__in=demo_assignment_ids).values_list("assignment_id", flat=True)
+            )
+            protected_assignment_ids.update(
+                SecureEvaluationSession.objects.filter(tenant_id=tenant_id, assignment_id__in=demo_assignment_ids).values_list("assignment_id", flat=True)
+            )
+            protected_assignment_ids.update(
+                AssignmentLock.objects.filter(tenant_id=tenant_id, assignment_id__in=demo_assignment_ids).values_list("assignment_id", flat=True)
+            )
+            safe_assignment_ids = [assignment_id for assignment_id in demo_assignment_ids if assignment_id not in protected_assignment_ids]
+            protected_script_ids = list(
+                Assignment.objects.filter(id__in=protected_assignment_ids).values_list("script_id", flat=True)
+            )
+            safe_script_ids = [script_id for script_id in demo_script_ids if script_id not in protected_script_ids]
+
             ProcessingRun.objects.filter(
                 tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
+                script_id__in=safe_script_ids,
             ).delete()
             ScanJob.objects.filter(
                 tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
+                script_id__in=safe_script_ids,
+            ).delete()
+            AssignmentHistory.objects.filter(
+                tenant_id=tenant_id,
+                assignment_id__in=safe_assignment_ids,
             ).delete()
             Assignment.objects.filter(
                 tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
+                id__in=safe_assignment_ids,
             ).delete()
             ScriptAsset.objects.filter(
                 tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
+                script_id__in=safe_script_ids,
             ).delete()
             CustodyEvent.objects.filter(
                 tenant_id=tenant_id,
-                script_id__in=demo_script_ids,
+                script_id__in=safe_script_ids,
             ).delete()
             Script.objects.filter(
                 tenant_id=tenant_id,
-                id__in=demo_script_ids,
+                id__in=safe_script_ids,
             ).delete()
 
         ScanBatch.objects.filter(
@@ -343,8 +378,15 @@ class Command(BaseCommand):
         Packet.objects.filter(
             tenant_id=tenant_id,
             dispatch__in=demo_dispatches,
+            scripts__isnull=True,
+            custody_barcodes__isnull=True,
+            reconciliations__isnull=True,
+            bundles__isnull=True,
+            exceptions__isnull=True,
+            alerts__isnull=True,
         ).delete()
-        demo_dispatches.delete()
+        demo_dispatches.filter(packets__isnull=True).delete()
+
 
         for paper in papers:
             ModerationPolicy.objects.update_or_create(
@@ -370,6 +412,10 @@ class Command(BaseCommand):
             name="November 2026 Central Evaluation Camp",
         ).delete()
         CentreReadiness.objects.filter(
+            tenant_id=tenant_id,
+            centre__in=demo_centres,
+        ).delete()
+        RemunerationRule.objects.filter(
             tenant_id=tenant_id,
             centre__in=demo_centres,
         ).delete()

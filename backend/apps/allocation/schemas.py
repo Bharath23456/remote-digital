@@ -40,6 +40,12 @@ class AssignmentActionIn(Schema):
     priority: int | None = None
 
 
+class AssignmentFlagIn(Schema):
+    version: int
+    flagged: bool
+    reason: str = ""
+
+
 class RedistributionIn(Schema):
     version: int
     reason: str

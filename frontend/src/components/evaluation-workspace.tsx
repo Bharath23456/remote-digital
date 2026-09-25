@@ -4,7 +4,6 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 
 import {
-  ArrowRight,
   Camera,
   Check,
   ChevronDown,
@@ -24,7 +23,6 @@ import {
   Menu,
   MessageSquareText,
   Minus,
-  MousePointer2,
   Pause,
   Play,
   Plus,
@@ -48,6 +46,7 @@ import {
 import {
   FormEvent,
   MouseEvent,
+  PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -56,7 +55,6 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { csrfFetch } from "@/lib/api";
-import { getSafeAnnotationPosition } from "@/lib/annotation-layout";
 import { IdentityVerificationModal } from "@/components/evaluator-identity-verification";
 import {
   CameraPreview,
@@ -205,8 +203,24 @@ type AnnotationKind =
   | "underline"
   | "highlight"
   | "circle"
-  | "rectangle"
-  | "arrow";
+  | "rectangle";
+type AnnotationGeometry = Record<string, number | { x: number; y: number }[]>;
+type AnnotationDrag = {
+  kind: Exclude<AnnotationKind, "tick" | "cross">;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+};
+type ResizeHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+type AnnotationResize = {
+  id: string;
+  handle: ResizeHandle;
+  startX: number;
+  startY: number;
+  geometry: { x: number; y: number; width: number; height: number };
+  current: { x: number; y: number; width: number; height: number };
+};
 type ContinuityItem = {
   assignmentId: string;
   page: number;
@@ -229,7 +243,6 @@ const tools: { kind: AnnotationKind; label: string; icon: typeof Check }[] = [
   { kind: "highlight", label: "Highlight", icon: Highlighter },
   { kind: "circle", label: "Circle", icon: Circle },
   { kind: "rectangle", label: "Rectangle", icon: RectangleHorizontal },
-  { kind: "arrow", label: "Arrow", icon: ArrowRight },
 ];
 const titleCase = (value: string) =>
   value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -606,9 +619,17 @@ export function EvaluationWorkspace({
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(
     null,
   );
+  const [annotationDrag, setAnnotationDrag] = useState<AnnotationDrag | null>(
+    null,
+  );
+  const [annotationResize, setAnnotationResize] =
+    useState<AnnotationResize | null>(null);
   const [securityNotice, setSecurityNotice] = useState("");
   const [pagesCollapsed, setPagesCollapsed] = useState(false);
+  const [flaggingAssignmentId, setFlaggingAssignmentId] = useState<string | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
+  const documentStageRef = useRef<HTMLElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
   const draftSequence = useRef(0);
   const securityNoticeTimer = useRef<number | null>(null);
   const evaluatorMode = role === "evaluator";
@@ -621,6 +642,36 @@ export function EvaluationWorkspace({
       .slice(0, 2)
       .toUpperCase() || "EV";
   const security = useSecureEvaluationSession();
+  const changeZoom = useCallback((next: number) => {
+    setFit("custom");
+    setZoom(Math.max(40, Math.min(next, 250)));
+  }, []);
+  useEffect(() => {
+    if (fit !== "custom") return;
+    const stage = documentStageRef.current;
+    if (!stage) return;
+    const before = {
+      scrollWidth: stage.scrollWidth,
+      clientWidth: stage.clientWidth,
+      scrollLeft: stage.scrollLeft,
+      scrollHeight: stage.scrollHeight,
+      clientHeight: stage.clientHeight,
+      scrollTop: stage.scrollTop,
+    };
+    const frame = window.requestAnimationFrame(() => {
+      stage.scrollLeft = Math.max(0, (stage.scrollWidth - stage.clientWidth) / 2);
+      stage.scrollTop = Math.max(0, (stage.scrollHeight - stage.clientHeight) / 2);
+      console.debug("[Evaluation zoom]", { before, after: {
+        scrollWidth: stage.scrollWidth,
+        clientWidth: stage.clientWidth,
+        scrollLeft: stage.scrollLeft,
+        scrollHeight: stage.scrollHeight,
+        clientHeight: stage.clientHeight,
+        scrollTop: stage.scrollTop,
+      }});
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [fit, zoom]);
   const [pendingAssignment, setPendingAssignment] = useState<Assignment | null>(
     null,
   );
@@ -682,7 +733,9 @@ export function EvaluationWorkspace({
           (filter === "draft" &&
             Boolean(item.draft_saved_at) &&
             item.status !== "submitted") ||
-          (filter === "completed" && item.status === "submitted") ||
+          (filter === "completed" &&
+            ["completed", "submitted"].includes(item.status) &&
+            !item.draft_saved_at) ||
           (filter === "flagged" && item.is_flagged) ||
           (filter === "priority" && item.priority >= 4),
       ),
@@ -691,6 +744,71 @@ export function EvaluationWorkspace({
   const activeIndex = manifest
     ? visible.findIndex((item) => item.id === manifest.assignment.id)
     : -1;
+  const toggleAssignmentFlag = useCallback(
+    async (item: Assignment, nextFlagged = !item.is_flagged) => {
+      setFlaggingAssignmentId(item.id);
+      const previous = item.is_flagged;
+      setAssignments((current) =>
+        current.map((candidate) =>
+          candidate.id === item.id
+            ? { ...candidate, is_flagged: nextFlagged }
+            : candidate,
+        ),
+      );
+      setManifest((current) =>
+        current && current.assignment.id === item.id
+          ? { ...current, assignment: { ...current.assignment, is_flagged: nextFlagged } }
+          : current,
+      );
+      try {
+        const updated = await api(
+          `/api/v1/allocation/assignments/${item.id}/flag`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              version: item.version,
+              flagged: nextFlagged,
+              reason: nextFlagged ? "Evaluation review flag" : "",
+            }),
+          },
+        );
+        setAssignments((current) =>
+          current.map((candidate) => candidate.id === item.id ? updated : candidate),
+        );
+        setManifest((current) =>
+          current && current.assignment.id === item.id
+            ? { ...current, assignment: { ...current.assignment, ...updated } }
+            : current,
+        );
+      } catch (reason) {
+        setAssignments((current) =>
+          current.map((candidate) =>
+            candidate.id === item.id
+              ? { ...candidate, is_flagged: previous }
+              : candidate,
+          ),
+        );
+        setManifest((current) =>
+          current && current.assignment.id === item.id
+            ? { ...current, assignment: { ...current.assignment, is_flagged: previous } }
+            : current,
+        );
+        setError(reason instanceof Error ? reason.message : "Script flag could not be saved");
+      } finally {
+        setFlaggingAssignmentId(null);
+      }
+    },
+    [],
+  );
+  const syncQuestionFlagToAssignment = useCallback(
+    async (flagged: boolean) => {
+      if (!manifest) return;
+      const item = manifest.assignment;
+      await toggleAssignmentFlag(item, flagged);
+    },
+    [manifest, toggleAssignmentFlag],
+  );
   async function openAssignment(
     item: Assignment,
     bandwidth = lowBandwidth,
@@ -864,8 +982,26 @@ export function EvaluationWorkspace({
   const saveProgress = useCallback(
     async (page: number) => {
       if (!manifest || manifest.assignment.status === "submitted") return;
-      const progress = Math.round(
-        (page * 100) / Math.max(manifest.page_count, 1),
+      const nextVisitedPages = new Set(visitedPages);
+      nextVisitedPages.add(page);
+      const requiredQuestionIds = new Set(
+        marking?.questions.filter((item) => item.required).map((item) => item.id) || [],
+      );
+      const savedRequiredMarks = new Set(
+        marking?.marks
+          .filter((item) => requiredQuestionIds.has(item.question_id))
+          .map((item) => item.question_id) || [],
+      ).size;
+      const pageCompletion = nextVisitedPages.size / Math.max(manifest.page_count, 1);
+      const markCompletion = requiredQuestionIds.size
+        ? savedRequiredMarks / requiredQuestionIds.size
+        : 1;
+      const progress = Math.min(
+        nextVisitedPages.size >= manifest.page_count &&
+          savedRequiredMarks >= requiredQuestionIds.size
+          ? 100
+          : 99,
+        Math.round(((pageCompletion + markCompletion) / 2) * 100),
       );
       if (!navigator.onLine) {
         const stored = JSON.parse(
@@ -1078,18 +1214,15 @@ export function EvaluationWorkspace({
       else if (event.key === "ArrowLeft" || event.key === "PageUp")
         goTo(currentPage - 1);
       else if (event.key === "+" || event.key === "=") {
-        setFit("custom");
-        setZoom((value) => Math.min(value + 10, 250));
+        changeZoom(zoom + 10);
       } else if (event.key === "-") {
-        setFit("custom");
-        setZoom((value) => Math.max(value - 10, 40));
+        changeZoom(zoom - 10);
       } else if (event.key.toLowerCase() === "r")
         setRotation((value) => (value + 90) % 360);
-      else if (event.key === "Escape" && !evaluatorMode) void closeViewer();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [manifest, currentPage, goTo, security.paused]);
+  }, [manifest, currentPage, goTo, security.paused, changeZoom, zoom]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
     update();
@@ -1193,6 +1326,7 @@ export function EvaluationWorkspace({
     onSecurityPause: security.pause,
     onSoftAlert: showSecurityNotice,
   });
+
   async function requestAIAnalysis() {
     if (!manifest || !aiAssist?.enabled) return;
     setSaving(true);
@@ -1214,62 +1348,38 @@ export function EvaluationWorkspace({
       setSaving(false);
     }
   }
-  async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
-    if (
-      !annotationTool ||
-      !marking ||
-      !manifest ||
-      !lockToken ||
-      security.paused
-    )
-      return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const rawX = Math.max(
-      0,
-      Math.min(1, (event.clientX - rect.left) / rect.width),
-    );
-    const rawY = Math.max(
-      0,
-      Math.min(1, (event.clientY - rect.top) / rect.height),
-    );
-    let geometry: Record<string, number | { x: number; y: number }[]>;
-    if (annotationTool === "arrow") {
-      geometry = {
-        points: [
-          { x: Math.max(0, rawX - 0.08), y: rawY },
-          { x: rawX, y: rawY },
-        ],
-      };
-    } else {
-      const isSymbol = ["tick", "cross"].includes(annotationTool);
-      const boxX = isSymbol ? rawX : Math.max(0, rawX - 0.06);
-      const boxY = isSymbol ? rawY : Math.max(0, rawY - 0.025);
-      const width = isSymbol
-        ? 0.04
-        : Math.min(0.12, 1 - Math.max(0, rawX - 0.06));
-      const height = isSymbol
-        ? 0.04
-        : Math.min(0.05, 1 - Math.max(0, rawY - 0.025));
-      const safe = getSafeAnnotationPosition(
-        { x: boxX, y: boxY, width, height },
-        pageAnnotations
-          .filter((item) => item.kind !== "arrow")
-          .map((item) => ({
-            x: Number(item.geometry.x || 0),
-            y: Number(item.geometry.y || 0),
-            width: Number(item.geometry.width || 0.04),
-            height: Number(item.geometry.height || 0.04),
-          })),
-        15 / rect.height,
-      );
-      geometry = isSymbol
-        ? { x: safe.x, y: safe.y }
-        : { x: safe.x, y: safe.y, width, height };
-    }
+  const pointFromEvent = (
+    event: { clientX: number; clientY: number },
+    rect: DOMRect,
+  ) => ({
+    x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+  });
+  const geometryFromDrag = (
+    kind: Exclude<AnnotationKind, "tick" | "cross">,
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+  ) => {
+    const x = Math.min(startX, endX);
+    const y = kind === "underline" ? startY : Math.min(startY, endY);
+    const width = Math.abs(endX - startX);
+    const height = kind === "underline" ? 0.01 : Math.abs(endY - startY);
+    return { x, y, width, height };
+  };
+  async function saveAnnotation(
+    kind: AnnotationKind,
+    geometry: AnnotationGeometry,
+    target = marking?.evaluation,
+    source?: Annotation,
+  ) {
+    if (!marking || !manifest || !lockToken || !target) return;
+
     setSaving(true);
     try {
       await api(
-        `/api/v1/marking/evaluations/${marking.evaluation.id}/annotations`,
+        `/api/v1/marking/evaluations/${target.id}/annotations`,
         {
           method: "POST",
           headers: {
@@ -1277,25 +1387,174 @@ export function EvaluationWorkspace({
             "X-Assignment-Lock": lockToken,
           },
           body: JSON.stringify({
-            version: marking.evaluation.version,
-            page_number: currentPage,
-            question_id: currentQuestion || null,
-            kind: annotationTool,
+            version: target.version,
+            page_number: source?.page_number || currentPage,
+            question_id: source?.question_id || currentQuestion || null,
+            kind,
             geometry,
-            style: {
-              color: annotationTool === "highlight" ? "#f6d85f" : "#c83232",
+            style: source?.style || {
+              color: kind === "highlight" ? "#f6d85f" : "#c83232",
               width: "2",
             },
+            symbol: source?.symbol || "",
           }),
         },
       );
       await refreshMarking(manifest.assignment.id);
     } catch (reason) {
       setError(
-        reason instanceof Error
-          ? reason.message
-          : "Annotation could not be saved",
+        reason instanceof Error ? reason.message : "Annotation could not be saved",
       );
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
+    if (
+      !annotationTool ||
+      !["tick", "cross"].includes(annotationTool) ||
+      !marking ||
+      !manifest ||
+      !lockToken ||
+      security.paused
+    )
+      return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = pointFromEvent(event, rect);
+    await saveAnnotation(annotationTool, point);
+  }
+  function startAnnotationDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (
+      !annotationTool ||
+      !["underline", "highlight", "circle", "rectangle"].includes(annotationTool) ||
+      security.paused
+    )
+      return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = pointFromEvent(event, event.currentTarget.getBoundingClientRect());
+    setAnnotationDrag({
+      kind: annotationTool as Exclude<AnnotationKind, "tick" | "cross">,
+      startX: point.x,
+      startY: point.y,
+      currentX: point.x,
+      currentY: point.y,
+    });
+  }
+  function updateAnnotationDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!annotationDrag) return;
+    const point = pointFromEvent(event, event.currentTarget.getBoundingClientRect());
+    setAnnotationDrag((current) =>
+      current ? { ...current, currentX: point.x, currentY: point.y } : null,
+    );
+  }
+  async function finishAnnotationDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!annotationDrag) return;
+    const point = pointFromEvent(event, event.currentTarget.getBoundingClientRect());
+    const geometry = geometryFromDrag(
+      annotationDrag.kind,
+      annotationDrag.startX,
+      annotationDrag.startY,
+      point.x,
+      point.y,
+    );
+    setAnnotationDrag(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    await saveAnnotation(annotationDrag.kind, geometry);
+  }
+  function startAnnotationResize(
+    id: string,
+    handle: ResizeHandle,
+    event: ReactPointerEvent<HTMLSpanElement>,
+  ) {
+    const target = pageAnnotations.find((item) => item.id === id);
+    const rect = pageRef.current?.getBoundingClientRect();
+    if (!target || !rect || !marking || security.paused) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const geometry = {
+      x: Number(target.geometry.x || 0),
+      y: Number(target.geometry.y || 0),
+      width: Number(target.geometry.width || 0.01),
+      height: Number(target.geometry.height || 0.01),
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedAnnotation(id);
+    setAnnotationResize({
+      id,
+      handle,
+      startX: event.clientX,
+      startY: event.clientY,
+      geometry,
+      current: geometry,
+    });
+  }
+  function updateAnnotationResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!annotationResize) return;
+    const rect = pageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const dx = (event.clientX - annotationResize.startX) / rect.width;
+    const dy = (event.clientY - annotationResize.startY) / rect.height;
+    const original = annotationResize.geometry;
+    let x = original.x;
+    let y = original.y;
+    let width = original.width;
+    let height = original.height;
+    if (annotationResize.handle.includes("w")) {
+      x = Math.max(0, Math.min(1, original.x + dx));
+      width = original.width - dx;
+    }
+    if (annotationResize.handle.includes("e")) width = original.width + dx;
+    if (annotationResize.handle.includes("n")) {
+      y = Math.max(0, Math.min(1, original.y + dy));
+      height = original.height - dy;
+    }
+    if (annotationResize.handle.includes("s")) height = original.height + dy;
+    if (annotationResize.handle === "n" || annotationResize.handle === "s") {
+      x = original.x;
+      width = original.width;
+    }
+    if (annotationResize.handle === "e" || annotationResize.handle === "w") {
+      y = original.y;
+      height = original.height;
+    }
+    setAnnotationResize((current) =>
+      current
+        ? {
+            ...current,
+            current: {
+              x: Math.max(0, Math.min(1, x)),
+              y: Math.max(0, Math.min(1, y)),
+              width: Math.max(0.001, Math.min(1 - x, width)),
+              height: Math.max(0.001, Math.min(1 - y, height)),
+            },
+          }
+        : null,
+    );
+  }
+  async function finishAnnotationResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!annotationResize) return;
+    const target = pageAnnotations.find((item) => item.id === annotationResize.id);
+    const geometry = annotationResize.current;
+    setAnnotationResize(null);
+    if (!target || !marking || !manifest || !lockToken) return;
+    setSaving(true);
+    try {
+      const deleted = await api(
+        `/api/v1/marking/evaluations/${marking.evaluation.id}/annotations/${target.id}/action`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Assignment-Lock": lockToken },
+          body: JSON.stringify({ version: marking.evaluation.version, action: "delete" }),
+        },
+      );
+      await saveAnnotation(target.kind as AnnotationKind, geometry, {
+        ...marking.evaluation,
+        version: deleted.version,
+      }, target);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Annotation could not be resized");
     } finally {
       setSaving(false);
     }
@@ -1496,7 +1755,7 @@ export function EvaluationWorkspace({
           <SecurityPauseOverlay controller={security} onClose={closeViewer} />
         )}
         <div className="security-watermark" aria-hidden="true">
-          ADMIEZO · {manifest.assignment.script} · {securityCode || "SECURE"}
+          ADMIEZO Â· {manifest.assignment.script} Â· {securityCode || "SECURE"}
         </div>
         <header className="viewer-header evaluation-desk-header">
           <button
@@ -1614,23 +1873,11 @@ export function EvaluationWorkspace({
             </button>
           </div>
           <div className="tool-group">
-            <button
-              title="Zoom out"
-              onClick={() => {
-                setFit("custom");
-                setZoom((value) => Math.max(value - 10, 40));
-              }}
-            >
+            <button title="Zoom out" onClick={() => changeZoom(zoom - 10)}>
               <Minus />
             </button>
             <span>{zoom}%</span>
-            <button
-              title="Zoom in"
-              onClick={() => {
-                setFit("custom");
-                setZoom((value) => Math.min(value + 10, 250));
-              }}
-            >
+            <button title="Zoom in" onClick={() => changeZoom(zoom + 10)}>
               <Plus />
             </button>
             <button
@@ -1736,13 +1983,20 @@ export function EvaluationWorkspace({
               </span>
             </div>
           </aside>
-          <main className={`document-stage ${multiPage ? "multi" : "single"}`}>
+          <main
+            ref={documentStageRef}
+            className={`document-stage ${multiPage ? "multi" : "single"}`}
+          >
             <header className="script-header">
               <div>
                 <FileText />
                 <strong>Answer Script</strong>
               </div>
             </header>
+            <div
+              className="document-stage-content"
+              style={{ width: fit === "custom" ? `${zoom}%` : "100%" }}
+            >
             {viewerLoading ? (
               <div className="viewer-empty">
                 <RefreshCw className="spin" />
@@ -1765,7 +2019,7 @@ export function EvaluationWorkspace({
                   alt={`Anonymous script page ${item.page_number}`}
                   loading={item.page_number <= 2 ? "eager" : "lazy"}
                   style={{
-                    width: `${zoom}%`,
+                    width: "100%",
                     transform: `rotate(${rotation}deg)`,
                   }}
                 />
@@ -1773,11 +2027,22 @@ export function EvaluationWorkspace({
             ) : page ? (
               <div
                 className={`script-page-wrap fit-${fit} ${annotationTool ? "annotating" : ""} ${highlightQuestion ? "question-jump" : ""}`}
+                ref={pageRef}
                 style={{
-                  width: fit === "custom" ? `${zoom}%` : undefined,
+                  width: fit === "custom" ? "100%" : undefined,
                   transform: `rotate(${rotation}deg)`,
                 }}
                 onClick={addAnnotation}
+                onPointerDown={startAnnotationDrag}
+                onPointerMove={updateAnnotationDrag}
+                onPointerUp={(event) => {
+                  void finishAnnotationDrag(event);
+                  void finishAnnotationResize(event);
+                }}
+                onPointerCancel={(event) => {
+                  setAnnotationDrag(null);
+                  void finishAnnotationResize(event);
+                }}
               >
                 <img
                   className={enhance ? "enhanced" : ""}
@@ -1790,15 +2055,36 @@ export function EvaluationWorkspace({
                     item={item}
                     selected={item.id === selectedAnnotation}
                     onSelect={setSelectedAnnotation}
+                    geometryOverride={
+                      annotationResize?.id === item.id
+                        ? annotationResize.current
+                        : undefined
+                    }
+                    onResizeStart={startAnnotationResize}
                     key={item.id}
                   />
                 ))}
+                {annotationDrag && (
+                  <span
+                    className={`annotation-shape ${annotationDrag.kind} preview`}
+                    style={geometryStyle(
+                      geometryFromDrag(
+                        annotationDrag.kind,
+                        annotationDrag.startX,
+                        annotationDrag.startY,
+                        annotationDrag.currentX,
+                        annotationDrag.currentY,
+                      ),
+                    )}
+                  />
+                )}
               </div>
             ) : (
               <div className="viewer-empty">
                 Page {currentPage} is unavailable.
               </div>
             )}
+            </div>
           </main>
           {marking && (
             <MarkingPanel
@@ -1814,6 +2100,8 @@ export function EvaluationWorkspace({
               onUndo={undoAnnotation}
               onSubmit={submitEvaluation}
               setError={setError}
+              onQuestionFlagChange={syncQuestionFlagToAssignment}
+              canSubmit={visitedPages.size >= manifest.pages.length}
               dashboardWidth={dashboardWidth}
               onResizeStart={startDashboardResize}
             />
@@ -1849,15 +2137,22 @@ export function EvaluationWorkspace({
           <button
             className="secondary-button"
             onClick={() => security.pause("manual_pause")}
+            disabled={manifest.assignment.status === "submitted"}
           >
             <Pause />
             Pause Evaluation
           </button>
           <button
-            className="viewer-submit"
-            onClick={submitEvaluation}
-            disabled={!marking || saving || security.paused}
-          >
+  className="viewer-submit"
+  onClick={submitEvaluation}
+  disabled={
+    !marking ||
+    saving ||
+    security.paused ||
+    visitedPages.size < manifest.pages.length ||
+    new Set(marking.marks.map((item) => item.question_id)).size < marking.questions.length
+  }
+>
             <SquareCheckBig />
             Submit valuation
           </button>
@@ -1975,7 +2270,7 @@ export function EvaluationWorkspace({
                       <strong>{item.script}</strong>
                       <br />
                       <small>
-                        {item.page_count} pages · P{item.priority}
+                        {item.page_count} pages Â· P{item.priority}
                       </small>
                     </td>
                     <td>{item.paper}</td>
@@ -1989,7 +2284,7 @@ export function EvaluationWorkspace({
                         </div>
                         <small>
                           {item.progress_percent}%
-                          {item.draft_saved_at ? " · Draft saved" : ""}
+                          {item.draft_saved_at && item.status !== "submitted" ? " Â· Draft saved" : ""}
                         </small>
                       </div>
                     </td>
@@ -2016,8 +2311,16 @@ export function EvaluationWorkspace({
                         >
                           <Eye />
                         </button>
-                        <button title="Flag for review">
-                          <Flag />
+                        <button
+                          type="button"
+                          title={item.is_flagged ? "Unflag script" : "Flag script for review"}
+                          aria-label={item.is_flagged ? "Unflag script" : "Flag script for review"}
+                          aria-pressed={item.is_flagged}
+                          className={item.is_flagged ? "flagged" : undefined}
+                          disabled={flaggingAssignmentId === item.id}
+                          onClick={() => void toggleAssignmentFlag(item)}
+                        >
+                          <Flag fill={item.is_flagged ? "currentColor" : "none"} />
                         </button>
                       </div>
                     </td>
@@ -2036,6 +2339,7 @@ export function EvaluationWorkspace({
     </div>
   );
 }
+
 
 function AIAssistPanel({
   state,
@@ -2170,19 +2474,44 @@ function AIAssistPanel({
   );
 }
 
+function geometryStyle(geometry: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}) {
+  return {
+    left: `${geometry.x * 100}%`,
+    top: `${geometry.y * 100}%`,
+    width: `${geometry.width * 100}%`,
+    height: `${geometry.height * 100}%`,
+  };
+
+}
+
 function AnnotationLayer({
   item,
   selected,
   onSelect,
+  geometryOverride,
+  onResizeStart,
 }: {
   item: Annotation;
   selected: boolean;
   onSelect: (id: string) => void;
+  geometryOverride?: { x: number; y: number; width: number; height: number };
+  onResizeStart: (
+    id: string,
+    handle: ResizeHandle,
+    event: ReactPointerEvent<HTMLSpanElement>,
+  ) => void;
 }) {
-  const x = Number(item.geometry.x || 0);
-  const y = Number(item.geometry.y || 0);
-  const width = Number(item.geometry.width || 0.04);
-  const height = Number(item.geometry.height || 0.04);
+  const geometry = geometryOverride || {
+    x: Number(item.geometry.x || 0),
+    y: Number(item.geometry.y || 0),
+    width: Number(item.geometry.width || 0.04),
+    height: Number(item.geometry.height || 0.04),
+  };
   const select = (event: MouseEvent<HTMLElement>) => {
     event.stopPropagation();
     onSelect(item.id);
@@ -2191,36 +2520,28 @@ function AnnotationLayer({
     return (
       <span
         className={`annotation-mark ${item.kind} ${selected ? "selected" : ""}`}
-        style={{ left: `${x * 100}%`, top: `${y * 100}%` }}
+        style={{ left: `${geometry.x * 100}%`, top: `${geometry.y * 100}%` }}
         onClick={select}
       >
-        {item.kind === "tick" ? "✓" : "×"}
+        {item.kind === "tick" ? "âœ“" : "Ã—"}
       </span>
     );
-  if (item.kind === "arrow") {
-    const points = item.geometry.points as { x: number; y: number }[];
-    const end = points?.at(-1) || { x, y };
-    return (
-      <span
-        className={`annotation-mark arrow ${selected ? "selected" : ""}`}
-        style={{ left: `${end.x * 100}%`, top: `${end.y * 100}%` }}
-        onClick={select}
-      >
-        ➜
-      </span>
-    );
-  }
+  const handles: ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
   return (
     <span
       className={`annotation-shape ${item.kind} ${selected ? "selected" : ""}`}
-      style={{
-        left: `${x * 100}%`,
-        top: `${y * 100}%`,
-        width: `${width * 100}%`,
-        height: `${height * 100}%`,
-      }}
+      style={geometryStyle(geometry)}
       onClick={select}
-    />
+    >
+      {selected && ["underline", "highlight", "circle", "rectangle"].includes(item.kind) &&
+        handles.map((handle) => (
+          <span
+            key={handle}
+            className={`annotation-handle ${handle}`}
+            onPointerDown={(event) => onResizeStart(item.id, handle, event)}
+          />
+        ))}
+    </span>
   );
 }
 
@@ -2237,6 +2558,8 @@ function MarkingPanel({
   onUndo,
   onSubmit,
   setError,
+  onQuestionFlagChange,
+  canSubmit,
   dashboardWidth,
   onResizeStart,
 }: {
@@ -2252,6 +2575,8 @@ function MarkingPanel({
   onUndo: () => Promise<void>;
   onSubmit: () => Promise<void>;
   setError: (message: string) => void;
+  onQuestionFlagChange: (flagged: boolean) => Promise<void>;
+  canSubmit: boolean;
   dashboardWidth: number;
   onResizeStart: (event: React.PointerEvent) => void;
 }) {
@@ -2283,6 +2608,19 @@ function MarkingPanel({
       ? marking.questions[currentQuestionIndex + 1]
       : null;
   const comment = question?.id ? (comments[question.id] ?? "") : "";
+  const marksPattern = /^\d*\.?\d?$/;
+  const validateMarks = (value: string) => {
+    if (!value || value === ".") {
+      setError("Marks awarded must be a number");
+      return null;
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0 || (question?.max_marks !== undefined && parsed > question.max_marks)) {
+      setError(`Marks awarded must be between 0 and ${question?.max_marks ?? 0}`);
+      return null;
+    }
+    return parsed;
+  };
   useEffect(() => {
     const mark = marking.marks.find(
       (item) => item.question_id === question?.id,
@@ -2297,10 +2635,12 @@ function MarkingPanel({
       }));
     }
     setConfirmed(mark?.examiner_confirmed || false);
-  }, [marking.marks, question?.id]);
+  }, [question?.id]);
   async function saveMark(event: FormEvent) {
     event.preventDefault();
     if (!question) return;
+    const parsedMarks = validateMarks(marks);
+    if (parsedMarks === null) return;
     const review = Boolean(reviewByQuestion[question.id]);
     try {
       await api(`/api/v1/marking/evaluations/${marking.evaluation.id}/marks`, {
@@ -2312,7 +2652,7 @@ function MarkingPanel({
         body: JSON.stringify({
           version: marking.evaluation.version,
           question_id: question.id,
-          marks: Number(marks),
+          marks: parsedMarks,
           outcome,
           adjustment,
           marked_for_review: review,
@@ -2357,8 +2697,11 @@ function MarkingPanel({
   }
   async function toggleQuestionFlag() {
     if (!question) return;
+    const parsedMarks = validateMarks(marks);
+    if (parsedMarks === null) return;
     const review = question.id ? Boolean(reviewByQuestion[question.id]) : false;
     const nextReview = !review;
+    let updatedMarking: Marking | null = null;
     try {
       await api(`/api/v1/marking/evaluations/${marking.evaluation.id}/marks`, {
         method: "POST",
@@ -2369,7 +2712,7 @@ function MarkingPanel({
         body: JSON.stringify({
           version: marking.evaluation.version,
           question_id: question.id,
-          marks: Number(marks),
+          marks: parsedMarks,
           outcome,
           adjustment,
           marked_for_review: nextReview,
@@ -2378,12 +2721,46 @@ function MarkingPanel({
           rubric_criterion_id: question.criteria[0]?.id || null,
         }),
       });
+      updatedMarking = await onReload();
+      await onQuestionFlagChange(
+        updatedMarking.marks.some(
+          (mark) => mark.question_id === question.id && mark.marked_for_review,
+        ),
+      );
       setReviewByQuestion((previous) => ({
         ...previous,
         [question.id]: nextReview,
       }));
-      await onReload();
     } catch (reason) {
+      if (updatedMarking) {
+        try {
+          await api(`/api/v1/marking/evaluations/${marking.evaluation.id}/marks`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Assignment-Lock": lockToken,
+            },
+            body: JSON.stringify({
+              version: updatedMarking.evaluation.version,
+              question_id: question.id,
+              marks: parsedMarks,
+              outcome,
+              adjustment,
+              marked_for_review: review,
+              requires_attention: adjustment !== "none",
+              examiner_confirmed: confirmed,
+              rubric_criterion_id: question.criteria[0]?.id || null,
+            }),
+          });
+          await onReload();
+        } catch {
+          /* Preserve the original error while the next refresh reconciles state. */
+        }
+      }
+      setReviewByQuestion((previous) => ({
+        ...previous,
+        [question.id]: review,
+      }));
       setError(
         reason instanceof Error
           ? reason.message
@@ -2412,7 +2789,7 @@ function MarkingPanel({
         <div>
           <strong>Evaluation Dashboard</strong>
           <span>
-            v{marking.scheme.version} · {titleCase(marking.evaluation.status)}
+            v{marking.scheme.version} Â· {titleCase(marking.evaluation.status)}
           </span>
         </div>
         <div className="mark-total">
@@ -2440,7 +2817,7 @@ function MarkingPanel({
           Scheme of Evaluation
         </button>
         <button className={tab === "sample" ? "active" : ""} onClick={() => setTab("sample")}>
-    Sample Answer Paper ▾
+    Sample Answer Paper â–¾
   </button>
       </div>
       {tab === "marking" && (
@@ -2504,7 +2881,7 @@ function MarkingPanel({
               {question?.criteria.map((item) => (
                 <div className="criterion-note" key={item.id}>
                   <strong>
-                    {item.code} · {item.max_marks}
+                    {item.code} Â· {item.max_marks}
                   </strong>
                   <span>{item.description}</span>
                 </div>
@@ -2513,14 +2890,17 @@ function MarkingPanel({
                 <label>
                   <span>Marks awarded</span>
                   <input
-                    type="number"
-                    min={adjustment === "negative" ? undefined : 0}
-                    max={
-                      adjustment === "bonus" ? undefined : question?.max_marks
-                    }
-                    step="0.5"
+                    type="text"
+                    inputMode="decimal"
+                    min={0}
+                    max={question?.max_marks}
                     value={marks}
-                    onChange={(event) => setMarks(event.target.value)}
+                    onChange={(event) => {
+                      if (marksPattern.test(event.target.value)) setMarks(event.target.value);
+                    }}
+                    onBlur={() => {
+                      if (marks) validateMarks(marks);
+                    }}
                     disabled={readOnly}
                   />
                 </label>
@@ -2536,8 +2916,6 @@ function MarkingPanel({
                   >
                     <option value="evaluated">Evaluated</option>
                     <option value="unanswered">Unanswered</option>
-                    <option value="not_applicable">Not applicable</option>
-                    <option value="skipped">Skipped</option>
                   </select>
                 </label>
                 <label>
@@ -2549,8 +2927,6 @@ function MarkingPanel({
                   >
                     <option value="none">None</option>
                     <option value="grace">Grace</option>
-                    <option value="negative">Negative</option>
-                    <option value="bonus">Bonus</option>
                   </select>
                 </label>
                 <div className="mark-checks">
@@ -2577,7 +2953,7 @@ function MarkingPanel({
             <section className="marking-section">
               <div className="marking-section-title">
                 <strong>Annotations</strong>
-                <span>Click the script to place</span>
+                <span>Click and drag the script to draw</span>
               </div>
               <div className="annotation-tools">
                 {tools.map((tool) => (
@@ -2595,13 +2971,6 @@ function MarkingPanel({
                     <tool.icon />
                   </button>
                 ))}
-                <button
-                  title="Select"
-                  className={!annotationTool ? "active" : ""}
-                  onClick={() => setAnnotationTool(null)}
-                >
-                  <MousePointer2 />
-                </button>
                 <button
                   title="Undo last annotation"
                   onClick={onUndo}
@@ -2621,7 +2990,7 @@ function MarkingPanel({
                 <Flag />
                 {question?.id && reviewByQuestion[question.id]
                   ? "Unflag Question"
-                  : "⚑ Flag Question"}
+                  : "âš‘ Flag Question"}
               </button>
             </section>
             <section className="marking-section">
