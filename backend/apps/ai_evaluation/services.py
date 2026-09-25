@@ -5,7 +5,7 @@ import hashlib
 import logging
 import time
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.db import transaction
 from django.core.cache import cache
@@ -138,9 +138,8 @@ def pack_readiness(pack):
     missing_guides = len(question_ids - guided_ids)
     missing_guidance = len(question_ids - rubric_ids)
     guide_only_ready = bool(question_ids) and missing_guidance == 0
-    assets_ready = question_paper and answer_slots == {1, 2, 3}
     return {
-        "ready": bool(question_ids) and missing_guides == 0 and (assets_ready or guide_only_ready),
+        "ready": bool(question_ids) and missing_guides == 0 and guide_only_ready,
         "guide_only_ready": guide_only_ready,
         "missing_evaluation_guidance": missing_guidance,
         "question_paper": question_paper,
@@ -476,7 +475,6 @@ def _latest_assets(script):
 
 def _analysis_input(analysis, pack, deadline=None):
     guides = list(pack.question_guides.select_related("question").order_by("question__position"))
-    reference_assets = list(pack.assets.order_by("kind", "slot"))
     script_assets = _latest_assets(analysis.assignment.script)
     questions = [
         {
@@ -490,9 +488,9 @@ def _analysis_input(analysis, pack, deadline=None):
         for item in guides
     ]
     prompt = (
-        "Evaluate the masked answer script against the configured questions and reference answers. "
+        "Evaluate the masked answer script against the configured question text and marking guidance. "
         "Return exactly one assessment for every question_id. Marks must be between zero and max_marks. "
-        "Media order is: question paper, reference answers 1-3, then masked script pages in page order.\n"
+        "Media contains only masked script pages in page order.\n"
         f"Question configuration: {json.dumps(questions, separators=(',', ':'))}"
     )
     def read_asset(item):
@@ -505,8 +503,7 @@ def _analysis_input(analysis, pack, deadline=None):
             data = read_object(item.storage_key, timeout=min(remaining, 15))
         return {"mime_type": item.mime_type, "data": data}
 
-    media = [read_asset(item) for item in reference_assets]
-    media.extend(read_asset(item) for item in script_assets)
+    media = [read_asset(item) for item in script_assets]
     return guides, prompt, media
 
 
@@ -519,7 +516,7 @@ def _validated_assessments(guides, result):
         if not guide or question_id in output:
             raise AdmiezoAIError("ADMIEZO AI Assistant returned unknown or duplicate question assessments")
         try:
-            marks = Decimal(str(item.get("marks"))).quantize(Decimal("0.01"))
+            marks = Decimal(str(item.get("marks"))).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
             confidence = Decimal(str(item.get("confidence"))).quantize(Decimal("0.01"))
         except (InvalidOperation, TypeError) as exc:
             raise AdmiezoAIError("ADMIEZO AI Assistant returned invalid marks or confidence") from exc
@@ -570,9 +567,7 @@ def _route_to_human(analysis, policy, reason=None):
     assignment = analysis.assignment
     reason = reason or f"AI confidence {analysis.effective_confidence}% was below the configured {policy.ai_confidence_threshold}% threshold"
     try:
-        # The allocation engine scores existing active, subject-eligible human evaluators.
-        # Keep redistribution and its audit event in one transaction so neither can
-        # commit if a primary or backup is unavailable.
+        # The allocation engine scores active, subject-eligible human evaluators.
         with transaction.atomic():
             reassigned = redistribute_assignment(
                 tenant_id=analysis.tenant_id,
@@ -580,10 +575,7 @@ def _route_to_human(analysis, policy, reason=None):
                 assignment_id=assignment.id,
                 expected_version=assignment.version,
                 reason=reason,
-                assign_backup=True,
             )
-            if not reassigned.backup_evaluator_id:
-                raise HttpError(409, "No eligible registered backup evaluator is available for this subject")
             reassigned.source = "ai_low_confidence"
             reassigned.is_flagged = True
             reassigned.flag_reason = reason[:240]
@@ -592,20 +584,20 @@ def _route_to_human(analysis, policy, reason=None):
             analysis.error_message = reason[:500]
             analysis.completed_at = timezone.now()
             analysis.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
-            record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.routed_to_human", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "evaluator_id": str(reassigned.evaluator_id), "backup_evaluator_id": str(reassigned.backup_evaluator_id), "reason": reason})
+            record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.routed_to_human", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "evaluator_id": str(reassigned.evaluator_id), "reason": reason})
     except HttpError as exc:
         with transaction.atomic():
             assignment.refresh_from_db()
             assignment.is_flagged = True
             assignment.flag_reason = f"Human fallback required: {reason}"[:240]
             assignment.save(update_fields=["is_flagged", "flag_reason", "updated_at"])
-            analysis.error_message = f"Manual fallback requires two eligible registered evaluators for this subject: {exc}"[:500]
+            analysis.error_message = f"Manual fallback requires an eligible registered evaluator for this subject: {exc}"[:500]
             analysis.status = AIAnalysis.Status.FAILED
             analysis.completed_at = timezone.now()
             analysis.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
         logger.warning("Manual evaluation pending for script %s: %s", assignment.script_id, exc)
         return
-    logger.info("Assigned for manual evaluation: script %s, primary %s, backup %s", assignment.script_id, reassigned.evaluator_id, reassigned.backup_evaluator_id)
+    logger.info("Assigned for manual evaluation: script %s, evaluator %s", assignment.script_id, reassigned.evaluator_id)
 
 @transaction.atomic
 def _commit_autonomous_result(analysis):
@@ -696,7 +688,7 @@ def process_analysis(analysis_id):
                 answer = str(extracted.get("answer_text", "")).strip() if isinstance(extracted, dict) else ""
                 if not answer:
                     raise AdmiezoAIError(f"No answer extracted for Q{number}")
-                logger.info("Extracted Q%s: %s", number, answer)
+                logger.info("Extracted Q%s answer text (%s characters)", number, len(answer))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise AdmiezoAIError("AI paper deadline expired after 300 seconds")
@@ -726,7 +718,7 @@ def process_analysis(analysis_id):
                 continue
             item = assessments[str(guide.question_id)]
             _store_assessment(analysis, result, item, confidence)
-            logger.info("Q%s marks: %s/%s", number, format(item["marks"].normalize(), "f"), format(guide.max_marks.normalize(), "f"))
+            logger.info("Q%s marks: %s/%s", number, item["marks"], guide.max_marks)
             break
     analysis.refresh_from_db()
     if time.monotonic() >= deadline:

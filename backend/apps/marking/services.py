@@ -85,7 +85,7 @@ def _decimal(value, label):
 
 def _recalculate_total(evaluation):
     total = sum((item.marks for item in latest_marks(evaluation)), Decimal("0"))
-    rounded_total = total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    rounded_total = total.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
     evaluation.total_marks = rounded_total
     return rounded_total
 

@@ -36,7 +36,7 @@ def _stored_api_key(tenant_id):
 
 
 def _provider_model(model):
-    if not model or model == "admiezo-ai-v1":
+    if not model or model.startswith("admiezo-"):
         return settings.ADMIEZO_AI_PROVIDER_MODEL
     return model.removeprefix("models/")
 
@@ -150,7 +150,7 @@ class AdmiezoAIClient:
             schema=schema,
             system_instruction=(
                 "You are an independent university answer-script evaluator. Work only from the extracted masked-script answer, "
-                "question configuration, marking guidance, question paper, and reference answers. Award defensible "
+                "question configuration, and marking guidance. Award defensible "
                 "question-wise marks, never infer candidate identity, and lower confidence whenever pages or answers are unclear."
             ),
         )

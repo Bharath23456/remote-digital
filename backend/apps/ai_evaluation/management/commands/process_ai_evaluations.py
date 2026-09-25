@@ -20,12 +20,15 @@ class Command(BaseCommand):
         handler = logging.StreamHandler(self.stdout)
         handler.setFormatter(logging.Formatter("%(message)s"))
         service_logger.addHandler(handler)
-        while True:
-            analysis = process_next_analysis()
-            if analysis:
-                status = "Assigned for manual evaluation" if analysis.status == AIAnalysis.Status.LOW_CONFIDENCE else analysis.status
-                self.stdout.write(f"{analysis.id} {status}")
-            if not options["forever"]:
-                break
-            if not analysis:
-                time.sleep(max(options["interval"], 0.25))
+        try:
+            while True:
+                analysis = process_next_analysis()
+                if analysis:
+                    status = "Assigned for manual evaluation" if analysis.status == AIAnalysis.Status.LOW_CONFIDENCE else analysis.status
+                    self.stdout.write(f"{analysis.id} {status}")
+                if not options["forever"]:
+                    break
+                if not analysis:
+                    time.sleep(max(options["interval"], 0.25))
+        finally:
+            service_logger.removeHandler(handler)

@@ -1,24 +1,28 @@
-from django.db import migrations
-
-
-def normalize_removed_options(apps, schema_editor):
-    QuestionMark = apps.get_model("marking", "QuestionMark")
-    QuestionMark.objects.filter(outcome__in=["not_applicable", "skipped"]).update(
-        outcome="unanswered"
-    )
-    QuestionMark.objects.filter(adjustment__in=["negative", "bonus"]).update(
-        adjustment="none"
-    )
-
-
-def reverse_normalization(apps, schema_editor):
-    # Removed options are intentionally not restored.
-    pass
+from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
     dependencies = [("marking", "0003_questionpageanchor")]
 
+    # Historical outcomes and adjustments are audit evidence. Change only the
+    # choices offered for new marks; existing rows retain their original values.
     operations = [
-        migrations.RunPython(normalize_removed_options, reverse_normalization),
+        migrations.AlterField(
+            model_name="questionmark",
+            name="outcome",
+            field=models.CharField(
+                choices=[("evaluated", "Evaluated"), ("unanswered", "Unanswered")],
+                default="evaluated",
+                max_length=20,
+            ),
+        ),
+        migrations.AlterField(
+            model_name="questionmark",
+            name="adjustment",
+            field=models.CharField(
+                choices=[("none", "None"), ("grace", "Grace")],
+                default="none",
+                max_length=16,
+            ),
+        ),
     ]

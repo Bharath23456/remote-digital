@@ -48,7 +48,7 @@ export function AIEvaluationWorkspace() {
     if (catalog.governance.mode === "autonomous" && paper.status !== "frozen") items.push("Freeze this paper configuration");
     if (readiness.total_questions === 0) items.push("Configure questions and maximum marks");
     else if (readiness.missing_question_guides > 0) items.push(`Complete question text for ${readiness.missing_question_guides} ${readiness.missing_question_guides === 1 ? "question" : "questions"}`);
-    if (!readiness.guide_only_ready && (!readiness.question_paper || readiness.reference_answers < 3)) items.push("Complete evaluation guidance for every question, or upload the question paper and three reference answers");
+    if (readiness.missing_evaluation_guidance > 0) items.push(`Complete evaluation guidance for ${readiness.missing_evaluation_guidance} ${readiness.missing_evaluation_guidance === 1 ? "question" : "questions"}`);
     if (catalog.governance.mode === "autonomous" && paper.ready_scripts === 0) items.push("No unassigned stored scripts are ready for this paper");
     return items;
   }, [catalog.governance.mode, catalog.provider.available, catalog.provider.message, paper]);

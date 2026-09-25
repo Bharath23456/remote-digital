@@ -4,6 +4,7 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 
 import {
+  ArrowRight,
   Camera,
   Check,
   ChevronDown,
@@ -203,10 +204,11 @@ type AnnotationKind =
   | "underline"
   | "highlight"
   | "circle"
-  | "rectangle";
+  | "rectangle"
+  | "arrow";
 type AnnotationGeometry = Record<string, number | { x: number; y: number }[]>;
 type AnnotationDrag = {
-  kind: Exclude<AnnotationKind, "tick" | "cross">;
+  kind: Exclude<AnnotationKind, "tick" | "cross" | "arrow">;
   startX: number;
   startY: number;
   currentX: number;
@@ -243,6 +245,7 @@ const tools: { kind: AnnotationKind; label: string; icon: typeof Check }[] = [
   { kind: "highlight", label: "Highlight", icon: Highlighter },
   { kind: "circle", label: "Circle", icon: Circle },
   { kind: "rectangle", label: "Rectangle", icon: RectangleHorizontal },
+  { kind: "arrow", label: "Arrow", icon: ArrowRight },
 ];
 const titleCase = (value: string) =>
   value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -733,9 +736,7 @@ export function EvaluationWorkspace({
           (filter === "draft" &&
             Boolean(item.draft_saved_at) &&
             item.status !== "submitted") ||
-          (filter === "completed" &&
-            ["completed", "submitted"].includes(item.status) &&
-            !item.draft_saved_at) ||
+          (filter === "completed" && item.status === "submitted") ||
           (filter === "flagged" && item.is_flagged) ||
           (filter === "priority" && item.priority >= 4),
       ),
@@ -1356,7 +1357,7 @@ export function EvaluationWorkspace({
     y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
   });
   const geometryFromDrag = (
-    kind: Exclude<AnnotationKind, "tick" | "cross">,
+    kind: Exclude<AnnotationKind, "tick" | "cross" | "arrow">,
     startX: number,
     startY: number,
     endX: number,
@@ -1412,7 +1413,7 @@ export function EvaluationWorkspace({
   async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
     if (
       !annotationTool ||
-      !["tick", "cross"].includes(annotationTool) ||
+      !["tick", "cross", "arrow"].includes(annotationTool) ||
       !marking ||
       !manifest ||
       !lockToken ||
@@ -1421,7 +1422,10 @@ export function EvaluationWorkspace({
       return;
     const rect = event.currentTarget.getBoundingClientRect();
     const point = pointFromEvent(event, rect);
-    await saveAnnotation(annotationTool, point);
+    const geometry = annotationTool === "arrow"
+      ? { points: [{ x: Math.max(0, point.x - 0.08), y: point.y }, point] }
+      : point;
+    await saveAnnotation(annotationTool, geometry);
   }
   function startAnnotationDrag(event: ReactPointerEvent<HTMLDivElement>) {
     if (
@@ -1434,7 +1438,7 @@ export function EvaluationWorkspace({
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event, event.currentTarget.getBoundingClientRect());
     setAnnotationDrag({
-      kind: annotationTool as Exclude<AnnotationKind, "tick" | "cross">,
+      kind: annotationTool as Exclude<AnnotationKind, "tick" | "cross" | "arrow">,
       startX: point.x,
       startY: point.y,
       currentX: point.x,
@@ -1755,7 +1759,7 @@ export function EvaluationWorkspace({
           <SecurityPauseOverlay controller={security} onClose={closeViewer} />
         )}
         <div className="security-watermark" aria-hidden="true">
-          ADMIEZO Â· {manifest.assignment.script} Â· {securityCode || "SECURE"}
+          ADMIEZO · {manifest.assignment.script} · {securityCode || "SECURE"}
         </div>
         <header className="viewer-header evaluation-desk-header">
           <button
@@ -2034,7 +2038,10 @@ export function EvaluationWorkspace({
                 }}
                 onClick={addAnnotation}
                 onPointerDown={startAnnotationDrag}
-                onPointerMove={updateAnnotationDrag}
+                onPointerMove={(event) => {
+                  updateAnnotationDrag(event);
+                  updateAnnotationResize(event);
+                }}
                 onPointerUp={(event) => {
                   void finishAnnotationDrag(event);
                   void finishAnnotationResize(event);
@@ -2101,7 +2108,6 @@ export function EvaluationWorkspace({
               onSubmit={submitEvaluation}
               setError={setError}
               onQuestionFlagChange={syncQuestionFlagToAssignment}
-              canSubmit={visitedPages.size >= manifest.pages.length}
               dashboardWidth={dashboardWidth}
               onResizeStart={startDashboardResize}
             />
@@ -2150,7 +2156,9 @@ export function EvaluationWorkspace({
     saving ||
     security.paused ||
     visitedPages.size < manifest.pages.length ||
-    new Set(marking.marks.map((item) => item.question_id)).size < marking.questions.length
+    marking.questions
+      .filter((item) => item.required)
+      .some((item) => !marking.marks.some((mark) => mark.question_id === item.id))
   }
 >
             <SquareCheckBig />
@@ -2270,7 +2278,7 @@ export function EvaluationWorkspace({
                       <strong>{item.script}</strong>
                       <br />
                       <small>
-                        {item.page_count} pages Â· P{item.priority}
+                        {item.page_count} pages · P{item.priority}
                       </small>
                     </td>
                     <td>{item.paper}</td>
@@ -2284,7 +2292,7 @@ export function EvaluationWorkspace({
                         </div>
                         <small>
                           {item.progress_percent}%
-                          {item.draft_saved_at && item.status !== "submitted" ? " Â· Draft saved" : ""}
+                          {item.draft_saved_at && item.status !== "submitted" ? " · Draft saved" : ""}
                         </small>
                       </div>
                     </td>
@@ -2382,7 +2390,7 @@ function AIAssistPanel({
           <strong>Analyze this anonymous script</strong>
           <p>
             ADMIEZO AI Assistant will compare the masked paper with the
-            configured question paper and reference answers. Suggested marks
+            configured question text and marking guidance. Suggested marks
             are never applied automatically.
           </p>
           <button
@@ -2523,9 +2531,22 @@ function AnnotationLayer({
         style={{ left: `${geometry.x * 100}%`, top: `${geometry.y * 100}%` }}
         onClick={select}
       >
-        {item.kind === "tick" ? "âœ“" : "Ã—"}
+        {item.kind === "tick" ? "✓" : "×"}
       </span>
     );
+  if (item.kind === "arrow") {
+    const points = item.geometry.points as { x: number; y: number }[];
+    const end = points?.at(-1) || { x: geometry.x, y: geometry.y };
+    return (
+      <span
+        className={`annotation-mark arrow ${selected ? "selected" : ""}`}
+        style={{ left: `${end.x * 100}%`, top: `${end.y * 100}%` }}
+        onClick={select}
+      >
+        ➜
+      </span>
+    );
+  }
   const handles: ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
   return (
     <span
@@ -2559,7 +2580,6 @@ function MarkingPanel({
   onSubmit,
   setError,
   onQuestionFlagChange,
-  canSubmit,
   dashboardWidth,
   onResizeStart,
 }: {
@@ -2576,7 +2596,6 @@ function MarkingPanel({
   onSubmit: () => Promise<void>;
   setError: (message: string) => void;
   onQuestionFlagChange: (flagged: boolean) => Promise<void>;
-  canSubmit: boolean;
   dashboardWidth: number;
   onResizeStart: (event: React.PointerEvent) => void;
 }) {
@@ -2635,7 +2654,7 @@ function MarkingPanel({
       }));
     }
     setConfirmed(mark?.examiner_confirmed || false);
-  }, [question?.id]);
+  }, [marking.marks, question?.id]);
   async function saveMark(event: FormEvent) {
     event.preventDefault();
     if (!question) return;
@@ -2723,9 +2742,7 @@ function MarkingPanel({
       });
       updatedMarking = await onReload();
       await onQuestionFlagChange(
-        updatedMarking.marks.some(
-          (mark) => mark.question_id === question.id && mark.marked_for_review,
-        ),
+        updatedMarking.marks.some((mark) => mark.marked_for_review),
       );
       setReviewByQuestion((previous) => ({
         ...previous,
@@ -2769,7 +2786,9 @@ function MarkingPanel({
     }
   }
   const complete = new Set(marking.marks.map((item) => item.question_id));
-  const required = marking.questions.filter((item) => item.required).length;
+  const requiredQuestions = marking.questions.filter((item) => item.required);
+  const required = requiredQuestions.length;
+  const completedRequired = requiredQuestions.filter((item) => complete.has(item.id)).length;
   const readOnly =
     marking.evaluation.status === "submitted" ||
     marking.evaluation.status === "locked";
@@ -2789,7 +2808,7 @@ function MarkingPanel({
         <div>
           <strong>Evaluation Dashboard</strong>
           <span>
-            v{marking.scheme.version} Â· {titleCase(marking.evaluation.status)}
+            v{marking.scheme.version} · {titleCase(marking.evaluation.status)}
           </span>
         </div>
         <div className="mark-total">
@@ -2817,7 +2836,7 @@ function MarkingPanel({
           Scheme of Evaluation
         </button>
         <button className={tab === "sample" ? "active" : ""} onClick={() => setTab("sample")}>
-    Sample Answer Paper â–¾
+    Sample Answer Paper ▾
   </button>
       </div>
       {tab === "marking" && (
@@ -2881,7 +2900,7 @@ function MarkingPanel({
               {question?.criteria.map((item) => (
                 <div className="criterion-note" key={item.id}>
                   <strong>
-                    {item.code} Â· {item.max_marks}
+                    {item.code} · {item.max_marks}
                   </strong>
                   <span>{item.description}</span>
                 </div>
@@ -2990,7 +3009,7 @@ function MarkingPanel({
                 <Flag />
                 {question?.id && reviewByQuestion[question.id]
                   ? "Unflag Question"
-                  : "âš‘ Flag Question"}
+                  : "⚑ Flag Question"}
               </button>
             </section>
             <section className="marking-section">
@@ -3031,7 +3050,7 @@ function MarkingPanel({
           </div>
           <footer>
             <span>
-              {complete.size}/{required} questions evaluated
+              {completedRequired}/{required} questions evaluated
             </span>
             {marking.evaluation.status === "submitted" && (
               <button

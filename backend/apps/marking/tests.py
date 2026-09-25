@@ -1,5 +1,6 @@
 import hashlib
 from datetime import timedelta
+from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
@@ -72,7 +73,8 @@ class EndToEndMarkingTests(TestCase):
         evaluation = open_evaluation(tenant_id=self.paper.tenant_id, actor_id=user.id, assignment=assignment, evaluator=evaluator)
         workflow = start_workflow(tenant_id=self.paper.tenant_id, actor_id=user.id, assignment=assignment)
         question = self.paper.questions.first()
-        first, evaluation = save_question_mark(tenant_id=self.paper.tenant_id, actor_id=user.id, evaluation_id=evaluation.id, evaluator=evaluator, expected_version=evaluation.version, lock_token=token, question=question, values={"marks": 12, "outcome": "evaluated", "adjustment": "none"})
+        first, evaluation = save_question_mark(tenant_id=self.paper.tenant_id, actor_id=user.id, evaluation_id=evaluation.id, evaluator=evaluator, expected_version=evaluation.version, lock_token=token, question=question, values={"marks": 12.5, "outcome": "evaluated", "adjustment": "none"})
+        self.assertEqual(evaluation.total_marks, Decimal("12.5"))
         corrected, evaluation = save_question_mark(tenant_id=self.paper.tenant_id, actor_id=user.id, evaluation_id=evaluation.id, evaluator=evaluator, expected_version=evaluation.version, lock_token=token, question=question, values={"marks": 15, "outcome": "evaluated", "adjustment": "none"})
         self.assertEqual(corrected.supersedes_id, first.id)
         self.assertEqual(QuestionMark.objects.filter(evaluation=evaluation, question=question).count(), 2)

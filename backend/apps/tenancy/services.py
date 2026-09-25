@@ -221,7 +221,14 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
         model_name,
         tenant_id=tenant_id,
         api_key=api_key,
-        validate_model=model_name != policy.ai_model_name or mode != SecurityPolicy.AIEvaluationMode.DISABLED or bool(api_key),
+        validate_model=(
+            bool(api_key)
+            or model_name != policy.ai_model_name
+            or (
+                policy.ai_evaluation_mode == SecurityPolicy.AIEvaluationMode.DISABLED
+                and mode != SecurityPolicy.AIEvaluationMode.DISABLED
+            )
+        ),
     )
     for field in ("status", "plan", "enabled_modules", "data_region"):
         if changes.get(field) is not None:
