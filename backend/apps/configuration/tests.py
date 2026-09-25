@@ -147,6 +147,15 @@ class ConfigurationWorkflowTests(TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+    def test_configuration_catalog_uses_space_separated_session_timestamps(self):
+        response = self.client.get("/api/v1/configuration/catalog")
+        self.assertEqual(response.status_code, 200)
+        item = next(entry for entry in response.json()["sessions"] if entry["name"] == "November 2026 End Semester")
+        self.assertNotIn("T", item["evaluation_starts_at"])
+        self.assertNotIn("T", item["evaluation_ends_at"])
+        self.assertIn(" ", item["evaluation_starts_at"])
+        self.assertIn(" ", item["evaluation_ends_at"])
+
     def test_evaluation_event_is_tenant_scoped_and_inside_session_window(self):
         session = ExamSession.objects.first()
         centre = EvaluationCentre.objects.create(

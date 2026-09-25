@@ -893,7 +893,11 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
     policy = security_policy_snapshot(tenant_id)
     if not consent:
         raise HttpError(422, "Security monitoring consent is required")
-    if policy["camera_required"] and not preflight.get("camera_ready"):
+    if policy["camera_required"] and (
+        not preflight.get("camera_ready")
+        or not isinstance(device_inventory.get("video_inputs"), int)
+        or device_inventory.get("video_inputs") < 1
+    ):
         raise HttpError(409, "A working webcam is required")
     if policy["fullscreen_required"] and not preflight.get("fullscreen_active"):
         raise HttpError(409, "Fullscreen mode is required")

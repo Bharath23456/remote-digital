@@ -6,7 +6,7 @@ import { csrfFetch } from "@/lib/api";
 
 type Policy = { identity_verification_required?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
-type Preflight = { camera_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
+type Preflight = { camera_ready: boolean; face_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
 type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; digest: string };
 type BufferedChunk = { blob: Blob; startedAt: Date; endedAt: Date };
 type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
@@ -66,11 +66,67 @@ function cameraIsActive(stream: MediaStream | null) {
   return Boolean(stream?.getVideoTracks().some((track) => track.readyState === "live" && track.enabled && !track.muted));
 }
 
+async function cameraFrameCheck(stream: MediaStream) {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  await video.play();
+  if (video.readyState < 2) throw new Error("Camera preview is not ready. Enable the camera and try again.");
+  await new Promise((resolve) => window.setTimeout(resolve, 250));
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 48;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Camera preview could not be inspected.");
+  const snapshot = () => {
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return context.getImageData(0, 0, canvas.width, canvas.height).data;
+  };
+  const first = snapshot();
+  await new Promise((resolve) => window.setTimeout(resolve, 650));
+  const second = snapshot();
+  const pixels = second;
+  if (frameLooksObstructed(pixels) || frameDelta(first, second) < 0.8) return "The camera appears covered, disabled, or frozen. Enable the camera, keep the lens visible, and move slightly.";
+  const Detector = (window as typeof window & { FaceDetector?: FaceDetectorConstructor }).FaceDetector;
+  if (Detector) {
+    const faces = await new Detector({ fastMode: true, maxDetectedFaces: 2 }).detect(video);
+    video.srcObject = null;
+    if (faces.length !== 1) return "A clear single face is required. Keep your full face visible to the camera.";
+  }
+  video.srcObject = null;
+  return "";
+}
+
 function frameDelta(left: Uint8ClampedArray, right: Uint8ClampedArray) {
   let total = 0;
   const step = 16;
   for (let index = 0; index < Math.min(left.length, right.length); index += step) total += Math.abs(left[index] - right[index]);
   return total / Math.max(1, Math.min(left.length, right.length) / step);
+}
+
+function frameLooksObstructed(data: Uint8ClampedArray) {
+  let total = 0;
+  let redTotal = 0;
+  let greenTotal = 0;
+  let blueTotal = 0;
+  let squaredTotal = 0;
+  for (let index = 0; index < data.length; index += 4) {
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+    const value = (red + green + blue) / 3;
+    total += value;
+    squaredTotal += value * value;
+    redTotal += red;
+    greenTotal += green;
+    blueTotal += blue;
+  }
+  const count = data.length / 4;
+  const mean = total / count;
+  const variance = squaredTotal / count - mean * mean;
+  const redDominance = redTotal / count - (greenTotal + blueTotal) / (count * 2);
+  return mean < 28 || (variance < 80 && redDominance > 45 && greenTotal / count < 100 && blueTotal / count < 100);
 }
 
 function qualityFromFrame(data: Uint8ClampedArray, delta: number) {
@@ -202,7 +258,22 @@ export function useSecureEvaluationSession() {
     }
   }, [pause, updateSession]);
 
-  const prepare = useCallback(async () => {
+  const verifyLiveIdentity = useCallback(async (assignmentId: string, trigger: string) => {
+    const camera = streamRef.current;
+    if (!camera || !cameraIsActive(camera)) throw new Error("Camera is required for evaluator identity verification");
+    const payload = await captureIdentityPayload(camera, preflightRef.current?.inventory_digest || "", trigger);
+    let body: Record<string, unknown>;
+    try {
+      body = await request("/api/v1/evaluator-management/face/verify-access", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, ...payload }) });
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.message === "face_not_enrolled" && payload.liveness_passed && payload.face_count === 1) return { access_granted: true, live_face_only: true };
+      throw reason;
+    }
+    if (!body.access_granted) throw new Error(String(body.failure_reason || "Evaluator face does not match the enrolled template"));
+    return body;
+  }, []);
+
+  const prepare = useCallback(async (assignmentId?: string) => {
     setChecking(true); setError(""); setPreflight(null);
     try {
       const currentPolicy = await request("/api/v1/phase4/remote-security/policy") as Policy;
@@ -211,28 +282,50 @@ export function useSecureEvaluationSession() {
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = camera; setStream(camera); setMonitoringStatus((current) => ({ ...current, camera: "ok" }));
       const inventory = await mediaInventory();
+      const cameraMessage = await cameraFrameCheck(camera);
       const screens = await availableScreens();
       inventoryRef.current = inventory.rawDigest;
-      const result = { camera_ready: cameraIsActive(camera), fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
+      let faceReady = false;
+      if (!cameraMessage && assignmentId) {
+        try { await verifyLiveIdentity(assignmentId, "preflight"); faceReady = true; }
+        catch (reason) { setError(reason instanceof Error ? reason.message : "A clear single face is required before secure evaluation can start."); }
+      }
+      const result = { camera_ready: cameraIsActive(camera) && !cameraMessage, face_ready: faceReady, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
       preflightRef.current = result; setPreflight(result);
+      if (cameraMessage) { setMonitoringStatus((current) => ({ ...current, camera: "error" })); setError(cameraMessage); }
       if (currentPolicy.single_screen_required && screens.count !== null && screens.count > 1) setError("Disconnect additional displays before starting evaluation.");
     } catch (reason) {
       const message = reason instanceof Error && reason.name === "NotAllowedError" ? "Webcam permission is required for secure evaluation." : reason instanceof Error ? reason.message : "Security checks could not be completed";
       setMonitoringStatus((current) => ({ ...current, camera: "error" }));
       setError(message);
     } finally { setChecking(false); }
-  }, []);
+  }, [verifyLiveIdentity]);
 
   const start = useCallback(async (assignmentId: string, consent: boolean) => {
     if (!policy || !preflightRef.current || !streamRef.current) throw new Error("Run the security checks first");
+    if (policy.camera_required && !cameraIsActive(streamRef.current)) {
+      setError("A live webcam is required before secure evaluation can start.");
+      throw new Error("A live webcam is required before secure evaluation can start.");
+    }
     setChecking(true); setError(""); closingRef.current = false;
     try {
+      const cameraMessage = await cameraFrameCheck(streamRef.current);
+      if (cameraMessage) {
+        setMonitoringStatus((current) => ({ ...current, camera: "error" }));
+        setPreflight((current) => current ? { ...current, camera_ready: false } : current);
+        preflightRef.current = { ...preflightRef.current, camera_ready: false };
+        throw new Error(cameraMessage);
+      }
+      if (policy.identity_verification_required !== false) await verifyLiveIdentity(assignmentId, "secure_start");
       if (policy.fullscreen_required && !document.fullscreenElement) await document.documentElement.requestFullscreen();
       const screens = await availableScreens();
-      const currentPreflight = { ...preflightRef.current, fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count };
+      const inventory = await mediaInventory();
+      if (policy.camera_required && inventory.public.video_inputs < 1) {
+        throw new Error("A connected webcam is required before secure evaluation can start.");
+      }
+      const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current), fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count };
       const sessionFingerprint = await digest(`${crypto.randomUUID()}:${Date.now()}:${assignmentId}`);
       const deviceFingerprint = await digest([navigator.userAgent, screen.width, screen.height, Intl.DateTimeFormat().resolvedOptions().timeZone, inventoryRef.current].join("|"));
-      const inventory = await mediaInventory();
       const created = await request("/api/v1/phase4/remote-security/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, session_fingerprint: sessionFingerprint, device_fingerprint: deviceFingerprint, consent, preflight: currentPreflight, device_inventory: inventory.public }) }) as Session;
       sessionStorage.setItem("admiezo-secure-session-fingerprint", sessionFingerprint);
       sessionStorage.setItem("admiezo-secure-evaluation-id", created.id);
@@ -244,17 +337,7 @@ export function useSecureEvaluationSession() {
       const message = reason instanceof Error ? reason.message : "Secure evaluation could not start";
       setError(message); throw reason;
     } finally { setChecking(false); }
-  }, [policy, updateSession]);
-
-  const verifyLiveIdentity = useCallback(async (assignmentId: string, trigger: string) => {
-    if (policy?.identity_verification_required === false) return { access_granted: true };
-    const camera = streamRef.current;
-    if (!camera || !cameraIsActive(camera)) throw new Error("Camera is required for evaluator identity verification");
-    const payload = await captureIdentityPayload(camera, preflightRef.current?.inventory_digest || "", trigger);
-    const body = await request("/api/v1/evaluator-management/face/verify-access", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, ...payload }) });
-    if (!body.access_granted) throw new Error(body.failure_reason || "Evaluator face does not match the enrolled template");
-    return body;
-  }, [policy?.identity_verification_required]);
+  }, [policy, updateSession, verifyLiveIdentity]);
 
   const resume = useCallback(async (password = "") => {
     const current = sessionRef.current;
@@ -327,7 +410,14 @@ export function useSecureEvaluationSession() {
 
     const visibility = () => { if (document.hidden) void report("viewer_hidden", "critical", { visibility: document.visibilityState }); };
     const fullscreen = () => { if (!closingRef.current && current.policy.fullscreen_required && !document.fullscreenElement) void report("fullscreen_exited", "critical", { visibility: document.visibilityState }); };
-    const trackStopped = () => { if (!closingRef.current) void report("camera_stopped", "critical"); };
+    const trackStopped = () => {
+      if (closingRef.current) return;
+      setError("The camera appears covered, disabled, or frozen. Enable the camera, keep the lens visible, and move slightly.");
+      setMonitoringStatus((current) => ({ ...current, camera: "error" }));
+      setPreflight((current) => current ? { ...current, camera_ready: false } : current);
+      preflightRef.current = preflightRef.current ? { ...preflightRef.current, camera_ready: false } : null;
+      void report("camera_stopped", "critical");
+    };
     camera.getVideoTracks().forEach((track) => { track.addEventListener("ended", trackStopped); track.addEventListener("mute", trackStopped); });
     const deviceChange = async () => { const inventory = await mediaInventory(); if (inventory.rawDigest !== inventoryRef.current) void report("external_media_device", "critical", { previous_inventory: inventoryRef.current, current_inventory: inventory.public }); };
     document.addEventListener("visibilitychange", visibility);
@@ -350,7 +440,7 @@ export function useSecureEvaluationSession() {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     const Detector = (window as typeof window & { FaceDetector?: FaceDetectorConstructor }).FaceDetector;
     const detector = Detector ? new Detector({ fastMode: true, maxDetectedFaces: 3 }) : null;
-    let darkFrames = 0; let noFaceChecks = 0; let multipleFaceChecks = 0; let noFaceWarned = false; let identityCheckInFlight = false; let lastIdentityCheckAt = Date.now();
+    let obstructedFrames = 0; let noFaceChecks = 0; let multipleFaceChecks = 0; let noFaceWarned = false; let identityCheckInFlight = false; let lastIdentityCheckAt = Date.now();
     const identityCheckIntervalMs = Math.max(30_000, current.policy.heartbeat_seconds * 3 * 1000);
     const verifySessionIdentity = async (trigger: string) => {
       if (identityCheckInFlight || closingRef.current || paused) return;
@@ -371,8 +461,8 @@ export function useSecureEvaluationSession() {
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
       let luminance = 0; for (let index = 0; index < pixels.length; index += 4) luminance += (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
       luminance /= pixels.length / 4;
-      darkFrames = luminance < 12 ? darkFrames + 1 : 0;
-      if (darkFrames >= 3) { darkFrames = 0; void report("camera_obstructed", "critical", { mean_luminance: Math.round(luminance) }); return; }
+      obstructedFrames = frameLooksObstructed(pixels) ? obstructedFrames + 1 : 0;
+      if (obstructedFrames >= 2) { obstructedFrames = 0; setError("The camera appears covered, disabled, or frozen. Enable the camera, keep the lens visible, and move slightly."); setMonitoringStatus((current) => ({ ...current, camera: "error" })); void report("camera_obstructed", "critical", { mean_luminance: Math.round(luminance) }); return; }
       if (detector) {
         try {
           const faces = await detector.detect(analysisVideo);
@@ -383,7 +473,7 @@ export function useSecureEvaluationSession() {
           const warnChecks = Math.max(1, Math.floor(current.policy.no_face_seconds / 10));
           const pauseChecks = Math.max(2, Math.ceil(current.policy.no_face_seconds / 5));
           if (noFaceChecks >= warnChecks && !noFaceWarned) { noFaceWarned = true; void report("face_absent_warning", "medium", { duration_seconds: noFaceChecks * 5 }); }
-          if (noFaceChecks >= pauseChecks) { noFaceChecks = 0; void report("face_absent", "critical", { duration_seconds: current.policy.no_face_seconds }); }
+          if (noFaceChecks >= pauseChecks) { noFaceChecks = 0; setError("A clear single face is required. Keep your full face visible to the camera."); setMonitoringStatus((current) => ({ ...current, camera: "error", face: "not_detected" })); void report("face_absent", "critical", { duration_seconds: current.policy.no_face_seconds }); }
           if (multipleFaceChecks >= 2) { multipleFaceChecks = 0; void report("multiple_faces", "critical", { sustained_seconds: 10 }); }
         } catch { /* Native face detection is a progressive signal; camera continuity still applies. */ }
       }
@@ -412,10 +502,12 @@ export function CameraPreview({ stream, compact = false }: { stream: MediaStream
   return <div className={compact ? "camera-preview compact" : "camera-preview"}>{stream ? <video ref={ref} muted playsInline aria-label="Evaluator webcam preview" /> : <Camera />}<span>{stream && <i />}{stream ? "Camera active" : "Camera required"}</span></div>;
 }
 
-export function SecurePreflightDialog({ script, controller, onStart, onCancel }: { script: string; controller: ReturnType<typeof useSecureEvaluationSession>; onStart: (consent: boolean) => Promise<void>; onCancel: () => void }) {
+export function SecurePreflightDialog({ script, assignmentId, controller, onStart, onCancel }: { script: string; assignmentId: string; controller: ReturnType<typeof useSecureEvaluationSession>; onStart: (consent: boolean) => Promise<void>; onCancel: () => void }) {
   const [consent, setConsent] = useState(false);
   const blockedByScreen = Boolean(controller.policy?.single_screen_required && controller.preflight?.screen_count && controller.preflight.screen_count > 1);
-  return <div className="modal-backdrop"><div className="modal-panel secure-preflight" role="dialog" aria-modal="true" aria-labelledby="secure-preflight-title"><header className="modal-header"><div><h2 id="secure-preflight-title">Secure evaluation check</h2><p>{script} · camera-monitored valuation session</p></div><button className="icon-button" title="Cancel" onClick={onCancel}><X /></button></header><div className="preflight-body"><CameraPreview stream={controller.stream}/><div className="preflight-checks"><div className={controller.preflight?.camera_ready ? "ready" : "pending"}>{controller.preflight?.camera_ready ? <Check /> : <Camera />}<span>Webcam</span><strong>{controller.preflight?.camera_ready ? "Ready" : "Required"}</strong></div><div className={blockedByScreen ? "blocked" : controller.preflight ? "ready" : "pending"}><Monitor /><span>Displays</span><strong>{controller.preflight?.screen_count === null ? "Browser-limited" : controller.preflight ? `${controller.preflight.screen_count} connected` : "Checking"}</strong></div><div className={controller.preflight ? "ready" : "pending"}><Video /><span>Evidence</span><strong>{controller.policy?.event_recording === false ? "Events only" : "Encrypted clips"}</strong></div><div className="pending"><LockKeyhole /><span>Fullscreen</span><strong>Enabled on start</strong></div></div><label className="security-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)}/><span>I understand that security events may preserve short encrypted webcam clips for authorized human review.</span></label>{controller.error && <div className="form-error" role="alert">{controller.error}</div>}</div><footer className="modal-footer"><button className="secondary-button" onClick={controller.prepare} disabled={controller.checking}>{controller.checking ? <RefreshCw className="spin"/> : <Camera />}{controller.preflight ? "Run checks again" : "Run security checks"}</button><button className="primary-button" disabled={!controller.preflight?.camera_ready || !consent || blockedByScreen || controller.checking} onClick={() => onStart(consent)}><ShieldAlert />Begin secure evaluation</button></footer></div></div>;
+  const cameraReady = controller.preflight?.camera_ready === true && controller.monitoringStatus.camera === "ok";
+  const faceReady = controller.preflight?.face_ready === true;
+  return <div className="modal-backdrop"><div className="modal-panel secure-preflight" role="dialog" aria-modal="true" aria-labelledby="secure-preflight-title"><header className="modal-header"><div><h2 id="secure-preflight-title">Secure evaluation check</h2><p>{script} · camera-monitored valuation session</p></div><button className="icon-button" title="Cancel" onClick={onCancel}><X /></button></header><div className="preflight-body"><CameraPreview stream={controller.stream}/><div className="preflight-checks"><div className={cameraReady ? "ready" : "pending"}>{cameraReady ? <Check /> : <Camera />}<span>Webcam</span><strong>{cameraReady ? "Ready" : "Required"}</strong></div><div className={!faceReady ? "pending" : "ready"}><ShieldAlert /><span>Face</span><strong>{faceReady ? "Verified" : "Required"}</strong></div><div className={blockedByScreen ? "blocked" : controller.preflight ? "ready" : "pending"}><Monitor /><span>Displays</span><strong>{controller.preflight?.screen_count === null ? "Browser-limited" : controller.preflight ? `${controller.preflight.screen_count} connected` : "Checking"}</strong></div><div className={controller.preflight ? "ready" : "pending"}><Video /><span>Evidence</span><strong>{controller.policy?.event_recording === false ? "Events only" : "Encrypted clips"}</strong></div></div><label className="security-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)}/><span>I understand that security events may preserve short encrypted webcam clips for authorized human review.</span></label>{controller.error && <div className="form-error" role="alert">{controller.error}</div>}</div><footer className="modal-footer"><button className="secondary-button" onClick={() => controller.prepare(assignmentId)} disabled={controller.checking}>{controller.checking ? <RefreshCw className="spin"/> : <Camera />}{controller.preflight ? "Run checks again" : "Run security checks"}</button><button className="primary-button" disabled={!cameraReady || !faceReady || !consent || blockedByScreen || controller.checking} onClick={() => onStart(consent)}><ShieldAlert />Begin secure evaluation</button></footer></div></div>;
 }
 
 export function SecurityPauseOverlay({ controller, onClose }: { controller: ReturnType<typeof useSecureEvaluationSession>; onClose: () => void }) {

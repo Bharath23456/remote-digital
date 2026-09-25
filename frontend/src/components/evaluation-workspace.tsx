@@ -632,7 +632,12 @@ export function EvaluationWorkspace({
   const [flaggingAssignmentId, setFlaggingAssignmentId] = useState<string | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const documentStageRef = useRef<HTMLElement>(null);
+<<<<<<< HEAD
   const pageRef = useRef<HTMLDivElement>(null);
+=======
+  const panState = useRef({ active: false, moved: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 });
+  const suppressAnnotationClick = useRef(false);
+>>>>>>> dba17c5 (Updated project changes)
   const draftSequence = useRef(0);
   const securityNoticeTimer = useRef<number | null>(null);
   const evaluatorMode = role === "evaluator";
@@ -1349,6 +1354,7 @@ export function EvaluationWorkspace({
       setSaving(false);
     }
   }
+<<<<<<< HEAD
   const pointFromEvent = (
     event: { clientX: number; clientY: number },
     rect: DOMRect,
@@ -1377,6 +1383,61 @@ export function EvaluationWorkspace({
   ) {
     if (!marking || !manifest || !lockToken || !target) return;
 
+=======
+  async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
+    if (
+      suppressAnnotationClick.current ||
+      !annotationTool ||
+      !marking ||
+      !manifest ||
+      !lockToken ||
+      security.paused
+    )
+      return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const rawX = Math.max(
+      0,
+      Math.min(1, (event.clientX - rect.left) / rect.width),
+    );
+    const rawY = Math.max(
+      0,
+      Math.min(1, (event.clientY - rect.top) / rect.height),
+    );
+    let geometry: Record<string, number | { x: number; y: number }[]>;
+    if (annotationTool === "arrow") {
+      geometry = {
+        points: [
+          { x: Math.max(0, rawX - 0.08), y: rawY },
+          { x: rawX, y: rawY },
+        ],
+      };
+    } else {
+      const isSymbol = ["tick", "cross"].includes(annotationTool);
+      const boxX = isSymbol ? rawX : Math.max(0, rawX - 0.06);
+      const boxY = isSymbol ? rawY : Math.max(0, rawY - 0.025);
+      const width = isSymbol
+        ? 0.04
+        : Math.min(0.12, 1 - Math.max(0, rawX - 0.06));
+      const height = isSymbol
+        ? 0.04
+        : Math.min(0.05, 1 - Math.max(0, rawY - 0.025));
+      const safe = getSafeAnnotationPosition(
+        { x: boxX, y: boxY, width, height },
+        pageAnnotations
+          .filter((item) => item.kind !== "arrow")
+          .map((item) => ({
+            x: Number(item.geometry.x || 0),
+            y: Number(item.geometry.y || 0),
+            width: Number(item.geometry.width || 0.04),
+            height: Number(item.geometry.height || 0.04),
+          })),
+        15 / rect.height,
+      );
+      geometry = isSymbol
+        ? { x: safe.x, y: safe.y }
+        : { x: safe.x, y: safe.y, width, height };
+    }
+>>>>>>> dba17c5 (Updated project changes)
     setSaving(true);
     try {
       await api(
@@ -1410,6 +1471,7 @@ export function EvaluationWorkspace({
       setSaving(false);
     }
   }
+<<<<<<< HEAD
   async function addAnnotation(event: MouseEvent<HTMLDivElement>) {
     if (
       !annotationTool ||
@@ -1562,6 +1624,32 @@ export function EvaluationWorkspace({
     } finally {
       setSaving(false);
     }
+=======
+  function beginDocumentPan(event: ReactPointerEvent<HTMLElement>) {
+    if (annotationTool || event.button !== 0) return;
+    const stage = event.currentTarget;
+    panState.current = { active: true, moved: false, startX: event.clientX, startY: event.clientY, scrollLeft: stage.scrollLeft, scrollTop: stage.scrollTop };
+    stage.setPointerCapture(event.pointerId);
+  }
+  function moveDocumentPan(event: ReactPointerEvent<HTMLElement>) {
+    const state = panState.current;
+    if (!state.active) return;
+    const stage = event.currentTarget;
+    const deltaX = event.clientX - state.startX;
+    const deltaY = event.clientY - state.startY;
+    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) state.moved = true;
+    stage.scrollLeft = state.scrollLeft - deltaX;
+    stage.scrollTop = state.scrollTop - deltaY;
+    if (state.moved) event.preventDefault();
+  }
+  function endDocumentPan(event: ReactPointerEvent<HTMLElement>) {
+    const state = panState.current;
+    if (!state.active) return;
+    if (state.moved) suppressAnnotationClick.current = true;
+    panState.current.active = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (state.moved) window.setTimeout(() => { suppressAnnotationClick.current = false; }, 0);
+>>>>>>> dba17c5 (Updated project changes)
   }
   async function undoAnnotation() {
     const target = marking?.annotations
@@ -1597,6 +1685,10 @@ export function EvaluationWorkspace({
   }
   async function submitEvaluation() {
     if (!marking || !manifest || security.paused) return;
+    if (security.policy?.camera_required && security.monitoringStatus.camera !== "ok") {
+      setError("A live webcam is required before valuation can be submitted.");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -1987,16 +2079,21 @@ export function EvaluationWorkspace({
               </span>
             </div>
           </aside>
+<<<<<<< HEAD
           <main
             ref={documentStageRef}
             className={`document-stage ${multiPage ? "multi" : "single"}`}
           >
+=======
+          <section className="document-viewer">
+>>>>>>> dba17c5 (Updated project changes)
             <header className="script-header">
               <div>
                 <FileText />
                 <strong>Answer Script</strong>
               </div>
             </header>
+<<<<<<< HEAD
             <div
               className="document-stage-content"
               style={{ width: fit === "custom" ? `${zoom}%` : "100%" }}
@@ -2093,6 +2190,74 @@ export function EvaluationWorkspace({
             )}
             </div>
           </main>
+=======
+            <main
+              ref={documentStageRef}
+              className={`document-stage ${multiPage ? "multi" : "single"}`}
+              onPointerDown={beginDocumentPan}
+              onPointerMove={moveDocumentPan}
+              onPointerUp={endDocumentPan}
+              onPointerCancel={endDocumentPan}
+            >
+              {viewerLoading ? (
+                <div className="viewer-empty">
+                  <RefreshCw className="spin" />
+                  Loading protected pages
+                </div>
+              ) : !manifest.pages.length ? (
+                <div className="viewer-empty">
+                  <Eye />
+                  <strong>No evaluation copy is available</strong>
+                  <span>
+                    Complete anonymization and repository verification first.
+                  </span>
+                </div>
+              ) : multiPage ? (
+                manifest.pages.map((item) => (
+                  <img
+                    className={enhance ? "enhanced" : ""}
+                    key={item.page_number}
+                    src={item.url}
+                    alt={`Anonymous script page ${item.page_number}`}
+                    loading={item.page_number <= 2 ? "eager" : "lazy"}
+                    style={{
+                      width: `${zoom}%`,
+                      transform: `rotate(${rotation}deg)`,
+                    }}
+                  />
+                ))
+              ) : page ? (
+                <div
+                  className={`script-page-wrap fit-${fit} ${annotationTool ? "annotating" : ""} ${highlightQuestion ? "question-jump" : ""}`}
+                  style={{
+                    width: fit === "custom" ? `${zoom}%` : undefined,
+                    transform: `rotate(${rotation}deg)`,
+                  }}
+                  onClick={addAnnotation}
+                >
+                  <img
+                    className={enhance ? "enhanced" : ""}
+                    src={page.url}
+                    alt={`Anonymous script page ${page.page_number}`}
+                    draggable={false}
+                  />
+                  {pageAnnotations.map((item) => (
+                    <AnnotationLayer
+                      item={item}
+                      selected={item.id === selectedAnnotation}
+                      onSelect={setSelectedAnnotation}
+                      key={item.id}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="viewer-empty">
+                  Page {currentPage} is unavailable.
+                </div>
+              )}
+            </main>
+          </section>
+>>>>>>> dba17c5 (Updated project changes)
           {marking && (
             <MarkingPanel
               marking={marking}
@@ -2149,6 +2314,7 @@ export function EvaluationWorkspace({
             Pause Evaluation
           </button>
           <button
+<<<<<<< HEAD
   className="viewer-submit"
   onClick={submitEvaluation}
   disabled={
@@ -2161,6 +2327,18 @@ export function EvaluationWorkspace({
       .some((item) => !marking.marks.some((mark) => mark.question_id === item.id))
   }
 >
+=======
+            className="viewer-submit"
+            onClick={submitEvaluation}
+            disabled={
+              !marking ||
+              saving ||
+              security.paused ||
+              (security.policy?.camera_required &&
+                security.monitoringStatus.camera !== "ok")
+            }
+          >
+>>>>>>> dba17c5 (Updated project changes)
             <SquareCheckBig />
             Submit valuation
           </button>
@@ -2180,6 +2358,7 @@ export function EvaluationWorkspace({
       ) : pendingAssignment ? (
         <SecurePreflightDialog
           script={pendingAssignment.script}
+          assignmentId={pendingAssignment.id}
           controller={security}
           onStart={startSecureEvaluation}
           onCancel={cancelPreflight}

@@ -99,7 +99,7 @@ const navGroups: { label: string; items: { key: ViewKey; label: string; icon: ty
 const evaluatorViews = new Set<ViewKey>(["evaluation"]);
 const intakeDeskViews: Record<string, ViewKey> = { bundle_preparer: "receiving", intake_receiver: "custody", scan_operator: "digitization" };
 const supervisorViews = new Set<ViewKey>(["dashboard", "receiving", "custody", "digitization"]);
-const guidedRefreshViews = new Set<ViewKey>(["receiving", "custody", "digitization", "anonymisation", "allocation", "assignmentGovernance", "revaluation", "assessmentControl", "photocopyRequests"]);
+const guidedRefreshViews = new Set<ViewKey>(["receiving", "custody", "digitization", "anonymisation", "allocation", "assignmentGovernance", "revaluation", "assessmentControl", "photocopyRequests", "rubrics"]);
 const platformViews = new Set<ViewKey>(["platformAdmin", "platformControl", "audit"]);
 const platformHashToView: Record<string, ViewKey> = { universities: "platformAdmin", operations: "platformControl", audit: "audit" };
 const platformViewToHash: Partial<Record<ViewKey, string>> = { platformAdmin: "universities", platformControl: "operations", audit: "audit" };

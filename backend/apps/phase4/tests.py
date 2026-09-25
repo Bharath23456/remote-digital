@@ -216,6 +216,25 @@ class RemainingModulesTests(TestCase):
             self.assertEqual(started.json()["policy"]["identity_verification_required"], False)
             self.assertEqual(SecureEvaluationSession.objects.get(id=started.json()["id"]).evaluator_id, evaluator.id)
 
+    def test_secure_evaluation_rejects_unavailable_camera(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "camera-gate-test"}), content_type="application/json").status_code, 200)
+        base = {
+            "assignment_id": str(assignment.id),
+            "session_fingerprint": "a" * 64,
+            "device_fingerprint": "b" * 64,
+            "consent": True,
+            "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
+            "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
+        }
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            unavailable = {**base, "preflight": {**base["preflight"], "camera_ready": False}}
+            self.assertEqual(client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(unavailable), content_type="application/json").status_code, 409)
+            no_camera = {**base, "device_inventory": {"video_inputs": 0, "digest": "c" * 64}}
+            self.assertEqual(client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(no_camera), content_type="application/json").status_code, 409)
+
     def test_workload_actions_require_independent_approval(self):
         item = create_workload_action(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator=self.evaluator, action="rebalance", reason="Deadline capacity requires redistribution.", metrics={"remaining": 28})
         with self.assertRaises(HttpError):
