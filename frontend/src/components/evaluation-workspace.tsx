@@ -5,6 +5,7 @@
 
 import {
   ArrowRight,
+  BrainCircuit,
   Camera,
   Check,
   ChevronDown,
@@ -114,12 +115,18 @@ type Question = {
 type Mark = {
   id: string;
   question_id: string;
+  criterion_id: string | null;
   marks: number;
   outcome: string;
   adjustment: string;
   marked_for_review: boolean;
   requires_attention: boolean;
   examiner_confirmed: boolean;
+  answer_selection: {
+    source?: string;
+    confidence?: string;
+    analysis_id?: string;
+  };
   sequence: number;
 };
 type Annotation = {
@@ -170,9 +177,18 @@ type Marking = {
   }[];
   page_anchors: PageAnchor[];
 };
+type AIAssessment = {
+  question_id: string;
+  question: string;
+  marks: number;
+  confidence: number;
+  feedback: string;
+  reasoning: string;
+};
 type AIAssist = {
   enabled: boolean;
   mode: "disabled" | "assistive" | "autonomous";
+  confidence_threshold: number;
   provider: { provider: string; configured: boolean };
   analysis: null | {
     id: string;
@@ -180,14 +196,7 @@ type AIAssist = {
     effective_confidence: number | null;
     summary: string;
     error_message: string;
-    assessments: {
-      question_id: string;
-      question: string;
-      marks: number;
-      confidence: number;
-      feedback: string;
-      reasoning: string;
-    }[];
+    assessments: AIAssessment[];
   };
 };
 type Filter =
@@ -1878,7 +1887,7 @@ export function EvaluationWorkspace({
             </div>
             <small>{manifest.assignment.progress_percent}% reviewed</small>
           </div>
-          {aiAssist?.enabled && (
+          {(aiAssist?.enabled || aiAssist?.analysis) && (
             <button
               className="ai-assist-button"
               title="Analyze this script with ADMIEZO AI Assistant"
@@ -2273,6 +2282,7 @@ export function EvaluationWorkspace({
               onSubmit={submitEvaluation}
               setError={setError}
               onQuestionFlagChange={syncQuestionFlagToAssignment}
+              aiAssist={aiAssist}
               dashboardWidth={dashboardWidth}
               onResizeStart={startDashboardResize}
             />
@@ -2759,6 +2769,7 @@ function MarkingPanel({
   onSubmit,
   setError,
   onQuestionFlagChange,
+  aiAssist,
   dashboardWidth,
   onResizeStart,
 }: {
@@ -2775,6 +2786,7 @@ function MarkingPanel({
   onSubmit: () => Promise<void>;
   setError: (message: string) => void;
   onQuestionFlagChange: (flagged: boolean) => Promise<void>;
+  aiAssist: AIAssist | null;
   dashboardWidth: number;
   onResizeStart: (event: React.PointerEvent) => void;
 }) {
@@ -2784,7 +2796,14 @@ function MarkingPanel({
   const existing = marking.marks.find(
     (item) => item.question_id === question?.id,
   );
-  const [marks, setMarks] = useState(String(existing?.marks ?? 0));
+  const aiAssessment = aiAssist?.analysis?.assessments.find(
+    (item) => item.question_id === question?.id,
+  );
+  const aiPrefilled = existing?.answer_selection?.source === "admiezo_ai_prefill";
+  const aiNeedsHumanReview = Boolean(
+    aiAssessment && aiAssist && aiAssessment.confidence < aiAssist.confidence_threshold,
+  );
+  const [marks, setMarks] = useState(String(existing?.marks ?? ""));
   const [outcome, setOutcome] = useState(existing?.outcome || "evaluated");
   const [adjustment, setAdjustment] = useState(existing?.adjustment || "none");
   const [reviewByQuestion, setReviewByQuestion] = useState<Record<string, boolean>>({});
@@ -2793,6 +2812,7 @@ function MarkingPanel({
   );
   const [comments, setComments] = useState<Record<string, string>>({});
   const [tab, setTab] = useState<"marking" | "paper" | "scheme" | "sample">("marking");
+  const [aiJustificationOpen, setAIJustificationOpen] = useState(false);
   const currentQuestionIndex = question
     ? marking.questions.findIndex((item) => item.id === question.id)
     : -1;
@@ -2823,7 +2843,7 @@ function MarkingPanel({
     const mark = marking.marks.find(
       (item) => item.question_id === question?.id,
     );
-    setMarks(String(mark?.marks ?? 0));
+    setMarks(String(mark?.marks ?? ""));
     setOutcome(mark?.outcome || "evaluated");
     setAdjustment(mark?.adjustment || "none");
     if (question?.id) {
@@ -2833,6 +2853,7 @@ function MarkingPanel({
       }));
     }
     setConfirmed(mark?.examiner_confirmed || false);
+    setAIJustificationOpen(false);
   }, [marking.marks, question?.id]);
   async function saveMark(event: FormEvent) {
     event.preventDefault();
@@ -2856,7 +2877,7 @@ function MarkingPanel({
           marked_for_review: review,
           requires_attention: adjustment !== "none",
           examiner_confirmed: confirmed,
-          rubric_criterion_id: question.criteria[0]?.id || null,
+          rubric_criterion_id: existing?.criterion_id || null,
         }),
       });
       await onReload();
@@ -2916,7 +2937,7 @@ function MarkingPanel({
           marked_for_review: nextReview,
           requires_attention: adjustment !== "none",
           examiner_confirmed: confirmed,
-          rubric_criterion_id: question.criteria[0]?.id || null,
+          rubric_criterion_id: existing?.criterion_id || null,
         }),
       });
       updatedMarking = await onReload();
@@ -2945,7 +2966,7 @@ function MarkingPanel({
               marked_for_review: review,
               requires_attention: adjustment !== "none",
               examiner_confirmed: confirmed,
-              rubric_criterion_id: question.criteria[0]?.id || null,
+              rubric_criterion_id: existing?.criterion_id || null,
             }),
           });
           await onReload();
@@ -3084,6 +3105,30 @@ function MarkingPanel({
                   <span>{item.description}</span>
                 </div>
               ))}
+              {aiAssessment && (
+                <div className={`ai-question-suggestion ${aiNeedsHumanReview ? "review" : "ready"}`}>
+                  <BrainCircuit />
+                  <div>
+                    <strong>
+                      {aiNeedsHumanReview
+                        ? "AI requested human review"
+                        : aiPrefilled
+                          ? "AI mark prefilled"
+                          : "AI mark suggestion"}
+                    </strong>
+                    <span>
+                      {aiAssessment.marks} of {question?.max_marks} marks · {aiAssessment.confidence}% confidence
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="viewer-secondary"
+                    onClick={() => setAIJustificationOpen(true)}
+                  >
+                    Why this mark?
+                  </button>
+                </div>
+              )}
               <form className="mark-form" onSubmit={saveMark}>
                 <label>
                   <span>Marks awarded</span>
@@ -3278,6 +3323,68 @@ function MarkingPanel({
           </div>
         </div>
       )}
+      {aiJustificationOpen && aiAssessment && question && (
+        <AIQuestionJustification
+          assessment={aiAssessment}
+          maximumMarks={question.max_marks}
+          threshold={aiAssist?.confidence_threshold ?? 0}
+          onClose={() => setAIJustificationOpen(false)}
+        />
+      )}
     </aside>
+  );
+}
+
+function AIQuestionJustification({
+  assessment,
+  maximumMarks,
+  threshold,
+  onClose,
+}: {
+  assessment: AIAssessment;
+  maximumMarks: number;
+  threshold: number;
+  onClose: () => void;
+}) {
+  const deducted = Math.max(0, maximumMarks - assessment.marks);
+  const needsHumanReview = assessment.confidence < threshold;
+  return (
+    <div className="modal-backdrop ai-justification-backdrop" role="presentation">
+      <section className="modal-panel compact ai-justification-modal" role="dialog" aria-modal="true" aria-label={`AI justification for question ${assessment.question}`}>
+        <header className="modal-header">
+          <div>
+            <h2>Question {assessment.question} justification</h2>
+            <p>ADMIEZO AI Assistant assessment evidence</p>
+          </div>
+          <button className="icon-button" type="button" title="Close justification" onClick={onClose}>
+            <X />
+          </button>
+        </header>
+        <div className="ai-justification-summary">
+          <div><span>Awarded</span><strong>{assessment.marks} / {maximumMarks}</strong></div>
+          <div><span>Deducted</span><strong>{deducted}</strong></div>
+          <div><span>Confidence</span><strong>{assessment.confidence}%</strong></div>
+        </div>
+        {needsHumanReview && (
+          <div className="ai-review-warning">
+            <ShieldAlert />
+            <span>This confidence is below the {threshold}% threshold. Review and enter the final mark manually.</span>
+          </div>
+        )}
+        <div className="ai-justification-body">
+          <section>
+            <strong>{deducted > 0 ? "Why marks were deducted" : "Why full marks were awarded"}</strong>
+            <p>{assessment.reasoning}</p>
+          </section>
+          <section>
+            <strong>Answer feedback</strong>
+            <p>{assessment.feedback}</p>
+          </section>
+        </div>
+        <footer className="modal-footer">
+          <button className="primary-button" type="button" onClick={onClose}>Return to marking</button>
+        </footer>
+      </section>
+    </div>
   );
 }

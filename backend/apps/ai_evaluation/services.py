@@ -20,7 +20,7 @@ from apps.custody.models import Script
 from apps.custody.services import transition_script
 from apps.evaluators.models import Evaluator
 from apps.marking.models import Evaluation, QuestionMark
-from apps.marking.services import evaluation_checksum
+from apps.marking.services import evaluation_checksum, latest_marks
 from apps.repository.models import ScriptAsset
 from apps.repository.storage import delete_object, read_object, read_object_metadata, signed_object_url
 from apps.security.crypto import encrypt_secret
@@ -524,12 +524,16 @@ def _validated_assessments(guides, result):
             raise AdmiezoAIError(f"ADMIEZO AI Assistant marks are outside the configured maximum for question {guide.question.number}")
         if not Decimal("0") <= confidence <= Decimal("100"):
             raise AdmiezoAIError("ADMIEZO AI Assistant confidence is outside the supported range")
+        feedback = str(item.get("feedback", "")).strip()[:4000]
+        reasoning = str(item.get("reasoning", "")).strip()[:8000]
+        if not feedback or not reasoning:
+            raise AdmiezoAIError(f"ADMIEZO AI Assistant did not justify the mark for question {guide.question.number}")
         output[question_id] = {
             "guide": guide,
             "marks": marks,
             "confidence": confidence,
-            "feedback": str(item.get("feedback", ""))[:4000],
-            "reasoning": str(item.get("reasoning", ""))[:8000],
+            "feedback": feedback,
+            "reasoning": reasoning,
         }
     if set(output) != set(by_id):
         raise AdmiezoAIError("ADMIEZO AI Assistant did not assess every configured question")
@@ -551,7 +555,7 @@ def _store_assessment(analysis, result, item, confidence):
         defaults={
             "tenant_id": analysis.tenant_id,
             "marks": item["marks"],
-            "confidence": item["confidence"],
+            "confidence": confidence,
             "feedback": item["feedback"],
             "reasoning": item["reasoning"],
         },
@@ -561,6 +565,75 @@ def _store_assessment(analysis, result, item, confidence):
     summaries[str(item["guide"].question_id)] = str(result.get("summary", ""))[:4000]
     analysis.raw_response = {"question_summaries": summaries}
     analysis.save(update_fields=["effective_confidence", "raw_response", "updated_at"])
+
+
+def _seed_confident_human_marks(analysis, policy, assignment):
+    scheme = MarkingScheme.objects.filter(
+        tenant_id=analysis.tenant_id,
+        paper=assignment.script.paper,
+        status=MarkingScheme.Status.FROZEN,
+    ).order_by("-version").first()
+    if not scheme:
+        return 0, assignment.script.paper.questions.filter(required=True).count()
+
+    evaluation, _ = Evaluation.objects.get_or_create(
+        tenant_id=analysis.tenant_id,
+        assignment=assignment,
+        defaults={"scheme": scheme, "started_at": analysis.started_at},
+    )
+    if evaluation.scheme_id != scheme.id or evaluation.status != Evaluation.Status.DRAFT:
+        return 0, assignment.script.paper.questions.filter(required=True).count()
+
+    existing_question_ids = set(evaluation.question_marks.values_list("question_id", flat=True))
+    confident = list(
+        analysis.question_assessments.select_related("question")
+        .filter(confidence__gte=policy.ai_confidence_threshold)
+        .exclude(question_id__in=existing_question_ids)
+        .order_by("question__position")
+    )
+    QuestionMark.objects.bulk_create([
+        QuestionMark(
+            tenant_id=analysis.tenant_id,
+            evaluation=evaluation,
+            question=item.question,
+            sequence=1,
+            marks=item.marks,
+            outcome=QuestionMark.Outcome.EVALUATED,
+            marked_for_review=False,
+            requires_attention=False,
+            examiner_confirmed=False,
+            answer_selection={
+                "source": "admiezo_ai_prefill",
+                "confidence": str(item.confidence),
+                "analysis_id": str(analysis.id),
+            },
+            actor_id=analysis.requested_by_id,
+        )
+        for item in confident
+    ])
+    all_questions = assignment.script.paper.questions.order_by("position")
+    completed_ids = set(evaluation.question_marks.values_list("question_id", flat=True))
+    next_question = all_questions.exclude(id__in=completed_ids).first()
+    evaluation.total_marks = sum((item.marks for item in latest_marks(evaluation)), Decimal("0"))
+    evaluation.last_question = next_question
+    evaluation.save(update_fields=["total_marks", "last_question", "updated_at"])
+    total_required = all_questions.filter(required=True).count()
+    seeded_required = all_questions.filter(required=True, id__in=completed_ids).count()
+    if confident:
+        record_event(
+            tenant_id=analysis.tenant_id,
+            actor_id=analysis.requested_by_id,
+            action="ai_evaluation.human_handoff.prefilled",
+            aggregate="Evaluation",
+            aggregate_id=evaluation.id,
+            payload={
+                "analysis_id": str(analysis.id),
+                "assignment_id": str(assignment.id),
+                "question_ids": [str(item.question_id) for item in confident],
+                "confidence_threshold": str(policy.ai_confidence_threshold),
+            },
+        )
+    return seeded_required, total_required
 
 
 def _route_to_human(analysis, policy, reason=None):
@@ -579,12 +652,14 @@ def _route_to_human(analysis, policy, reason=None):
             reassigned.source = "ai_low_confidence"
             reassigned.is_flagged = True
             reassigned.flag_reason = reason[:240]
-            reassigned.save(update_fields=["source", "is_flagged", "flag_reason", "updated_at"])
+            seeded, total = _seed_confident_human_marks(analysis, policy, reassigned)
+            reassigned.progress_percent = round((seeded / total) * 100) if total else 0
+            reassigned.save(update_fields=["source", "is_flagged", "flag_reason", "progress_percent", "updated_at"])
             analysis.status = AIAnalysis.Status.LOW_CONFIDENCE
             analysis.error_message = reason[:500]
             analysis.completed_at = timezone.now()
             analysis.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
-            record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.routed_to_human", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "evaluator_id": str(reassigned.evaluator_id), "reason": reason})
+            record_event(tenant_id=analysis.tenant_id, actor_id=analysis.requested_by_id, action="ai_evaluation.routed_to_human", aggregate="AIAnalysis", aggregate_id=analysis.id, payload={"assignment_id": str(assignment.id), "evaluator_id": str(reassigned.evaluator_id), "prefilled_questions": seeded, "reason": reason})
     except HttpError as exc:
         with transaction.atomic():
             assignment.refresh_from_db()
@@ -660,10 +735,8 @@ def process_analysis(analysis_id):
     policy = tenant_ai_policy(analysis.tenant_id)
     pack = reference_pack_for(tenant_id=analysis.tenant_id, paper=analysis.assignment.script.paper)
     if not pack_readiness(pack)["ready"]:
-        raise AdmiezoAIError("The AI reference pack is incomplete")
-    guides, _, media = _analysis_input(analysis, pack, deadline=deadline)
-    reference_media = media[:pack.assets.count()]
-    script_media = media[pack.assets.count():]
+        raise AdmiezoAIError("AI question text and marking guidance are incomplete")
+    guides, _, script_media = _analysis_input(analysis, pack, deadline=deadline)
     for guide in guides:
         if analysis.question_assessments.filter(question=guide.question).exists():
             continue
@@ -693,13 +766,15 @@ def process_analysis(analysis_id):
                 if remaining <= 0:
                     raise AdmiezoAIError("AI paper deadline expired after 300 seconds")
                 prompt = (
-                    "Evaluate only this extracted answer against the question and supplied references. "
+                    "Evaluate only this extracted answer against the configured question text and marking guidance. "
+                    "Award evidence-based partial credit. Feedback must identify specific strengths, omissions, and errors. "
+                    "Reasoning must explain the mark calculation and every deduction from the maximum. "
                     "Return exactly one assessment for this question_id. "
                     f"Question: {json.dumps({'question_id': str(guide.question_id), **question}, separators=(',', ':'))}. "
                     f"Extracted answer: {answer}"
                 )
                 client = AdmiezoAIClient(tenant_id=analysis.tenant_id, timeout=min(remaining, 120))
-                result = client.evaluate(model=analysis.model_name, prompt=prompt, media=reference_media)
+                result = client.evaluate(model=analysis.model_name, prompt=prompt, media=[])
                 assessments, confidence = _validated_assessments([guide], result)
             except (AdmiezoAIError, TimeoutError, ValueError, TypeError) as exc:
                 if time.monotonic() >= deadline or attempt == QUESTION_ATTEMPTS:

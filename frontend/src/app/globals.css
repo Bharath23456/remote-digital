@@ -856,6 +856,44 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .ai-assist-results small { color: #78867f; font-size: 9px; line-height: 1.4; }
 .ai-assist-complete > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid #d9e2dd; background: white; padding: 10px 12px; }
 .ai-assist-complete > footer span { color: #65746c; font-size: 9px; }
+.ai-question-suggestion { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 1px solid #b9d7c9; border-left: 3px solid #287b59; border-radius: 5px; background: #edf7f2; padding: 8px; }
+.ai-question-suggestion.review { border-color: #dfc798; border-left-color: #a66a17; background: #fff8e9; }
+.ai-question-suggestion > svg { width: 17px; color: #287b59; }
+.ai-question-suggestion.review > svg { color: #a66a17; }
+.ai-question-suggestion > div { display: grid; min-width: 0; gap: 2px; }
+.ai-question-suggestion strong { font-size: 10px; }
+.ai-question-suggestion span { overflow: hidden; color: #5c6d64; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.ai-question-suggestion .viewer-secondary { min-height: 30px; padding: 5px 8px; white-space: nowrap; }
+.ai-justification-backdrop { z-index: 180; }
+.ai-justification-modal { overflow: hidden; }
+.ai-justification-summary { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: #f7faf8; }
+.ai-justification-summary > div { display: grid; gap: 4px; border-right: 1px solid var(--line); padding: 14px 16px; }
+.ai-justification-summary > div:last-child { border-right: 0; }
+.ai-justification-summary span { color: var(--muted); font-size: 10px; }
+.ai-justification-summary strong { color: var(--green); font-size: 20px; }
+.ai-review-warning { display: flex; align-items: center; gap: 9px; border-bottom: 1px solid #ead7ad; background: #fff8e9; padding: 10px 16px; color: #855513; font-size: 11px; line-height: 1.45; }
+.ai-review-warning svg { width: 18px; flex: none; }
+.ai-justification-body { display: grid; gap: 14px; padding: 18px; }
+.ai-justification-body section { display: grid; gap: 6px; }
+.ai-justification-body strong { font-size: 12px; }
+.ai-justification-body p { margin: 0; color: #45574d; font-size: 11px; line-height: 1.6; }
+.ai-analysis-review-modal { width: min(880px, 100%); overflow: hidden; }
+.ai-analysis-review-summary { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: #f7faf8; }
+.ai-analysis-review-summary > div { display: grid; gap: 4px; border-right: 1px solid var(--line); padding: 14px 18px; }
+.ai-analysis-review-summary > div:last-child { border-right: 0; }
+.ai-analysis-review-summary span { color: var(--muted); font-size: 10px; }
+.ai-analysis-review-summary strong { color: var(--green); font-size: 17px; }
+.ai-analysis-question-list { max-height: min(560px, 60vh); overflow-y: auto; }
+.ai-analysis-question-list article { border-bottom: 1px solid var(--line); }
+.ai-analysis-question-list article > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 18px; }
+.ai-analysis-question-list article > header > div { display: grid; gap: 3px; }
+.ai-analysis-question-list article > header strong { font-size: 12px; }
+.ai-analysis-question-list article > header span { color: var(--muted); font-size: 10px; }
+.ai-analysis-question-list article.low-confidence > header { border-left: 3px solid #a66a17; background: #fffaf0; }
+.ai-analysis-question-reason { display: grid; gap: 12px; border-top: 1px solid var(--line); background: #fbfcfb; padding: 14px 18px; }
+.ai-analysis-question-reason section { display: grid; gap: 5px; }
+.ai-analysis-question-reason section strong { font-size: 11px; }
+.ai-analysis-question-reason section p { margin: 0; color: #45574d; font-size: 11px; line-height: 1.55; }
 .guided-scan-form, .guided-upload-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 16px; padding: 4px 20px 22px; }
 .guided-packet-scan { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
 .guided-upload-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
