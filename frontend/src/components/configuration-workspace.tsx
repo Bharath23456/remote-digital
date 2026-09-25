@@ -59,12 +59,13 @@ export function ConfigurationWorkspace() {
   const [notice, setNotice] = useState("");
   const [eventSessionId, setEventSessionId] = useState("");
   const [expandedPaperId, setExpandedPaperId] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const createKey = useRef("");
 
   const load = useCallback(async () => {
     try {
-      const [nextCatalog, nextReadiness] = await Promise.all([apiRequest("/api/v1/configuration/catalog"), apiRequest("/api/v1/configuration/readiness")]);
-      setCatalog(nextCatalog); setReadiness(nextReadiness); setError("");
+      const [nextCatalog, nextReadiness, identity] = await Promise.all([apiRequest("/api/v1/configuration/catalog"), apiRequest("/api/v1/configuration/readiness"), apiRequest("/api/v1/auth/me")]);
+      setCatalog(nextCatalog); setReadiness(nextReadiness); setCurrentUserId(identity.user.id); setError("");
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Configuration could not be loaded"); }
     finally { setLoading(false); }
@@ -298,6 +299,7 @@ export function ConfigurationWorkspace() {
       {loading ? <div className="empty-state"><LoaderCircle className="spin" /></div> : rows.length ? active === "papers" ? <div className="paper-record-list">{rows.map((row) => <PaperRecord
         key={id(row)}
         paper={row}
+        currentUserId={currentUserId}
         expanded={expandedPaperId === id(row)}
         saving={saving}
         onToggle={() => setExpandedPaperId((current) => current === id(row) ? null : id(row))}
@@ -334,6 +336,7 @@ function PaperFields({ paper }: { paper: Record<string, unknown> }) {
 type PaperAction = "submit" | "approve" | "freeze";
 type PaperRecordProps = {
   paper: Record<string, unknown>;
+  currentUserId: number | null;
   expanded: boolean;
   saving: boolean;
   onToggle: () => void;
@@ -347,11 +350,14 @@ type PaperRecordProps = {
   onAction: (action: PaperAction) => void;
 };
 
-function PaperRecord({ paper, expanded, saving, onToggle, onAddQuestion, onViewQuestions, onEditQuestion, onDeleteQuestion, onEdit, onHistory, onGovernedChange, onAction }: PaperRecordProps) {
+function PaperRecord({ paper, currentUserId, expanded, saving, onToggle, onAddQuestion, onViewQuestions, onEditQuestion, onDeleteQuestion, onEdit, onHistory, onGovernedChange, onAction }: PaperRecordProps) {
   const questions = Array.isArray(paper.questions) ? paper.questions as Record<string, unknown>[] : [];
   const readiness = paper.readiness as { ready: boolean; issues?: string[] } | undefined;
   const isDraft = paper.status === "draft";
   const paperId = id(paper);
+  const submittedByCurrentUser = currentUserId !== null && String(paper.submitted_by_id) === String(currentUserId);
+  const approvedByCurrentUser = currentUserId !== null && String(paper.approved_by_id) === String(currentUserId);
+  const cannotFreeze = submittedByCurrentUser || approvedByCurrentUser;
 
   return <article id={`paper-${paperId}`} className={`paper-record ${expanded ? "expanded" : ""}`}>
     <div className="paper-record-main" role="button" tabIndex={0} aria-expanded={expanded} aria-controls={`paper-questions-${paperId}`} onClick={onToggle} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onToggle(); } }}>
@@ -387,8 +393,8 @@ function PaperRecord({ paper, expanded, saving, onToggle, onAddQuestion, onViewQ
         <button onClick={onHistory} disabled={saving}><History />History</button>
         {!isDraft && <button onClick={onGovernedChange} disabled={saving}><ShieldAlert />Request change</button>}
         {isDraft && <button className="paper-primary-action" onClick={() => onAction("submit")} disabled={saving}>Submit</button>}
-        {paper.status === "review" && <button className="paper-primary-action" onClick={() => onAction("approve")} disabled={saving}>Approve</button>}
-        {paper.status === "approved" && <button className="paper-primary-action" onClick={() => onAction("freeze")} disabled={saving}>Freeze</button>}
+        {paper.status === "review" && <><button className="paper-primary-action" onClick={() => onAction("approve")} disabled={saving || submittedByCurrentUser} title={submittedByCurrentUser ? "A different administrator must approve this paper" : "Approve this paper"}>Approve</button>{submittedByCurrentUser && <small className="action-restriction">A different administrator must approve this paper.</small>}</>}
+        {paper.status === "approved" && <><button className="paper-primary-action" onClick={() => onAction("freeze")} disabled={saving || cannotFreeze} title={cannotFreeze ? "A third administrator must freeze this paper" : "Freeze this paper"}>Freeze</button>{cannotFreeze && <small className="action-restriction">A third administrator must freeze this paper.</small>}</>}
         {paper.status === "frozen" && <span className="locked-label"><Check />Frozen</span>}
       </div>
     </footer>

@@ -528,15 +528,10 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .thumbnail-rail button { display: grid; width: 100%; gap: 4px; margin-bottom: 9px; border: 2px solid transparent; border-radius: 4px; background: transparent; padding: 3px; color: #bac4bf; cursor: pointer; font-size: 10px; }
 .thumbnail-rail button.active { border-color: #4fa884; color: white; }
 .thumbnail-rail img { width: 100%; aspect-ratio: .72; object-fit: cover; background: white; }
-<<<<<<< HEAD
-.document-stage { min-width: 0; min-height: 0; overflow: auto; background: #303632; padding: 22px; user-select: none; }
-.document-stage.single { display: flex; align-items: flex-start; justify-content: flex-start; cursor: grab; }
+.document-stage { min-width: 0; min-height: 0; overflow: auto; background: #303632; padding: 22px; user-select: none; touch-action: none; cursor: grab; }
+.document-stage.single { display: flex; align-items: flex-start; justify-content: flex-start; cursor: grab; touch-action: none; }
 .document-stage-content { display: grid; min-width: 100%; min-height: 100%; align-content: start; justify-items: center; }
 .document-stage.single .document-stage-content { flex: 0 0 auto; margin-inline: auto; }
-=======
-.document-stage { min-width: 0; min-height: 0; overflow: auto; background: #303632; padding: 22px; user-select: none; touch-action: none; cursor: grab; }
-.document-stage.single { display: block; cursor: grab; touch-action: none; }
->>>>>>> dba17c5 (Updated project changes)
 .document-stage.single:active { cursor: grabbing; }
 .document-stage img { display: block; max-width: none; background: white; box-shadow: 0 5px 22px rgba(0,0,0,.35); transition: filter .15s ease; }
 .document-stage.single img.fit-screen { width: auto; max-width: 100%; max-height: calc(100vh - 152px); }
@@ -878,6 +873,11 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .ai-justification-body strong { font-size: 12px; }
 .ai-justification-body p { margin: 0; color: #45574d; font-size: 11px; line-height: 1.6; }
 .ai-analysis-review-modal { width: min(880px, 100%); overflow: hidden; }
+.ai-analysis-review-error { display: flex; align-items: flex-start; gap: 10px; border-bottom: 1px solid #ebc5c5; background: #fff0f0; padding: 13px 18px; color: #a92f2f; }
+.ai-analysis-review-error > svg { width: 19px; flex: none; }
+.ai-analysis-review-error > div { display: grid; min-width: 0; gap: 4px; }
+.ai-analysis-review-error strong { font-size: 12px; }
+.ai-analysis-review-error span { overflow-wrap: anywhere; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
 .ai-analysis-review-summary { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: #f7faf8; }
 .ai-analysis-review-summary > div { display: grid; gap: 4px; border-right: 1px solid var(--line); padding: 14px 18px; }
 .ai-analysis-review-summary > div:last-child { border-right: 0; }

@@ -373,7 +373,6 @@ class Command(BaseCommand):
                         name="November 2026 Central Evaluation Camp",
                     ).delete()
                     CentreReadiness.objects.filter(tenant_id=tenant_id, centre_id=centre_id).delete()
-                    RemunerationRule.objects.filter(tenant_id=tenant_id, centre_id=centre_id).delete()
                     CentreProfile.objects.filter(tenant_id=tenant_id, id=centre_id).delete()
             except ProtectedError:
                 self.stdout.write(f"Preserved demo centre {centre_id}: referenced by another workflow")

@@ -18,6 +18,10 @@ SCHEME_TRANSITIONS = {
 }
 
 
+def question_label(question):
+    return f"{question.number}({question.sub_question})" if question.sub_question else question.number
+
+
 def scheme_snapshot(scheme):
     return {
         "paper": str(scheme.paper_id),
@@ -80,6 +84,30 @@ def add_criterion(*, tenant_id, actor_id, scheme, question, values):
     return criterion
 
 
+@transaction.atomic
+def delete_criterion(*, tenant_id, actor_id, scheme_id, criterion_id):
+    scheme = MarkingScheme.objects.select_for_update().filter(id=scheme_id, tenant_id=tenant_id).first()
+    if not scheme:
+        raise HttpError(404, "Marking scheme not found")
+    if scheme.status != MarkingScheme.Status.DRAFT:
+        raise HttpError(409, "Rubric criteria can only change while the scheme is in draft")
+    criterion = RubricCriterion.objects.filter(id=criterion_id, scheme=scheme, tenant_id=tenant_id).first()
+    if not criterion:
+        raise HttpError(404, "Rubric criterion not found")
+    event_id = criterion.id
+    question_id = criterion.question_id
+    code = criterion.code
+    criterion.delete()
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="rubric.criterion.deleted",
+        aggregate="RubricCriterion",
+        aggregate_id=event_id,
+        payload={"scheme_id": str(scheme.id), "question_id": str(question_id), "code": code},
+    )
+
+
 def transition_scheme(*, tenant_id, actor_id, scheme_id, target, reason):
     with transaction.atomic():
         scheme = MarkingScheme.objects.select_for_update().select_related("paper").filter(id=scheme_id, tenant_id=tenant_id).first()
@@ -93,7 +121,7 @@ def transition_scheme(*, tenant_id, actor_id, scheme_id, target, reason):
             for question in scheme.paper.questions.all():
                 allocated = sum(item.max_marks for item in scheme.criteria.filter(question=question))
                 if allocated != question.max_marks:
-                    raise HttpError(422, f"Rubric criteria for question {question.number} must total {question.max_marks}")
+                    raise HttpError(422, f"Rubric criteria for question {question_label(question)} must total {question.max_marks}")
         if target == MarkingScheme.Status.APPROVED and scheme.created_by_id == actor_id:
             raise HttpError(409, "Scheme creator cannot approve the same version")
         previous = scheme.status
