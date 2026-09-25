@@ -112,7 +112,7 @@ SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
-CSRF_TRUSTED_ORIGINS = [item.strip() for item in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://*.ngrok-free.app").split(",") if item.strip()]
+CSRF_TRUSTED_ORIGINS = [item.strip() for item in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:3000,http://*.localhost:3000,http://127.0.0.1:3000,https://*.ngrok-free.app").split(",") if item.strip()]
 TENANT_BASE_DOMAIN = os.getenv("TENANT_BASE_DOMAIN", "localhost").strip().lower().rstrip(".")
 PLATFORM_HOSTS = {
     item.strip().lower()

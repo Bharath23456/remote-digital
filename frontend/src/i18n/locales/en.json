@@ -3,7 +3,7 @@
   "navigation": {
     "groups": { "operations": "Operations", "administration": "Administration", "evaluation": "Evaluation", "governance": "Governance", "platform": "Platform" },
     "items": {
-      "dashboard": "Command centre", "receiving": "Script receiving", "custody": "Chain of custody", "digitization": "Digitization", "liveControl": "Live operations",
+      "dashboard": "Command centre", "receiving": "Bundle preparation", "custody": "Chain of custody", "digitization": "Digitization", "liveControl": "Live operations",
       "configuration": "Exam configuration", "evaluators": "Evaluator master", "allocation": "Allocation engine", "assignmentGovernance": "Allocation history", "serviceControl": "Results & services",
       "anonymisation": "Anonymization", "repository": "Script repository", "rubrics": "Marking schemes", "evaluation": "Evaluation desk", "valuation": "Valuation review", "assessmentControl": "Assessment control",
       "security": "Access governance", "tenancy": "Enterprise settings", "audit": "Audit trail", "platformControl": "Platform operations", "platformAdmin": "Universities", "backToControlPlane": "Back to control plane"
@@ -26,7 +26,7 @@
     "dashboard": { "eyebrow": "Live operations", "title": "Evaluation operations", "description": "Script movement, allocation and evaluation readiness." },
     "configuration": { "title": "Exam configuration", "description": "Versioned paper rules, marks and readiness state." },
     "evaluators": { "title": "Evaluator master", "description": "Verified profiles, capacity and lifecycle controls." },
-    "receiving": { "title": "Script receiving", "description": "Dispatch intake, counts, reconciliation and exceptions." },
+    "receiving": { "title": "Packet & bundle preparation", "description": "Scan booklets into subject packets, then create bundles for dispatch or on-site scanning." },
     "custody": { "title": "Chain of custody", "description": "Opaque script identities and controlled movement history." },
     "digitization": { "title": "Digitization control", "description": "Scanner fleet, image quality processing and signed integrity evidence." },
     "repository": { "title": "Script repository", "description": "Immutable asset metadata, integrity and retention." },

@@ -1,17 +1,17 @@
 "use client";
 
-import { Check, ChevronLeft, ChevronRight, CloudUpload, PackageCheck, Plus, ScanLine, Trash2 } from "lucide-react";
+import { Boxes, Check, ChevronLeft, ChevronRight, CloudUpload, PackageCheck, PackagePlus, ScanLine, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
 type Stage = "receiving" | "custody" | "digitization";
 type Paper = { id: string; code: string; title: string };
-type PacketDraft = { id: string; barcode: string; paper_id: string; script_barcodes: string };
+type College = { id: string; code: string; name: string };
+type PreparedPacket = { id: string; barcode: string; paper_id: string; subject: string; paper_title: string; source_college_id: string; source_college: string; expected_scripts: number; status: "ready" | "bundled"; version: number; created_at: string };
 type Packet = { id: string; barcode: string; subject: string; status: string; expected_scripts: number; scanned_scripts: number; missing_count: number; missing_references: string[]; manual_recognition_enabled?: boolean };
-type Bundle = { id: string; barcode: string; source_centre: string; mode: string; status: string; expected_packets: number; received_packets: number; expected_scripts: number; scanned_scripts: number; packets: Packet[] };
+type Bundle = { id: string; barcode: string; source_centre: string; source_college_id?: string | null; mode: string; status: string; expected_packets: number; received_packets: number; expected_scripts: number; scanned_scripts: number; packets: Packet[] };
 
 const root = "/api/v1/receiving/guided";
-const emptyPacket = (): PacketDraft => ({ id: crypto.randomUUID(), barcode: "", paper_id: "", script_barcodes: "" });
 
 async function api(path: string, init?: RequestInit) {
   const response = await csrfFetch(path, init);
@@ -28,11 +28,18 @@ const post = (path: string, body: object) => api(path, { method: "POST", headers
 
 export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   const [papers, setPapers] = useState<Paper[]>([]);
+  const [colleges, setColleges] = useState<College[]>([]);
+  const [preparedPackets, setPreparedPackets] = useState<PreparedPacket[]>([]);
   const [bundles, setBundles] = useState<Bundle[]>([]);
+  const [preparationStep, setPreparationStep] = useState<"packets" | "bundle">("packets");
+  const [collegeId, setCollegeId] = useState("");
+  const [packetBarcode, setPacketBarcode] = useState("");
+  const [paperId, setPaperId] = useState("");
+  const [bookletScan, setBookletScan] = useState("");
+  const [bookletCodes, setBookletCodes] = useState<string[]>([]);
+  const [selectedPacketIds, setSelectedPacketIds] = useState<string[]>([]);
   const [bundleCode, setBundleCode] = useState("");
-  const [source, setSource] = useState("");
   const [mode, setMode] = useState<"transfer" | "on_site">("transfer");
-  const [drafts, setDrafts] = useState<PacketDraft[]>([emptyPacket()]);
   const [arrivalCode, setArrivalCode] = useState("");
   const [activeBundleCode, setActiveBundleCode] = useState("");
   const [activeBundle, setActiveBundle] = useState<Bundle | null>(null);
@@ -60,8 +67,11 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         setBundles(intake.bundles || []);
       }
       if (stage === "receiving") {
-        const config = await api(`${root}/papers`);
-        setPapers(config.papers || []);
+        const preparation = await api(`${root}/preparation`);
+        setPapers(preparation.papers || []);
+        setColleges(preparation.colleges || []);
+        setPreparedPackets(preparation.packets || []);
+        setCollegeId((current) => current || preparation.colleges?.[0]?.id || "");
       }
       if (stage === "custody" && activeBundleCode) setActiveBundle(await api(`${root}/lookup/bundles/${encodeURIComponent(activeBundleCode)}`));
       if (stage === "digitization" && selectedPacketBarcode) setActivePacket(await api(`${root}/lookup/packets/${encodeURIComponent(selectedPacketBarcode)}`));
@@ -69,22 +79,45 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   }, [stage, activeBundleCode, selectedPacketBarcode]);
   useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
 
-  async function create(event: FormEvent<HTMLFormElement>) {
+  function addBookletCodes() {
+    const incoming = bookletScan.split(/[\s,]+/).map((code) => code.trim().toUpperCase()).filter(Boolean);
+    if (!incoming.length) return;
+    const duplicates = incoming.filter((code, index) => bookletCodes.includes(code) || incoming.indexOf(code) !== index);
+    if (duplicates.length) { setError(`Booklet QR ${duplicates[0]} is already in this packet`); return; }
+    setBookletCodes((current) => [...current, ...incoming]);
+    setBookletScan(""); setError("");
+  }
+
+  async function savePreparedPacket(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const packets = drafts.map((item) => ({ barcode: item.barcode.trim(), paper_id: item.paper_id, script_barcodes: item.script_barcodes.split(/[\s,]+/).map((code) => code.trim()).filter(Boolean) }));
-    if (packets.some((item) => !item.barcode || !item.paper_id || !item.script_barcodes.length)) { setError("Add a barcode, subject and booklet QR list to every packet"); return; }
+    if (!collegeId || !paperId || !packetBarcode.trim() || !bookletCodes.length) { setError("Choose a college and subject, then scan at least one booklet QR"); return; }
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const created = await post(`${root}/prepared-packets`, { barcode: packetBarcode, paper_id: paperId, source_college_id: collegeId, script_barcodes: bookletCodes });
+      setPacketBarcode(""); setPaperId(""); setBookletCodes([]); setBookletScan("");
+      setNotice(`${created.barcode} is ready with ${created.expected_scripts} expected scripts.`);
+      await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Packet could not be prepared"); }
+    finally { setBusy(false); }
+  }
+
+  async function createBundle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const code = bundleCode.trim().toUpperCase();
+    if (!collegeId || !code || !selectedPacketIds.length) { setError("Choose a college and at least one ready packet"); return; }
     setBusy(true); setError(""); setNotice("");
     let created = false;
     try {
-      await post(`${root}/bundles`, { barcode: bundleCode, source_centre: source, mode, packets });
+      await post(`${root}/bundles/from-packets`, { barcode: code, source_college_id: collegeId, mode, packet_ids: selectedPacketIds });
       created = true;
-      setBundleCode(""); setSource(""); setDrafts([emptyPacket()]);
-      await post(`${root}/bundles/start`, { barcode: bundleCode });
-      setNotice(mode === "transfer" ? `Bundle ${bundleCode} dispatched.` : `Bundle ${bundleCode} ready for on-site receipt.`);
+      await post(`${root}/bundles/start`, { barcode: code });
+      setBundleCode(""); setSelectedPacketIds([]);
+      setNotice(mode === "transfer" ? `Bundle ${code} dispatched to the university.` : `Bundle ${code} opened for on-site scanning.`);
+      await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Bundle could not be prepared");
-      if (created) setNotice("Bundle saved. Use Start in the bundle list to retry dispatch.");
-    } finally { await load(); setBusy(false); }
+      if (created) setNotice(`Bundle ${code} was created. Use Start in Recent bundles to continue.`);
+    } finally { setBusy(false); }
   }
 
   async function startBundle(bundle: Bundle) {
@@ -186,28 +219,60 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
     finally { setBusy(false); }
   }
 
+  const readyPackets = preparedPackets.filter((packet) => packet.status === "ready");
+  const collegeReadyPackets = readyPackets.filter((packet) => packet.source_college_id === collegeId);
+  const selectedPackets = collegeReadyPackets.filter((packet) => selectedPacketIds.includes(packet.id));
+  const selectedScriptCount = selectedPackets.reduce((total, packet) => total + packet.expected_scripts, 0);
   const pageCount = Math.max(1, Math.ceil(bundles.length / 10));
   return <div className="config-workspace guided-desk">
     {notice && <div className="success-banner"><Check />{notice}</div>}
     {error && <div className="form-error" role="alert">{error}</div>}
 
     {stage === "receiving" && <>
-      <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Prepare bundle</h2><p className="panel-subtitle">One subject and a booklet QR list per packet.</p></div></header>
-        <form onSubmit={create}>
+      <div className="intake-flow" aria-label="Bundle preparation steps">
+        <button type="button" className={preparationStep === "packets" ? "active" : ""} onClick={() => setPreparationStep("packets")}><span>1</span><div><strong>Prepare packets</strong><small>Scan booklet QR codes by subject</small></div></button>
+        <ChevronRight aria-hidden="true" />
+        <button type="button" className={preparationStep === "bundle" ? "active" : ""} onClick={() => setPreparationStep("bundle")}><span>2</span><div><strong>Create bundle</strong><small>Select ready packets and dispatch</small></div></button>
+      </div>
+
+      {!colleges.length && <div className="form-error" role="alert">No colleges are configured. A university administrator must add an active college in Enterprise settings before packets can be prepared.</div>}
+
+      {preparationStep === "packets" && <>
+        <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Scan scripts into a packet</h2><p className="panel-subtitle">A packet contains answer booklets for one subject from one college.</p></div><div className="intake-count"><strong>{bookletCodes.length}</strong><span>booklets scanned</span></div></header>
+          <form onSubmit={savePreparedPacket}>
+            <div className="form-grid guided-form-body">
+              <label className="field"><span>College</span><select value={collegeId} onChange={(event) => { setCollegeId(event.target.value); setSelectedPacketIds([]); }} required disabled={!colleges.length}><option value="">Select college</option>{colleges.map((college) => <option key={college.id} value={college.id}>{college.code} - {college.name}</option>)}</select></label>
+              <label className="field"><span>Packet barcode</span><input value={packetBarcode} onChange={(event) => setPacketBarcode(event.target.value.toUpperCase())} required placeholder="PKT-2026-001" autoComplete="off" /></label>
+              <label className="field full-field"><span>Subject / paper</span><select value={paperId} onChange={(event) => setPaperId(event.target.value)} required><option value="">Select subject</option>{papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.code} - {paper.title}</option>)}</select></label>
+            </div>
+            <div className="booklet-scan-area">
+              <div className="guided-scan-form">
+                <label className="field"><span>Booklet QR code</span><input value={bookletScan} onChange={(event) => setBookletScan(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addBookletCodes(); } }} placeholder="Scan a QR code and press Enter" autoComplete="off" autoFocus /></label>
+                <button type="button" className="secondary-button" onClick={addBookletCodes}><ScanLine />Add booklet</button>
+              </div>
+              {bookletCodes.length ? <div className="booklet-code-list">{bookletCodes.map((code, index) => <div key={code}><span>{index + 1}</span><strong>{code}</strong><button type="button" className="icon-button" title={`Remove ${code}`} onClick={() => setBookletCodes((current) => current.filter((item) => item !== code))}><X /></button></div>)}</div> : <div className="empty-state compact">No booklet QR codes scanned for this packet.</div>}
+            </div>
+            <footer className="modal-footer"><button type="submit" className="primary-button" disabled={busy || !colleges.length}>{busy ? "Saving packet..." : "Save ready packet"}<PackagePlus /></button></footer>
+          </form>
+        </section>
+        <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Ready packets</h2><p className="panel-subtitle">Saved packets can be grouped into a bundle in the next step.</p></div><button type="button" className="secondary-button" disabled={!readyPackets.length} onClick={() => setPreparationStep("bundle")}>Create bundle<ChevronRight /></button></header>
+          <div className="table-wrap"><table><thead><tr><th>Packet</th><th>College</th><th>Subject</th><th>Booklets</th><th>Status</th></tr></thead><tbody>{preparedPackets.slice(0, 30).map((packet) => <tr key={packet.id}><td><strong>{packet.barcode}</strong></td><td>{packet.source_college}</td><td>{packet.subject} - {packet.paper_title}</td><td>{packet.expected_scripts}</td><td>{packet.status === "ready" ? "Ready" : "Bundled"}</td></tr>)}</tbody></table></div>
+          {!preparedPackets.length && <div className="empty-state">No packets prepared yet.</div>}
+        </section>
+      </>}
+
+      {preparationStep === "bundle" && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Create a bundle from ready packets</h2><p className="panel-subtitle">Only packets prepared for the selected college can be included.</p></div><div className="intake-count"><strong>{selectedPackets.length}</strong><span>packets / {selectedScriptCount} scripts</span></div></header>
+        <form onSubmit={createBundle}>
           <div className="form-grid guided-form-body">
-            <label className="field"><span>Bundle barcode</span><input value={bundleCode} onChange={(event) => setBundleCode(event.target.value)} required placeholder="BND-2026-001" /></label>
-            <label className="field"><span>Source college / centre</span><input value={source} onChange={(event) => setSource(event.target.value)} required /></label>
-            <label className="field"><span>Route</span><select value={mode} onChange={(event) => setMode(event.target.value as "transfer" | "on_site")}><option value="transfer">Dispatch to university</option><option value="on_site">On-site scanning</option></select></label>
+            <label className="field"><span>College</span><select value={collegeId} onChange={(event) => { setCollegeId(event.target.value); setSelectedPacketIds([]); }} required disabled={!colleges.length}><option value="">Select college</option>{colleges.map((college) => <option key={college.id} value={college.id}>{college.code} - {college.name}</option>)}</select></label>
+            <label className="field"><span>Bundle barcode</span><input value={bundleCode} onChange={(event) => setBundleCode(event.target.value.toUpperCase())} required placeholder="BND-2026-001" autoComplete="off" /></label>
+            <label className="field full-field"><span>Route</span><select value={mode} onChange={(event) => setMode(event.target.value as "transfer" | "on_site")}><option value="transfer">Dispatch to university</option><option value="on_site">Scan at this college</option></select></label>
           </div>
-          <div className="guided-packets">{drafts.map((draft, index) => <div className="guided-packet" key={draft.id}>
-            <div className="guided-packet-heading"><strong>Packet {index + 1}</strong>{drafts.length > 1 && <button type="button" className="icon-button" title="Remove packet" onClick={() => setDrafts((current) => current.filter((item) => item.id !== draft.id))}><Trash2 /></button>}</div>
-            <div className="form-grid"><label className="field"><span>Packet barcode</span><input value={draft.barcode} onChange={(event) => setDrafts((current) => current.map((item) => item.id === draft.id ? { ...item, barcode: event.target.value } : item))} required placeholder="PKT-2026-001" /></label>
-              <label className="field"><span>Subject / paper</span><select value={draft.paper_id} onChange={(event) => setDrafts((current) => current.map((item) => item.id === draft.id ? { ...item, paper_id: event.target.value } : item))} required><option value="">Select subject</option>{papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.code} - {paper.title}</option>)}</select></label>
-              <label className="field full-field"><span>Expected booklet QR codes</span><textarea value={draft.script_barcodes} onChange={(event) => setDrafts((current) => current.map((item) => item.id === draft.id ? { ...item, script_barcodes: event.target.value } : item))} rows={2} required placeholder="One QR code per line or comma-separated" /></label></div>
-          </div>)}</div>
-          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setDrafts((current) => [...current, emptyPacket()])}><Plus />Packet</button><button className="primary-button" disabled={busy}>{busy ? "Saving..." : mode === "transfer" ? "Create and dispatch" : "Create on-site bundle"}<ChevronRight /></button></footer>
+          <div className="packet-selection"><div className="table-wrap"><table><thead><tr><th aria-label="Select packet"></th><th>Packet</th><th>Subject</th><th>Booklets</th><th>Prepared</th></tr></thead><tbody>{collegeReadyPackets.map((packet) => <tr key={packet.id}><td><input type="checkbox" aria-label={`Select ${packet.barcode}`} checked={selectedPacketIds.includes(packet.id)} onChange={(event) => setSelectedPacketIds((current) => event.target.checked ? [...current, packet.id] : current.filter((id) => id !== packet.id))} /></td><td><strong>{packet.barcode}</strong></td><td>{packet.subject} - {packet.paper_title}</td><td>{packet.expected_scripts}</td><td>{new Date(packet.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>{!collegeReadyPackets.length && <div className="empty-state">No ready packets exist for this college. Prepare a packet first.</div>}</div>
+          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setPreparationStep("packets")}><ChevronLeft />Prepare packets</button><button type="submit" className="primary-button" disabled={busy || !selectedPacketIds.length}>{busy ? "Creating bundle..." : mode === "transfer" ? "Create and dispatch" : "Create on-site bundle"}<Boxes /></button></footer>
         </form>
-      </section>
+      </section>}
+
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Recent bundles</h2><p className="panel-subtitle">Showing {bundles.length} most recent</p></div></header>
         <div className="table-wrap"><table><thead><tr><th>Bundle</th><th>Source</th><th>Route</th><th>Packets</th><th>Status</th><th>Action</th></tr></thead><tbody>{bundles.slice((bundlePage - 1) * 10, bundlePage * 10).map((bundle) => <tr key={bundle.id}><td><strong>{bundle.barcode}</strong></td><td>{bundle.source_centre}</td><td>{bundle.mode === "on_site" ? "On site" : "Transfer"}</td><td>{bundle.expected_packets}</td><td>{bundle.status.replaceAll("_", " ")}</td><td>{bundle.status === "registered" && <button className="text-button" disabled={busy} onClick={() => void startBundle(bundle)}>Start</button>}</td></tr>)}</tbody></table></div>
         {!bundles.length && <div className="empty-state">No bundles prepared yet.</div>}
@@ -217,22 +282,22 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
 
     {stage === "custody" && !activeBundle && <>
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Receive bundle</h2><p className="panel-subtitle">Scan the barcode on an arriving bundle.</p></div></header>
-        <form className="guided-scan-form" onSubmit={receiveBundle}><label className="field"><span>Bundle barcode</span><input value={arrivalCode} onChange={(event) => setArrivalCode(event.target.value)} required placeholder="Scan or type bundle barcode" autoFocus /></label><button className="primary-button" disabled={busy}><ScanLine />Receive bundle</button></form>
+        <form className="guided-scan-form" onSubmit={receiveBundle}><label className="field"><span>Bundle barcode</span><input value={arrivalCode} onChange={(event) => setArrivalCode(event.target.value)} required placeholder="Scan or type bundle barcode" autoFocus /></label><button type="submit" className="primary-button" disabled={busy}><ScanLine />Receive bundle</button></form>
       </section>
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Recent bundles</h2></div></header><div className="table-wrap"><table><thead><tr><th>Bundle</th><th>Source</th><th>Packets</th><th>Status</th><th>Action</th></tr></thead><tbody>{bundles.filter((bundle) => ["in_transit", "received", "on_site"].includes(bundle.status)).slice(0, 20).map((bundle) => <tr key={bundle.id}><td><strong>{bundle.barcode}</strong></td><td>{bundle.source_centre}</td><td>{bundle.received_packets}/{bundle.expected_packets}</td><td>{bundle.status.replaceAll("_", " ")}</td><td>{["received", "on_site"].includes(bundle.status) && <button className="text-button" disabled={busy} onClick={() => void openBundle(bundle.barcode)}>Open packets</button>}</td></tr>)}</tbody></table></div></section>
     </>}
 
     {stage === "custody" && activeBundle && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">{activeBundle.barcode}</h2><p className="panel-subtitle">{activeBundle.received_packets} of {activeBundle.expected_packets} packets received</p></div><button className="secondary-button" onClick={() => { setActiveBundleCode(""); setActiveBundle(null); setPacketCode(""); }}>Change bundle</button></header>
-      <form className="guided-scan-form" onSubmit={receivePacket}><label className="field"><span>Packet barcode</span><input value={packetCode} onChange={(event) => setPacketCode(event.target.value)} required placeholder="Scan or type packet barcode" autoFocus /></label><button className="primary-button" disabled={busy}><PackageCheck />Receive packet</button></form>
+      <form className="guided-scan-form" onSubmit={receivePacket}><label className="field"><span>Packet barcode</span><input value={packetCode} onChange={(event) => setPacketCode(event.target.value)} required placeholder="Scan or type packet barcode" autoFocus /></label><button type="submit" className="primary-button" disabled={busy}><PackageCheck />Receive packet</button></form>
       <div className="table-wrap"><table><thead><tr><th>Packet</th><th>Subject</th><th>Expected scripts</th><th>Status</th></tr></thead><tbody>{activeBundle.packets.map((packet) => <tr key={packet.id}><td><strong>{packet.barcode}</strong></td><td>{packet.subject}</td><td>{packet.expected_scripts}</td><td>{packet.status.replaceAll("_", " ")}</td></tr>)}</tbody></table></div>
     </section>}
 
     {stage === "digitization" && <>
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Open packet</h2><p className="panel-subtitle">Scan a received packet before uploading its scripts.</p></div></header>
-        <form className="guided-scan-form" onSubmit={openPacket}><label className="field"><span>Packet barcode</span><input value={packetLookup} onChange={(event) => setPacketLookup(event.target.value)} required placeholder="Scan or type packet barcode" autoFocus /></label><button className="primary-button" disabled={busy}><ScanLine />Open packet</button></form>
+        <form className="guided-scan-form" onSubmit={openPacket}><label className="field"><span>Packet barcode</span><input value={packetLookup} onChange={(event) => setPacketLookup(event.target.value)} required placeholder="Scan or type packet barcode" autoFocus /></label><button type="submit" className="primary-button" disabled={busy}><ScanLine />Open packet</button></form>
       </section>
       {activePacket && <section className="panel"><header className="panel-header"><div><h2 className="panel-title">{activePacket.barcode}</h2><p className="panel-subtitle">{activePacket.subject} - {activePacket.bundle} - {activePacket.scanned_scripts}/{activePacket.expected_scripts} scripts scanned</p></div><button className="secondary-button" onClick={() => { setSelectedPacket(""); setSelectedPacketBarcode(""); setActivePacket(null); setCoverFile(null); setAnswerFiles([]); clearManualEntry(); }}>Change packet</button></header>
-        {activePacket.status === "complete" ? <div className="success-banner"><Check />Packet complete. All expected scripts are scanned.</div> : <form className={`guided-upload-form ${manualEntryRequired ? "manual-recognition" : ""}`} onSubmit={upload}><label className="field"><span>Front page</span><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(event) => { setCoverFile(event.target.files?.[0] || null); clearManualEntry(); }} /></label><label className="field"><span>Answer pages</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => setAnswerFiles(Array.from(event.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })))} /></label>{manualEntryRequired && <><label className="field"><span>Booklet QR code</span><input value={manualQr} onChange={(event) => setManualQr(event.target.value)} required autoComplete="off" spellCheck={false} maxLength={64} /></label><label className="field"><span>USN from front page</span><input value={manualUsn} onChange={(event) => setManualUsn(event.target.value.toUpperCase())} required autoComplete="off" spellCheck={false} maxLength={20} /></label></>}<button className="primary-button" disabled={busy || !coverFile || (manualEntryRequired && (!manualQr.trim() || !manualUsn.trim()))}><CloudUpload />{busy ? "Recognizing and uploading..." : manualEntryRequired ? "Confirm details and upload" : "Upload script"}</button></form>}
+        {activePacket.status === "complete" ? <div className="success-banner"><Check />Packet complete. All expected scripts are scanned.</div> : <form className={`guided-upload-form ${manualEntryRequired ? "manual-recognition" : ""}`} onSubmit={upload}><label className="field"><span>Front page</span><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(event) => { setCoverFile(event.target.files?.[0] || null); clearManualEntry(); }} /></label><label className="field"><span>Answer pages</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => setAnswerFiles(Array.from(event.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })))} /></label>{manualEntryRequired && <><label className="field"><span>Booklet QR code</span><input value={manualQr} onChange={(event) => setManualQr(event.target.value)} required autoComplete="off" spellCheck={false} maxLength={64} /></label><label className="field"><span>USN from front page</span><input value={manualUsn} onChange={(event) => setManualUsn(event.target.value.toUpperCase())} required autoComplete="off" spellCheck={false} maxLength={20} /></label></>}<button type="submit" className="primary-button" disabled={busy || !coverFile || (manualEntryRequired && (!manualQr.trim() || !manualUsn.trim()))}><CloudUpload />{busy ? "Recognizing and uploading..." : manualEntryRequired ? "Confirm details and upload" : "Upload script"}</button></form>}
       </section>}
     </>}
   </div>;

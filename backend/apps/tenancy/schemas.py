@@ -30,6 +30,9 @@ class TenantProvisionIn(Schema):
     enabled_modules: list[str] = Field(default_factory=list)
     storage_quota_gb: int = 10
     data_region: str = "in-primary"
+    brand_name: str = ""
+    brand_description: str = ""
+    brand_theme: str = "forest"
     policy: dict[str, Any] = Field(default_factory=dict)
     ai_evaluation_mode: str = "disabled"
     ai_confidence_threshold: float = Field(default=85, ge=1, le=100)
@@ -48,11 +51,25 @@ class TenantUpdateIn(Schema):
     enabled_modules: list[str] | None = None
     storage_quota_gb: int | None = None
     data_region: str | None = None
+    brand_name: str | None = None
+    brand_description: str | None = None
+    brand_theme: str | None = None
     ai_evaluation_mode: str | None = None
     ai_confidence_threshold: float | None = Field(default=None, ge=1, le=100)
     ai_model_name: str | None = None
     ai_api_key: str | None = Field(default=None, min_length=10, max_length=512)
     ai_provider_version: int = 0
+
+
+class TenantLogoUploadIn(Schema):
+    content_type: str
+    maximum_bytes: int = Field(ge=1, le=2_000_000)
+
+
+class TenantLogoFinalizeIn(Schema):
+    version: int
+    storage_key: str
+    content_type: str
 
 
 class TenantDomainIn(Schema):

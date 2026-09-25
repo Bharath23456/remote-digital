@@ -10,10 +10,19 @@ async function mockDesk(page: Page, role: DeskRole) {
   const modules = role === "university_admin" ? ["receiving", "custody", "digitization", "anonymisation"] : {
     bundle_preparer: ["receiving"], intake_receiver: ["custody"], scan_operator: ["digitization"],
   }[role];
+  await page.route("**/api/v1/enterprise/domain-context", (route) => route.fulfill({ json: {
+    scope: "university", hostname: "northbridge.localhost", university: {
+      id: "tenant-1", name: "Northbridge University", code: "NBU", status: "active",
+      branding: { name: "Northbridge University", description: "", theme: "forest", logo_url: "" },
+    },
+  } }));
   await page.route("**/api/v1/auth/me", (route) => route.fulfill({ json: {
     user: { id: 1, name: "Intake worker", email: "worker@example.test" },
     tenant: { id: "tenant-1", name: "Northbridge University", code: "NBU" },
     role, permissions: [], must_change_password: false, enabled_modules: modules,
+    branding: { name: "Northbridge University", description: "", theme: "forest", logo_url: "" },
+    platform_host: false, platform_url: "http://localhost:3000",
+    ai_evaluation: { mode: "disabled", confidence_threshold: 85, model_name: "admiezo-ai-v1", provider: { available: false }, available: false },
     tenants: [{ id: "tenant-1", name: "Northbridge University", role }],
     session: { id: "session-1", timeout_minutes: 30 },
   } }));
@@ -23,6 +32,11 @@ async function mockDesk(page: Page, role: DeskRole) {
   await page.route("**/api/v1/auth/notifications", (route) => route.fulfill({ json: { items: [], unread_count: 0 } }));
   await page.route("**/api/v1/auth/csrf", (route) => route.fulfill({ json: { csrf_token: "test-csrf" } }));
   await page.route("**/api/v1/receiving/guided/papers", (route) => route.fulfill({ json: { papers: [{ id: "paper-1", code: "CS402-A", title: "Cryptography" }] } }));
+  await page.route("**/api/v1/receiving/guided/preparation", (route) => route.fulfill({ json: {
+    papers: [{ id: "paper-1", code: "CS402-A", title: "Cryptography" }],
+    colleges: [{ id: "college-1", code: "central-college", name: "Central College" }],
+    packets: [],
+  } }));
   await page.route("**/api/v1/receiving/guided/catalog", (route) => route.fulfill({ json: { enabled: true, bundles: [{
     id: "bundle-1", barcode: "BND-2026-001", source_centre: "Central College", mode: "transfer", status: "received",
     expected_packets: 1, received_packets: 1, expected_scripts: 2, scanned_scripts: 1,
@@ -46,15 +60,16 @@ async function navigate(page: Page, label: string) {
 
 test("admin sees separate preparation, receipt, and digitization tasks", async ({ page }) => {
   await mockDesk(page, "university_admin");
-  await navigate(page, "Script receiving");
+  await navigate(page, "Bundle preparation");
   await expect(page.locator(".page-heading .eyebrow")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Prepare bundle" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Scan scripts into a packet" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Ready packets" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Recent bundles" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Receive bundle" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(1);
   await navigate(page, "Chain of custody");
   await expect(page.getByRole("heading", { name: "Receive bundle" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Prepare bundle" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Scan scripts into a packet" })).toHaveCount(0);
   await page.getByRole("button", { name: "Open packets" }).click();
   await expect(page.getByRole("heading", { name: "BND-2026-001" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "PKT-2026-001" })).toBeVisible();
@@ -73,6 +88,12 @@ test("bundle, packet and script move through the three desks", async ({ page }) 
   let bundleStatus = "";
   let packetStatus = "registered";
   let scanned = 0;
+  let preparedPackets: Array<Record<string, unknown>> = [];
+  await page.route("**/api/v1/receiving/guided/preparation", (route) => route.fulfill({ json: {
+    papers: [{ id: "paper-1", code: "CS402-A", title: "Cryptography" }],
+    colleges: [{ id: "college-1", code: "test-college", name: "Test College" }],
+    packets: preparedPackets,
+  } }));
   await page.route("**/api/v1/receiving/guided/catalog", (route) => route.fulfill({ json: { enabled: true, bundles: bundleStatus ? [{
     id: "bundle-2", barcode: "BND-TEST-002", source_centre: "Test College", mode: "transfer", status: bundleStatus,
     expected_packets: 1, received_packets: packetStatus === "registered" ? 0 : 1, expected_scripts: 1, scanned_scripts: scanned,
@@ -86,9 +107,19 @@ test("bundle, packet and script move through the three desks", async ({ page }) 
   await page.route("**/api/v1/receiving/guided/lookup/packets/PKT-TEST-002", (route) => route.fulfill({ json: {
     id: "packet-2", barcode: "PKT-TEST-002", subject: "CS402-A", status: packetStatus, expected_scripts: 1, scanned_scripts: scanned, missing_count: 1 - scanned, missing_references: scanned ? [] : ["HASHED-QR"], bundle: "BND-TEST-002",
   } }));
-  await page.route("**/api/v1/receiving/guided/bundles", async (route) => {
+  await page.route("**/api/v1/receiving/guided/prepared-packets", async (route) => {
+    const packet = {
+      id: "prepared-2", barcode: "PKT-TEST-002", paper_id: "paper-1", subject: "CS402-A", paper_title: "Cryptography",
+      source_college_id: "college-1", source_college: "Test College", expected_scripts: 1, status: "ready", version: 1,
+      created_at: new Date().toISOString(),
+    };
+    preparedPackets = [packet];
+    await route.fulfill({ json: packet });
+  });
+  await page.route("**/api/v1/receiving/guided/bundles/from-packets", async (route) => {
     bundleStatus = "registered";
-    await route.fulfill({ json: { id: "bundle-2", status: bundleStatus } });
+    preparedPackets = preparedPackets.map((packet) => ({ ...packet, status: "bundled" }));
+    await route.fulfill({ json: { id: "bundle-2", barcode: "BND-TEST-002", status: bundleStatus } });
   });
   await page.route("**/api/v1/receiving/guided/bundles/start", async (route) => {
     bundleStatus = "in_transit";
@@ -112,14 +143,18 @@ test("bundle, packet and script move through the three desks", async ({ page }) 
   });
   await page.route("**/api/v1/anonymisation/scripts/script-2/auto-mask", (route) => route.fulfill({ json: { status: "masked" } }));
 
-  await navigate(page, "Script receiving");
-  await page.getByRole("textbox", { name: "Bundle barcode" }).fill("BND-TEST-002");
-  await page.getByRole("textbox", { name: "Source college / centre" }).fill("Test College");
+  await navigate(page, "Bundle preparation");
   await page.getByRole("textbox", { name: "Packet barcode" }).fill("PKT-TEST-002");
   await page.getByRole("combobox", { name: "Subject / paper" }).selectOption("paper-1");
-  await page.getByRole("textbox", { name: "Expected booklet QR codes" }).fill("QR-TEST-002");
+  await page.getByRole("textbox", { name: "Booklet QR code" }).fill("QR-TEST-002");
+  await page.getByRole("button", { name: "Add booklet" }).click();
+  await page.getByRole("button", { name: "Save ready packet" }).click();
+  await expect(page.getByText("PKT-TEST-002 is ready with 1 expected scripts.")).toBeVisible();
+  await page.getByRole("button", { name: "Create bundle", exact: true }).click();
+  await page.getByRole("textbox", { name: "Bundle barcode" }).fill("BND-TEST-002");
+  await page.getByRole("checkbox", { name: "Select PKT-TEST-002" }).check();
   await page.getByRole("button", { name: "Create and dispatch" }).click();
-  await expect(page.getByText("Bundle BND-TEST-002 dispatched.")).toBeVisible();
+  await expect(page.getByText("Bundle BND-TEST-002 dispatched to the university.")).toBeVisible();
   await navigate(page, "Chain of custody");
   await page.getByRole("textbox", { name: "Bundle barcode" }).fill("BND-TEST-002");
   await page.getByRole("button", { name: "Receive bundle" }).click();
@@ -174,7 +209,7 @@ test("unreadable cover offers demo-only manual QR and USN entry", async ({ page 
 });
 
 for (const desk of [
-  { role: "bundle_preparer", page: "Script receiving", heading: "Prepare bundle" },
+  { role: "bundle_preparer", page: "Bundle preparation", heading: "Scan scripts into a packet" },
   { role: "intake_receiver", page: "Chain of custody", heading: "Receive bundle" },
   { role: "scan_operator", page: "Digitization", heading: "Open packet" },
 ] as const) {

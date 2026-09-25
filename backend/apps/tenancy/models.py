@@ -114,6 +114,12 @@ class TenantAccount(TimeStampedModel):
         PROFESSIONAL = "professional", "Professional"
         ENTERPRISE = "enterprise", "Enterprise"
 
+    class Theme(models.TextChoices):
+        FOREST = "forest", "Forest"
+        OCEAN = "ocean", "Ocean"
+        RUBY = "ruby", "Ruby"
+        GRAPHITE = "graphite", "Graphite"
+
     root_institution = models.OneToOneField(Institution, on_delete=models.PROTECT, related_name="tenant_account")
     slug = models.SlugField(max_length=63, unique=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PROVISIONING)
@@ -121,6 +127,11 @@ class TenantAccount(TimeStampedModel):
     enabled_modules = models.JSONField(default=list)
     storage_quota_bytes = models.PositiveBigIntegerField(default=10 * 1024 * 1024 * 1024)
     data_region = models.CharField(max_length=40, default="in-primary")
+    brand_name = models.CharField(max_length=120, blank=True)
+    brand_description = models.CharField(max_length=240, blank=True)
+    brand_theme = models.CharField(max_length=20, choices=Theme.choices, default=Theme.FOREST)
+    logo_storage_key = models.CharField(max_length=320, blank=True)
+    logo_mime_type = models.CharField(max_length=80, blank=True)
     version = models.PositiveIntegerField(default=1)
 
 

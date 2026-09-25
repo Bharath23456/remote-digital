@@ -18,9 +18,9 @@ from apps.core.models import AuditEvent
 from apps.custody.models import Script
 from apps.anonymisation.models import IdentityLink
 from apps.repository.models import UploadIntent
-from apps.tenancy.models import Membership
+from apps.tenancy.models import Institution, Membership
 
-from .models import Dispatch, Packet
+from .models import Dispatch, Packet, PreparedPacket
 from .omr import RecognitionError, _read_usn_grid, USN_COLUMN_SYMBOLS
 
 
@@ -35,6 +35,12 @@ class GuidedIntakeTests(TestCase):
         response = self.post("/api/v1/auth/login", {"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "guided-intake-tests"})
         self.assertEqual(response.status_code, 200)
         self.paper = Paper.objects.first()
+        root = Membership.objects.get(user__email="admin@admiezo.local").institution
+        self.college, _ = Institution.objects.get_or_create(
+            tenant_id=root.tenant_id,
+            code="test-college",
+            defaults={"name": "Test College", "kind": Institution.Kind.COLLEGE, "parent": root},
+        )
 
     def post(self, path, body):
         return self.client.post(path, data=json.dumps(body), content_type="application/json")
@@ -164,6 +170,45 @@ class GuidedIntakeTests(TestCase):
         response = self.post("/api/v1/receiving/guided/bundles", {"barcode": "BND-DUP-001", "source_centre": "Test", "mode": "transfer", "packets": packets})
         self.assertEqual(response.status_code, 422)
 
+    def test_prepared_packets_are_saved_then_bundled_for_selected_college(self):
+        catalog = self.client.get("/api/v1/receiving/guided/preparation")
+        self.assertEqual(catalog.status_code, 200, catalog.content)
+        self.assertIn(str(self.college.id), {item["id"] for item in catalog.json()["colleges"]})
+        prepared = self.post("/api/v1/receiving/guided/prepared-packets", {
+            "barcode": "PKT-PREP-001",
+            "paper_id": str(self.paper.id),
+            "source_college_id": str(self.college.id),
+            "script_barcodes": ["QR-PREP-001", "QR-PREP-002"],
+        })
+        self.assertEqual(prepared.status_code, 200, prepared.content)
+        packet_id = prepared.json()["id"]
+        self.assertEqual(prepared.json()["status"], PreparedPacket.Status.READY)
+        self.assertEqual(prepared.json()["expected_scripts"], 2)
+
+        duplicate = self.post("/api/v1/receiving/guided/prepared-packets", {
+            "barcode": "PKT-PREP-002",
+            "paper_id": str(self.paper.id),
+            "source_college_id": str(self.college.id),
+            "script_barcodes": ["QR-PREP-002"],
+        })
+        self.assertEqual(duplicate.status_code, 409)
+
+        bundled = self.post("/api/v1/receiving/guided/bundles/from-packets", {
+            "barcode": "BND-PREP-001",
+            "source_college_id": str(self.college.id),
+            "mode": "transfer",
+            "packet_ids": [packet_id],
+        })
+        self.assertEqual(bundled.status_code, 200, bundled.content)
+        dispatch = Dispatch.objects.get(reference="BND-PREP-001")
+        self.assertEqual(dispatch.source_institution, self.college)
+        self.assertEqual((dispatch.expected_packets, dispatch.expected_scripts), (1, 2))
+        prepared_packet = PreparedPacket.objects.get(id=packet_id)
+        self.assertEqual(prepared_packet.status, PreparedPacket.Status.BUNDLED)
+        self.assertEqual(prepared_packet.packet.script_manifest, ["QR-PREP-001", "QR-PREP-002"])
+        self.assertTrue(AuditEvent.objects.filter(action="receiving.guided.packet_prepared", aggregate_id=prepared_packet.id).exists())
+        self.assertEqual(self.post("/api/v1/receiving/guided/bundles/start", {"barcode": "BND-PREP-001"}).json()["status"], Dispatch.Status.IN_TRANSIT)
+
     def test_legacy_receiving_cannot_change_guided_bundle(self):
         created = self.create_manifest()
         legacy = self.client.get("/api/v1/receiving/catalog").json()
@@ -220,8 +265,11 @@ class GuidedIntakeTests(TestCase):
             self.assertEqual(client.get("/api/v1/operations/overview").status_code, 403)
             self.assertEqual(client.get("/api/v1/repository/catalog").status_code, 403)
         self.assertEqual(preparer.get("/api/v1/receiving/guided/papers").status_code, 200)
+        self.assertEqual(preparer.get("/api/v1/receiving/guided/preparation").status_code, 200)
         self.assertEqual(receiver.get("/api/v1/receiving/guided/papers").status_code, 403)
         self.assertEqual(scanner.get("/api/v1/receiving/guided/papers").status_code, 403)
+        self.assertEqual(receiver.get("/api/v1/receiving/guided/preparation").status_code, 403)
+        self.assertEqual(scanner.get("/api/v1/receiving/guided/preparation").status_code, 403)
         self.assertEqual(receiver.get("/api/v1/receiving/guided/lookup/bundles/BND-GUIDED-001").status_code, 200)
         self.assertEqual(preparer.get("/api/v1/receiving/guided/lookup/bundles/BND-GUIDED-001").status_code, 403)
         self.assertEqual(scanner.get("/api/v1/receiving/guided/lookup/bundles/BND-GUIDED-001").status_code, 403)
@@ -231,6 +279,8 @@ class GuidedIntakeTests(TestCase):
         self.assertEqual(receiver.get("/api/v1/receiving/guided/lookup/packets/PKT-GUIDED-1").status_code, 403)
         self.assertEqual(preparer.get("/api/v1/receiving/guided/lookup/packets/PKT-GUIDED-1").status_code, 403)
         self.assertEqual(receiver.post("/api/v1/receiving/guided/bundles", data=json.dumps({}), content_type="application/json").status_code, 403)
+        self.assertEqual(receiver.post("/api/v1/receiving/guided/prepared-packets", data=json.dumps({}), content_type="application/json").status_code, 403)
+        self.assertEqual(scanner.post("/api/v1/receiving/guided/bundles/from-packets", data=json.dumps({}), content_type="application/json").status_code, 403)
         packet = Packet.objects.get(barcode="PKT-GUIDED-1")
         self.assertEqual(preparer.post(f"/api/v1/receiving/guided/packets/{packet.id}/recognize", {"cover": SimpleUploadedFile("front.png", b"cover", content_type="image/png")}).status_code, 403)
         self.assertEqual(receiver.post(f"/api/v1/receiving/guided/packets/{packet.id}/recognize", {"cover": SimpleUploadedFile("front.png", b"cover", content_type="image/png")}).status_code, 403)

@@ -131,18 +131,15 @@ export function LocalizedBrowserControls() {
       for (const form of forms) form.autocomplete = "off";
       const ownField = root instanceof HTMLInputElement || root instanceof HTMLSelectElement || root instanceof HTMLTextAreaElement ? [root] : [];
       const fields = [...ownField, ...root.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input, select, textarea")];
-      for (const field of fields) {
-        field.setCustomValidity("");
-        if (field.required && !field.value) field.setCustomValidity(field instanceof HTMLSelectElement ? copy[language].selectRequired : copy[language].required);
-      }
+      for (const field of fields) field.setCustomValidity("");
     };
     enhance(document);
     const observer = new MutationObserver((items) => { for (const item of items) for (const node of item.addedNodes) if (node instanceof Element) enhance(node); });
     observer.observe(document.body, { childList: true, subtree: true });
     const onClick = (event: Event) => { const input = event.target instanceof HTMLInputElement ? event.target : null; if (input?.classList.contains("localized-date-input")) { event.preventDefault(); openCalendar(input, language); } else if (!(event.target instanceof Element) || !event.target.closest(".localized-calendar")) closeCalendar(); };
-    const onInvalid = (event: Event) => { const field = event.target; if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return; field.setCustomValidity(""); field.setCustomValidity(field.validity.valueMissing ? field instanceof HTMLSelectElement ? copy[language].selectRequired : copy[language].required : copy[language].invalid); };
+    const onInvalid = (event: Event) => { const field = event.target; if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return; field.setCustomValidity(""); if (field.validity.valid) return; field.setCustomValidity(field.validity.valueMissing ? field instanceof HTMLSelectElement ? copy[language].selectRequired : copy[language].required : copy[language].invalid); };
     const onInput = (event: Event) => { const field = event.target; if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) field.setCustomValidity(""); if (field instanceof HTMLInputElement && field.type === "file") { const label = field.closest("label"); if (label) label.setAttribute("data-file-label", field.files?.length ? `${field.files.length} ${copy[language].files}` : `${copy[language].chooseFiles} · ${copy[language].noFile}`); } };
-    const onChange = (event: Event) => { const field = event.target; if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return; field.setCustomValidity(""); if (field.required && !field.value) field.setCustomValidity(field instanceof HTMLSelectElement ? copy[language].selectRequired : copy[language].required); };
+    const onChange = (event: Event) => { const field = event.target; if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) field.setCustomValidity(""); };
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") closeCalendar(); };
     document.addEventListener("click", onClick, true); document.addEventListener("invalid", onInvalid, true); document.addEventListener("input", onInput, true); document.addEventListener("change", onChange, true); document.addEventListener("keydown", onKey, true);
     return () => { observer.disconnect(); closeCalendar(); document.removeEventListener("click", onClick, true); document.removeEventListener("invalid", onInvalid, true); document.removeEventListener("input", onInput, true); document.removeEventListener("change", onChange, true); document.removeEventListener("keydown", onKey, true); };

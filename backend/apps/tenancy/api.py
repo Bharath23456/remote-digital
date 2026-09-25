@@ -8,8 +8,8 @@ from apps.core.services import record_event
 from apps.identity_auth.services import active_session_for_request
 from apps.tenancy.custom_fields import FORM_CATALOG, persist_custom_values, serialize_definition, validate_custom_values, validate_definition
 from apps.tenancy.models import CustomFieldDefinition, CustomFieldRecord, Institution, Membership
-from apps.tenancy.schemas import CustomFieldDefinitionIn, CustomFieldDefinitionUpdateIn, InstitutionCreateIn, InstitutionUpdateIn, TenantDomainIn, TenantProvisionIn, TenantSwitchIn, TenantUpdateIn
-from apps.tenancy.services import add_custom_domain, create_institution, institution_rows, provision_tenant, tenant_control_plane_rows, tenant_rows, TenancyConflict, TenancyError, update_institution, update_tenant_account
+from apps.tenancy.schemas import CustomFieldDefinitionIn, CustomFieldDefinitionUpdateIn, InstitutionCreateIn, InstitutionUpdateIn, TenantDomainIn, TenantLogoFinalizeIn, TenantLogoUploadIn, TenantProvisionIn, TenantSwitchIn, TenantUpdateIn
+from apps.tenancy.services import add_custom_domain, branding_for_account, create_institution, create_tenant_logo_upload, finalize_tenant_logo, institution_rows, provision_tenant, tenant_control_plane_rows, tenant_rows, TenancyConflict, TenancyError, update_institution, update_tenant_account
 
 
 router = Router(tags=["Enterprise configuration"])
@@ -35,6 +35,7 @@ def domain_context(request):
             "name": account.root_institution.name,
             "code": account.root_institution.code,
             "status": account.status,
+            "branding": branding_for_account(account),
         },
     }
 
@@ -178,7 +179,7 @@ def create_tenant(request, payload: TenantProvisionIn):
         raise HttpError(409, str(exc)) from exc
     except TenancyError as exc:
         raise HttpError(422, str(exc)) from exc
-    return {"id": str(institution.tenant_id), "institution_id": str(institution.id), "name": institution.name, "admin_user_id": admin.id, "account_id": str(account.id), "hostname": domain.hostname, "temporary_password": temporary_password, "administrator_existing": not bool(temporary_password)}
+    return {"id": str(institution.tenant_id), "institution_id": str(institution.id), "name": institution.name, "admin_user_id": admin.id, "account_id": str(account.id), "hostname": domain.hostname, "temporary_password": temporary_password, "administrator_existing": not bool(temporary_password), "version": account.version, "branding": branding_for_account(account)}
 
 
 @router.post("/tenants/switch")
@@ -208,7 +209,39 @@ def edit_tenant(request, tenant_id: str, payload: TenantUpdateIn):
         raise HttpError(409, str(exc)) from exc
     except TenancyError as exc:
         raise HttpError(422, str(exc)) from exc
-    return {"id": str(account.root_institution.tenant_id), "status": account.status, "plan": account.plan, "version": account.version}
+    return {"id": str(account.root_institution.tenant_id), "status": account.status, "plan": account.plan, "version": account.version, "branding": branding_for_account(account)}
+
+
+@router.post("/tenants/{tenant_id}/branding/logo-upload")
+def create_logo_upload(request, tenant_id: str, payload: TenantLogoUploadIn):
+    require_roles(request, Membership.Role.PLATFORM_ADMIN)
+    try:
+        storage_key, upload_url, expires_at = create_tenant_logo_upload(
+            tenant_id=tenant_id,
+            content_type=payload.content_type,
+            maximum_bytes=payload.maximum_bytes,
+        )
+    except TenancyError as exc:
+        raise HttpError(422, str(exc)) from exc
+    return {"storage_key": storage_key, "upload_url": upload_url, "expires_at": expires_at, "headers": {"Content-Type": payload.content_type}}
+
+
+@router.post("/tenants/{tenant_id}/branding/logo-finalize")
+def finalize_logo_upload(request, tenant_id: str, payload: TenantLogoFinalizeIn):
+    require_roles(request, Membership.Role.PLATFORM_ADMIN)
+    try:
+        account = finalize_tenant_logo(
+            actor_id=request.auth.id,
+            tenant_id=tenant_id,
+            version=payload.version,
+            storage_key=payload.storage_key,
+            content_type=payload.content_type,
+        )
+    except TenancyConflict as exc:
+        raise HttpError(409, str(exc)) from exc
+    except TenancyError as exc:
+        raise HttpError(422, str(exc)) from exc
+    return {"version": account.version, "branding": branding_for_account(account)}
 
 
 @router.post("/tenants/{tenant_id}/domains")

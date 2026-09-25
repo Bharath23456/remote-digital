@@ -17,6 +17,7 @@ from apps.core.authz import allowed_modules_for_role, membership_for, require_ro
 from apps.core.services import record_event
 from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Membership, TenantAccount
+from apps.tenancy.services import branding_for_account
 
 from .models import AccessSession, AuthenticationHistory, AuthenticationMethod, LoginAttempt, OidcProvider, PasskeyCredential, TrustedDevice
 from .schemas import (
@@ -67,6 +68,8 @@ def csrf_token(request):
 
 @router.get("/sso/providers", auth=None)
 def sso_providers(request):
+    if getattr(request, "is_platform_host", False) and not getattr(request, "resolved_tenant_id", None):
+        return []
     providers = OidcProvider.objects.filter(is_active=True)
     if getattr(request, "resolved_tenant_id", None):
         providers = providers.filter(tenant_id=request.resolved_tenant_id)
@@ -79,7 +82,13 @@ def sso_providers(request):
 
 @router.post("/sso/start", auth=None)
 def sso_start(request, payload: SsoStartIn):
-    provider = OidcProvider.objects.filter(id=payload.provider_id, is_active=True).first()
+    resolved_tenant_id = getattr(request, "resolved_tenant_id", None)
+    if getattr(request, "is_platform_host", False) and not resolved_tenant_id:
+        raise HttpError(403, "University accounts must sign in on their university subdomain")
+    providers = OidcProvider.objects.filter(id=payload.provider_id, is_active=True)
+    if resolved_tenant_id:
+        providers = providers.filter(tenant_id=resolved_tenant_id)
+    provider = providers.first()
     if not provider:
         raise HttpError(404, "Institutional sign-in provider not found")
     if policy_for(provider.tenant_id).require_mfa:
@@ -101,7 +110,7 @@ def sso_start(request, payload: SsoStartIn):
 
 @router.get("/sso/callback", auth=None)
 def sso_callback(request, state: str = "", code: str = "", error: str = ""):
-    base_url = settings.APP_BASE_URL or request.build_absolute_uri("/").rstrip("/")
+    base_url = request.build_absolute_uri("/").rstrip("/") if getattr(request, "resolved_tenant_id", None) else settings.APP_BASE_URL or request.build_absolute_uri("/").rstrip("/")
     if error or not state or not code:
         return HttpResponseRedirect(f"{base_url}/?sso=failed")
     try:
@@ -158,6 +167,8 @@ def _user_context(user, membership, session):
             "name": membership.institution.name,
             "code": membership.institution.code,
         },
+        "branding": branding_for_account(account),
+        "platform_url": settings.APP_BASE_URL,
         "role": membership.role,
         "permissions": membership.permissions,
         "must_change_password": membership.must_change_password,
@@ -187,6 +198,8 @@ def sign_in(request, payload: LoginIn):
     resolved_tenant_id = getattr(request, "resolved_tenant_id", None)
     user_hint = User.objects.filter(username=email, is_active=True).first()
     membership = membership_for_user(user_hint, resolved_tenant_id) if user_hint else None
+    if user_hint and not resolved_tenant_id and getattr(request, "is_platform_host", False):
+        membership = Membership.objects.filter(user=user_hint, is_active=True, institution__is_active=True, role=Membership.Role.PLATFORM_ADMIN).select_related("institution").order_by("created_at").first()
     policy = policy_for(membership.institution.tenant_id) if membership else policy_for(None)
     recent_failures = LoginAttempt.objects.filter(
         identifier_hash=identifier_hash(email),
@@ -216,10 +229,13 @@ def sign_in(request, payload: LoginIn):
         )
         raise HttpError(401, "Invalid email or password")
     membership = membership_for_user(user, resolved_tenant_id)
+    if not resolved_tenant_id and getattr(request, "is_platform_host", False):
+        membership = Membership.objects.filter(user=user, is_active=True, institution__is_active=True, role=Membership.Role.PLATFORM_ADMIN).select_related("institution").order_by("created_at").first()
     if not membership:
-        message = "Your account does not belong to this university" if resolved_tenant_id else "No active ADMIEZO membership"
+        message = "Your account does not belong to this university" if resolved_tenant_id else "University accounts must sign in on their university subdomain"
         raise HttpError(403, message)
-    risk_score, reasons, _device, hashed_device = assess_login_risk(request, user, payload.device_id, resolved_tenant_id)
+    login_tenant_id = resolved_tenant_id or (membership.institution.tenant_id if getattr(request, "is_platform_host", False) else None)
+    risk_score, reasons, _device, hashed_device = assess_login_risk(request, user, payload.device_id, login_tenant_id)
     methods = AuthenticationMethod.objects.filter(user=user, is_active=True)
     has_totp = methods.filter(kind=AuthenticationMethod.Kind.TOTP).exists()
     has_passkey = PasskeyCredential.objects.filter(user=user, revoked_at__isnull=True).exists()
@@ -245,7 +261,7 @@ def sign_in(request, payload: LoginIn):
         "location": payload.location,
         "risk_score": risk_score,
         "risk_reasons": reasons,
-        "tenant_id": str(resolved_tenant_id) if resolved_tenant_id else None,
+        "tenant_id": str(login_tenant_id) if login_tenant_id else None,
     }
     if requires_challenge:
         if not has_totp and not policy.require_mfa and not has_passkey:
@@ -350,9 +366,14 @@ def passkey_login_options(request, payload: PasskeyLoginBeginIn):
     if resolved_tenant_id and not membership_for_user(user, resolved_tenant_id):
         raise HttpError(403, "Your account does not belong to this university")
     membership = membership_for_user(user, resolved_tenant_id)
+    if not resolved_tenant_id and getattr(request, "is_platform_host", False):
+        membership = Membership.objects.filter(user=user, is_active=True, institution__is_active=True, role=Membership.Role.PLATFORM_ADMIN).select_related("institution").order_by("created_at").first()
+        if not membership:
+            raise HttpError(403, "University accounts must sign in on their university subdomain")
     if membership and policy_for(membership.institution.tenant_id).require_mfa:
         raise HttpError(403, "This university requires password and authenticator app sign-in")
-    risk_score, reasons, _device, hashed_device = assess_login_risk(request, user, payload.device_id, resolved_tenant_id)
+    login_tenant_id = resolved_tenant_id or (membership.institution.tenant_id if membership and getattr(request, "is_platform_host", False) else None)
+    risk_score, reasons, _device, hashed_device = assess_login_risk(request, user, payload.device_id, login_tenant_id)
     context = {
         "device_hash": hashed_device,
         "device_label": payload.device_label,
@@ -360,7 +381,7 @@ def passkey_login_options(request, payload: PasskeyLoginBeginIn):
         "browser": payload.browser,
         "risk_score": risk_score,
         "risk_reasons": reasons,
-        "tenant_id": str(resolved_tenant_id) if resolved_tenant_id else None,
+        "tenant_id": str(login_tenant_id) if login_tenant_id else None,
     }
     return begin_passkey_login(request, user, context)
 
@@ -378,10 +399,14 @@ def passkey_login_verify(request, payload: PasskeyLoginCompleteIn):
 @router.get("/me")
 def me(request):
     membership = membership_for(request)
+    if getattr(request, "is_platform_host", False) and membership.role != Membership.Role.PLATFORM_ADMIN:
+        raise HttpError(403, "University accounts must sign in on their university subdomain")
     session = active_session_for_request(request)
     if not session:
         raise HttpError(401, "Session is unavailable")
-    return _user_context(request.auth, membership, session)
+    context = _user_context(request.auth, membership, session)
+    context["platform_host"] = bool(getattr(request, "is_platform_host", False))
+    return context
 
 
 @router.post("/password/complete-setup")

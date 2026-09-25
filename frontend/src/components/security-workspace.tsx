@@ -29,7 +29,7 @@ type Tab = "personal" | "policy" | "access" | "alerts" | "infrastructure";
 type Modal = "step-up" | "totp" | "request" | "emergency" | "oidc" | "member" | "create-member" | "reset-authenticator" | null;
 
 const titleCase = (value: string) => value === "personal" ? "My sign-in" : value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-const moduleLabel: Record<string, string> = { receiving: "Script receiving", custody: "Chain of custody", digitization: "Digitization", ai_evaluation: "AI evaluation", operations: "Live operations" };
+const moduleLabel: Record<string, string> = { receiving: "Bundle preparation", custody: "Chain of custody", digitization: "Digitization", ai_evaluation: "AI evaluation", operations: "Live operations" };
 const formatDate = (value: string | null) => value ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
 const fixedRoleModules: Record<string, string[]> = {
   evaluator: ["evaluation"],
