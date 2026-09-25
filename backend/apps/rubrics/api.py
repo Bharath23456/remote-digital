@@ -67,16 +67,20 @@ def _scheme(tenant_id, scheme_id):
     return item
 
 
+def _question_label(question):
+    return f"{question.number}({question.sub_question})" if question.sub_question else question.number
+
+
 @router.get("/catalog")
 def catalog(request):
     membership = membership_for(request)
     tenant_id = membership.institution.tenant_id
     schemes = MarkingScheme.objects.filter(tenant_id=tenant_id).select_related("paper").order_by("paper__code", "-version")
     return {
-        "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "questions": [{"id": str(question.id), "number": question.number, "max_marks": float(question.max_marks)} for question in item.questions.all()]} for item in Paper.objects.filter(tenant_id=tenant_id).prefetch_related("questions").order_by("code")],
+        "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "questions": [{"id": str(question.id), "number": question.number, "sub_question": question.sub_question, "label": _question_label(question), "max_marks": float(question.max_marks)} for question in item.questions.all()]} for item in Paper.objects.filter(tenant_id=tenant_id).prefetch_related("questions").order_by("code")],
         "schemes": [{"id": str(item.id), "paper_id": str(item.paper_id), "paper": item.paper.code, "title": item.title, "version": item.version, "status": item.status, "guidelines": item.evaluation_guidelines, "instructions": item.examiner_instructions, "content_digest": item.content_digest} for item in schemes],
-        "criteria": [{"id": str(item.id), "scheme_id": str(item.scheme_id), "question_id": str(item.question_id), "question": item.question.number, "code": item.code, "description": item.description, "max_marks": float(item.max_marks), "step_marks": item.step_marks, "tolerance": float(item.tolerance), "mandatory": item.is_mandatory} for item in RubricCriterion.objects.filter(tenant_id=tenant_id).select_related("question")],
-        "clarifications": [{"id": str(item.id), "scheme_id": str(item.scheme_id), "question": item.question.number if item.question else None, "scope": item.scope, "title": item.title, "body": item.body, "version": item.version, "mandatory": item.mandatory_acknowledgement} for item in SchemeClarification.objects.filter(tenant_id=tenant_id).select_related("question")],
+        "criteria": [{"id": str(item.id), "scheme_id": str(item.scheme_id), "question_id": str(item.question_id), "question": _question_label(item.question), "code": item.code, "description": item.description, "max_marks": float(item.max_marks), "step_marks": item.step_marks, "tolerance": float(item.tolerance), "mandatory": item.is_mandatory} for item in RubricCriterion.objects.filter(tenant_id=tenant_id).select_related("question")],
+        "clarifications": [{"id": str(item.id), "scheme_id": str(item.scheme_id), "question": _question_label(item.question) if item.question else None, "scope": item.scope, "title": item.title, "body": item.body, "version": item.version, "mandatory": item.mandatory_acknowledgement} for item in SchemeClarification.objects.filter(tenant_id=tenant_id).select_related("question")],
     }
 
 
@@ -104,6 +108,20 @@ def create_criterion(request, scheme_id: str, payload: CriterionIn):
         raise HttpError(404, "Question not found")
     item = add_criterion(tenant_id=tenant_id, actor_id=request.auth.id, scheme=scheme, question=question, values=payload.dict(exclude={"question_id"}))
     return {"id": str(item.id)}
+
+
+@router.delete("/schemes/{scheme_id}/criteria/{criterion_id}")
+def delete_criterion(request, scheme_id: str, criterion_id: str):
+    membership = require_roles(request, *ADMIN_ROLES)
+    tenant_id = membership.institution.tenant_id
+    scheme = _scheme(tenant_id, scheme_id)
+    if scheme.status != MarkingScheme.Status.DRAFT:
+        raise HttpError(409, "Rubric criteria can only change while the scheme is in draft")
+    item = RubricCriterion.objects.filter(id=criterion_id, scheme=scheme, tenant_id=tenant_id).first()
+    if not item:
+        raise HttpError(404, "Rubric criterion not found")
+    item.delete()
+    return {"deleted": True}
 
 
 @router.post("/schemes/{scheme_id}/transition")

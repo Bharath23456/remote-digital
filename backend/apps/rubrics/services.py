@@ -18,6 +18,10 @@ SCHEME_TRANSITIONS = {
 }
 
 
+def question_label(question):
+    return f"{question.number}({question.sub_question})" if question.sub_question else question.number
+
+
 def scheme_snapshot(scheme):
     return {
         "paper": str(scheme.paper_id),
@@ -93,7 +97,7 @@ def transition_scheme(*, tenant_id, actor_id, scheme_id, target, reason):
             for question in scheme.paper.questions.all():
                 allocated = sum(item.max_marks for item in scheme.criteria.filter(question=question))
                 if allocated != question.max_marks:
-                    raise HttpError(422, f"Rubric criteria for question {question.number} must total {question.max_marks}")
+                    raise HttpError(422, f"Rubric criteria for question {question_label(question)} must total {question.max_marks}")
         if target == MarkingScheme.Status.APPROVED and scheme.created_by_id == actor_id:
             raise HttpError(409, "Scheme creator cannot approve the same version")
         previous = scheme.status

@@ -30,7 +30,7 @@ export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}
     }
     headers.set("X-CSRFToken", tokenBody.csrf_token);
     const normalized = new URL(url, window.location.origin).pathname;
-    if ((normalized.endsWith("/submit") || normalized.endsWith("/finalize")) && !headers.has("Idempotency-Key")) {
+    if ((normalized.endsWith("/submit") || normalized.endsWith("/finalize") || normalized.endsWith("/lock")) && !headers.has("Idempotency-Key")) {
       headers.set("Idempotency-Key", crypto.randomUUID());
     }
   }
