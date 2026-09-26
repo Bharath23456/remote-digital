@@ -415,6 +415,8 @@ def update_institution(*, tenant_id, actor_id, institution_id, version, changes)
         raise TenancyError("Institution was not found")
     if institution.version != version:
         raise TenancyConflict("Institution was changed by another user")
+    if institution.parent_id is None and changes.get("is_active") is False:
+        raise TenancyError("Tenant root institution cannot be disabled")
     for field in ("name", "policy", "is_active"):
         if field in changes and changes[field] is not None:
             setattr(institution, field, changes[field])

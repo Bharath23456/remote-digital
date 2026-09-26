@@ -2042,102 +2042,102 @@ export function EvaluationWorkspace({
               onPointerUp={endDocumentPan}
               onPointerCancel={endDocumentPan}
             >
-            <div
-              className="document-stage-content"
-              style={{ width: fit === "custom" ? `${zoom}%` : "100%" }}
-            >
-            {viewerLoading ? (
-              <div className="viewer-empty">
-                <RefreshCw className="spin" />
-                Loading protected pages
-              </div>
-            ) : !manifest.pages.length ? (
-              <div className="viewer-empty">
-                <Eye />
-                <strong>No evaluation copy is available</strong>
-                <span>
-                  Complete anonymization and repository verification first.
-                </span>
-              </div>
-            ) : multiPage ? (
-              manifest.pages.map((item) => (
-                <img
-                  className={enhance ? "enhanced" : ""}
-                  key={item.page_number}
-                  src={item.url}
-                  alt={`Anonymous script page ${item.page_number}`}
-                  loading={item.page_number <= 2 ? "eager" : "lazy"}
-                  style={{
-                    width: "100%",
-                    transform: `rotate(${rotation}deg)`,
-                  }}
-                />
-              ))
-            ) : page ? (
               <div
-                className={`script-page-wrap fit-${fit} ${annotationTool ? "annotating" : ""} ${highlightQuestion ? "question-jump" : ""}`}
-                ref={pageRef}
-                style={{
-                  width: fit === "custom" ? "100%" : undefined,
-                  transform: `rotate(${rotation}deg)`,
-                }}
-                onClick={addAnnotation}
-                onPointerDown={startAnnotationDrag}
-                onPointerMove={(event) => {
-                  updateAnnotationDrag(event);
-                  updateAnnotationResize(event);
-                }}
-                onPointerUp={(event) => {
-                  void finishAnnotationDrag(event);
-                  void finishAnnotationResize(event);
-                }}
-                onPointerCancel={(event) => {
-                  setAnnotationDrag(null);
-                  void finishAnnotationResize(event);
-                }}
+                className="document-stage-content"
+                style={{ width: fit === "custom" ? `${zoom}%` : "100%" }}
               >
-                <img
-                  className={enhance ? "enhanced" : ""}
-                  src={page.url}
-                  alt={`Anonymous script page ${page.page_number}`}
-                  draggable={false}
-                />
-                {pageAnnotations.map((item) => (
-                  <AnnotationLayer
-                    item={item}
-                    selected={item.id === selectedAnnotation}
-                    onSelect={setSelectedAnnotation}
-                    geometryOverride={
-                      annotationResize?.id === item.id
-                        ? annotationResize.current
-                        : undefined
-                    }
-                    onResizeStart={startAnnotationResize}
-                    key={item.id}
-                  />
-                ))}
-                {annotationDrag && (
-                  <span
-                    className={`annotation-shape ${annotationDrag.kind} preview`}
-                    style={geometryStyle(
-                      geometryFromDrag(
-                        annotationDrag.kind,
-                        annotationDrag.startX,
-                        annotationDrag.startY,
-                        annotationDrag.currentX,
-                        annotationDrag.currentY,
-                      ),
+                {viewerLoading ? (
+                  <div className="viewer-empty">
+                    <RefreshCw className="spin" />
+                    Loading protected pages
+                  </div>
+                ) : !manifest.pages.length ? (
+                  <div className="viewer-empty">
+                    <Eye />
+                    <strong>No evaluation copy is available</strong>
+                    <span>
+                      Complete anonymization and repository verification first.
+                    </span>
+                  </div>
+                ) : multiPage ? (
+                  manifest.pages.map((item) => (
+                    <img
+                      className={enhance ? "enhanced" : ""}
+                      key={item.page_number}
+                      src={item.url}
+                      alt={`Anonymous script page ${item.page_number}`}
+                      loading={item.page_number <= 2 ? "eager" : "lazy"}
+                      style={{
+                        width: "100%",
+                        transform: `rotate(${rotation}deg)`,
+                      }}
+                    />
+                  ))
+                ) : page ? (
+                  <div
+                    className={`script-page-wrap fit-${fit} ${annotationTool ? "annotating" : ""} ${highlightQuestion ? "question-jump" : ""}`}
+                    ref={pageRef}
+                    style={{
+                      width: fit === "custom" ? "100%" : undefined,
+                      transform: `rotate(${rotation}deg)`,
+                    }}
+                    onClick={addAnnotation}
+                    onPointerDown={startAnnotationDrag}
+                    onPointerMove={(event) => {
+                      updateAnnotationDrag(event);
+                      updateAnnotationResize(event);
+                    }}
+                    onPointerUp={(event) => {
+                      void finishAnnotationDrag(event);
+                      void finishAnnotationResize(event);
+                    }}
+                    onPointerCancel={(event) => {
+                      setAnnotationDrag(null);
+                      void finishAnnotationResize(event);
+                    }}
+                  >
+                    <img
+                      className={enhance ? "enhanced" : ""}
+                      src={page.url}
+                      alt={`Anonymous script page ${page.page_number}`}
+                      draggable={false}
+                    />
+                    {pageAnnotations.map((item) => (
+                      <AnnotationLayer
+                        item={item}
+                        selected={item.id === selectedAnnotation}
+                        onSelect={setSelectedAnnotation}
+                        geometryOverride={
+                          annotationResize?.id === item.id
+                            ? annotationResize.current
+                            : undefined
+                        }
+                        onResizeStart={startAnnotationResize}
+                        key={item.id}
+                      />
+                    ))}
+                    {annotationDrag && (
+                      <span
+                        className={`annotation-shape ${annotationDrag.kind} preview`}
+                        style={geometryStyle(
+                          geometryFromDrag(
+                            annotationDrag.kind,
+                            annotationDrag.startX,
+                            annotationDrag.startY,
+                            annotationDrag.currentX,
+                            annotationDrag.currentY,
+                          ),
+                        )}
+                      />
                     )}
-                  />
+                  </div>
+                ) : (
+                  <div className="viewer-empty">
+                    Page {currentPage} is unavailable.
+                  </div>
                 )}
               </div>
-            ) : (
-              <div className="viewer-empty">
-                Page {currentPage} is unavailable.
-              </div>
-            )}
-            </div>
-          </main>
+            </main>
           </section>
           {marking && (
             <MarkingPanel
@@ -2206,8 +2206,10 @@ export function EvaluationWorkspace({
               marking.questions
                 .filter((item) => item.required)
                 .some((item) => !marking.marks.some((mark) => mark.question_id === item.id)) ||
-              (security.policy?.camera_required &&
-                security.monitoringStatus.camera !== "ok")
+              Boolean(
+                security.policy?.camera_required &&
+                  security.monitoringStatus.camera !== "ok",
+              )
             }
           >
             <SquareCheckBig />
