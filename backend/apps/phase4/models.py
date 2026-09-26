@@ -343,6 +343,59 @@ class SecureEvaluationSession(TenantModel):
     version = models.PositiveIntegerField(default=1)
 
 
+class RemoteSupportSession(TenantModel):
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Requested"
+        ACTIVE = "active", "Active"
+        REJECTED = "rejected", "Rejected"
+        ENDED = "ended", "Ended"
+        REVOKED = "revoked", "Revoked"
+        EXPIRED = "expired", "Expired"
+
+    assignment = models.ForeignKey(Assignment, on_delete=models.PROTECT, related_name="remote_support_sessions")
+    evaluator = models.ForeignKey(Evaluator, on_delete=models.PROTECT, related_name="remote_support_sessions")
+    secure_session = models.ForeignKey(SecureEvaluationSession, null=True, blank=True, on_delete=models.SET_NULL, related_name="remote_support_sessions")
+    notification = models.OneToOneField("NotificationDelivery", null=True, blank=True, on_delete=models.SET_NULL, related_name="remote_support_session")
+    requested_by_id = models.PositiveBigIntegerField()
+    reason = models.TextField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.REQUESTED)
+    responded_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    ended_at = models.DateTimeField(null=True, blank=True)
+    version = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["tenant_id", "evaluator", "status"], name="phase4_support_evaluator_idx"),
+            models.Index(fields=["tenant_id", "assignment", "status"], name="phase4_support_assignment_idx"),
+        ]
+
+
+class RemoteSupportCommand(TenantModel):
+    class Kind(models.TextChoices):
+        PREVIOUS_PAGE = "previous_page", "Previous page"
+        NEXT_PAGE = "next_page", "Next page"
+        REFRESH_VIEWER = "refresh_viewer", "Refresh viewer"
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        APPLIED = "applied", "Applied"
+        FAILED = "failed", "Failed"
+
+    support_session = models.ForeignKey(RemoteSupportSession, on_delete=models.PROTECT, related_name="commands")
+    sequence = models.PositiveIntegerField()
+    kind = models.CharField(max_length=24, choices=Kind.choices)
+    payload = models.JSONField(default=dict, blank=True)
+    requested_by_id = models.PositiveBigIntegerField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
+    result = models.CharField(max_length=240, blank=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["support_session", "sequence"], name="unique_remote_support_command_sequence")]
+        ordering = ["sequence"]
+
+
 class ProctoringEvidence(TenantModel):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending upload"

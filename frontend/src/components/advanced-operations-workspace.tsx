@@ -3,8 +3,8 @@
 
 import {
   Activity, AlertTriangle, Banknote, Bell, Building2, CheckCircle2, ClipboardCheck,
-  CloudCog, FileCheck2, FileSearch, Fingerprint, Gauge, Languages, Link2,
-  LoaderCircle, Play, Plus, RefreshCw, RotateCcw, Send, ShieldCheck,
+  ChevronLeft, ChevronRight, CloudCog, FileCheck2, FileSearch, Fingerprint, Gauge, Languages, Link2,
+  LoaderCircle, MonitorUp, Play, Plus, RefreshCw, RotateCcw, Send, ShieldCheck, X,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { csrfFetch } from "@/lib/api";
@@ -13,11 +13,22 @@ import { ProctoringReviewPanel } from "@/components/proctoring-review-panel";
 
 type Row = Record<string, unknown> & { id: string; status?: string; version?: number };
 type Reference = { id: string; [key: string]: unknown };
+type RemoteSupportSession = Row & {
+  assignment_id: string;
+  script: string;
+  paper: string;
+  evaluator: string;
+  requested_by: string;
+  reason: string;
+  expires_at: string;
+  commands?: { id: string; kind: string; status: string; result: string }[];
+};
 type Catalog = Record<string, unknown> & {
   references?: { papers: Reference[]; evaluators: Reference[]; sessions: Reference[]; scripts: Reference[]; final_marks: Reference[]; valuation_results: Reference[]; users: Reference[] };
   monitoring?: Record<string, unknown>;
   productivity?: Record<string, unknown>;
   active_evaluations?: Row[];
+  remote_support_sessions?: RemoteSupportSession[];
 };
 export type AdvancedSection = "assessment" | "operations" | "services" | "platform";
 
@@ -76,6 +87,9 @@ export function AdvancedOperationsWorkspace({ section, initialTab, visibleTabs }
   const [error, setError] = useState("");
   const [online, setOnline] = useState(true);
   const [queued, setQueued] = useState(0);
+  const [supportTarget, setSupportTarget] = useState<Row | null>(null);
+  const [supportReason, setSupportReason] = useState("");
+  const [supportSessionId, setSupportSessionId] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true); setError("");
@@ -98,6 +112,11 @@ export function AdvancedOperationsWorkspace({ section, initialTab, visibleTabs }
     const saved = localStorage.getItem(advancedTabStorageKey(section));
     setTab(initialTab && tabs.includes(initialTab) ? initialTab : saved && tabs.includes(saved) ? saved : tabs[0]);
   }, [initialTab, section, tabs]);
+  useEffect(() => {
+    if (section !== "operations" || tab !== "monitoring") return;
+    const interval = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(interval);
+  }, [load, section, tab]);
 
   function selectTab(key: string) {
     setTab(key); setForm({}); setMessage(""); setError("");
@@ -120,6 +139,29 @@ export function AdvancedOperationsWorkspace({ section, initialTab, visibleTabs }
       return result;
     } catch (reason) { setError(reason instanceof Error ? reason.message : "The operation could not be completed"); return null; }
     finally { setBusy(false); }
+  }
+
+  async function submitSupportRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supportTarget) return;
+    const result = await request("/remote-support/requests", "POST", {
+      assignment_id: supportTarget.id,
+      reason: supportReason,
+    });
+    if (result) {
+      setSupportSessionId(String(result.id || ""));
+      setSupportTarget(null);
+      setSupportReason("");
+    }
+  }
+
+  async function sendSupportCommand(session: RemoteSupportSession, kind: "previous_page" | "next_page" | "refresh_viewer") {
+    await request(`/remote-support/${session.id}/commands`, "POST", { kind });
+  }
+
+  async function endSupport(session: RemoteSupportSession) {
+    const result = await request(`/remote-support/${session.id}/end`);
+    if (result) setSupportSessionId("");
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -228,6 +270,8 @@ export function AdvancedOperationsWorkspace({ section, initialTab, visibleTabs }
     : tab === "integrations" ? { title: "Integration endpoints", rows: (catalog.integrations as Row[]) || [], columns: ["name", "kind", "base_url", "authentication", "status"] }
     : tab === "recovery" ? { title: "Recovery plans", rows: (catalog.recovery_plans as Row[]) || [], columns: ["name", "regions", "rpo_minutes", "rto_minutes", "clean_environment", "status"] }
     : null;
+  const selectedSupport = (catalog.remote_support_sessions || []).find((item) => item.id === supportSessionId) || null;
+  const supportFor = (assignmentId: string) => (catalog.remote_support_sessions || []).find((item) => item.assignment_id === assignmentId);
 
   if (loading && !Object.keys(catalog).length) return <div className="advanced-loading"><LoaderCircle /> Loading operational controls</div>;
   return <div className="advanced-workspace">
@@ -236,9 +280,11 @@ export function AdvancedOperationsWorkspace({ section, initialTab, visibleTabs }
     {message && <div className="success-banner"><CheckCircle2 />{message}</div>}{error && <div className="form-error" role="alert">{error}</div>}
     {formFields() && <form className="panel advanced-command" onSubmit={submit}><header className="panel-header"><div><h3 className="panel-title">{tab === "student" ? "Manual staff request" : "New operation"}</h3><p className="panel-subtitle">{tab === "student" ? "Use only for an approved internal request. University portal requests appear in the register below." : "Validated by the module policy and written with audit evidence."}</p></div></header><div className="form-grid">{tab === "student" && <label className="field"><span>Release option</span><select value={form.release_mode || "masked"} onChange={(event) => setForm({ ...form, release_mode: event.target.value })}><option value="masked">Masked student copy</option><option value="unmasked_identity">Unmasked identity copy</option></select></label>}{tab === "revaluation" && <label className="field"><span>Request type</span><select value={form.request_type || "revaluation"} onChange={(event) => setForm({ ...form, request_type: event.target.value })}><option value="revaluation">Revaluation</option><option value="recounting">Recounting</option></select></label>}{tab === "revaluation" && form.request_type === "recounting" && <><label className="field full-field"><span>Missed question IDs</span><input value={form.question_ids || ""} onChange={(event) => setForm({ ...form, question_ids: event.target.value })} placeholder="Q1, Q2(a)" required /></label><label className="field full-field"><span>Recounting notes</span><textarea value={form.recounting_notes || ""} onChange={(event) => setForm({ ...form, recounting_notes: event.target.value })} required /></label></>}{formFields()}{tab === "notifications" && <DynamicFields fields={notificationFields} />}</div><footer className="modal-footer"><button className="primary-button" disabled={busy}>{busy ? <LoaderCircle /> : <Plus />}{tab === "student" ? "Create request" : "Run operation"}</button></footer></form>}
     {tab === "security" && <><div className="security-note"><Fingerprint /><div><strong>Security events are generated by the evaluator desk.</strong><span>Fullscreen, webcam continuity, display posture, media-device changes and browser visibility are monitored. Critical detections pause marking and enter human review.</span></div></div><ProctoringReviewPanel sessions={(catalog.secure_sessions as Row[]) || []} reviews={(catalog.proctoring_reviews as Row[]) || []} onReload={load}/></>}
-    {tab === "monitoring" && <section className="panel"><header className="panel-header"><div><h3 className="panel-title">Active evaluations</h3><p className="panel-subtitle">Accepted and in-progress scripts ordered by due time</p></div></header><div className="table-wrap"><table><thead><tr><th>Script</th><th>Paper</th><th>Evaluator</th><th>Status</th><th>Progress</th><th>Due</th></tr></thead><tbody>{(catalog.active_evaluations || []).length ? (catalog.active_evaluations || []).map((item) => <tr key={item.id}><td><strong>{display(item.script)}</strong></td><td>{display(item.paper)}</td><td>{display(item.evaluator)}</td><td><span className={`status-pill ${item.status}`}>{display(item.status)}</span></td><td>{display(item.progress_percent)}%</td><td>{display(item.due_at)}</td></tr>) : <tr><td colSpan={6}><div className="compact-empty">No evaluations are currently active.</div></td></tr>}</tbody></table></div></section>}
+    {tab === "monitoring" && <section className="panel"><header className="panel-header"><div><h3 className="panel-title">Active evaluations</h3><p className="panel-subtitle">Accepted and in-progress scripts ordered by due time</p></div></header><div className="table-wrap"><table><thead><tr><th>Script</th><th>Paper</th><th>Evaluator</th><th>Status</th><th>Progress</th><th>Due</th><th>Assistance</th></tr></thead><tbody>{(catalog.active_evaluations || []).length ? (catalog.active_evaluations || []).map((item) => { const support = supportFor(item.id); const open = support && ["requested", "active"].includes(String(support.status)); return <tr key={item.id}><td><strong>{display(item.script)}</strong></td><td>{display(item.paper)}</td><td>{display(item.evaluator)}</td><td><span className={`status-pill ${item.status}`}>{display(item.status)}</span></td><td>{display(item.progress_percent)}%</td><td>{display(item.due_at)}</td><td><div className="row-actions">{open ? <button onClick={() => setSupportSessionId(support.id)}><MonitorUp />{support.status === "active" ? "Control viewer" : "Awaiting approval"}</button> : <button onClick={() => setSupportTarget(item)}><MonitorUp />Request help</button>}</div></td></tr>; }) : <tr><td colSpan={7}><div className="compact-empty">No evaluations are currently active.</div></td></tr>}</tbody></table></div></section>}
     {tab === "continuity" && <div className="security-note"><RefreshCw /><div><strong>{online ? "Connection available" : "Continuity mode active"}</strong><span>Only non-sensitive navigation progress is queued locally. Marks, script images, identity data and authentication material are never stored in browser persistence.</span></div></div>}
     {tab !== "security" && <section className="panel"><header className="panel-header"><div><h3 className="panel-title">{meta.title} register</h3><p className="panel-subtitle">Tenant-scoped operational records</p></div></header><div className="table-wrap"><table><thead><tr>{meta.columns.map((column) => <th key={column}>{label(column)}</th>)}<th>Action</th></tr></thead><tbody>{rows.length ? rows.map((row) => { const action = nextAction(row); return <tr key={row.id}>{meta.columns.map((column) => <td key={column} title={typeof row[column] === "string" ? String(row[column]) : undefined}>{column === "status" ? <span className={`status-pill ${row[column]}`}>{display(row[column])}</span> : display(row[column])}</td>)}<td><div className="row-actions">{tab === "moderation" && <button disabled={busy} onClick={() => rowAction(row, "sample")}><Play />Sample</button>}{action && <button disabled={busy} onClick={() => rowAction(row, action.target)}><Send />{action.text}</button>}{tab === "student" && ["approved", "available"].includes(String(row.status)) && <button disabled={busy} onClick={() => rowAction(row, "revoke")}><Send />Revoke</button>}</div></td></tr>; }) : <tr><td colSpan={meta.columns.length + 1}><div className="compact-empty">No records yet. Use the operational control above when prerequisites are available.</div></td></tr>}</tbody></table></div></section>}
     {auxiliary && <section className="panel"><header className="panel-header"><div><h3 className="panel-title">{auxiliary.title}</h3><p className="panel-subtitle">Related lifecycle records and controls</p></div></header><div className="table-wrap"><table><thead><tr>{auxiliary.columns.map((column) => <th key={column}>{label(column)}</th>)}<th>Action</th></tr></thead><tbody>{auxiliary.rows.length ? auxiliary.rows.map((row) => { const action = auxiliaryNext(auxiliary.title, row); return <tr key={row.id}>{auxiliary.columns.map((column) => <td key={column}>{column === "status" ? <span className={`status-pill ${row[column]}`}>{display(row[column])}</span> : display(row[column])}</td>)}<td><div className="row-actions">{action && <button disabled={busy} onClick={() => auxiliaryAction(auxiliary.title, row, action[0])}><Send />{action[1]}</button>}</div></td></tr>; }) : <tr><td colSpan={auxiliary.columns.length + 1}><div className="compact-empty">No related records yet.</div></td></tr>}</tbody></table></div></section>}
+    {supportTarget && <div className="modal-backdrop"><form className="modal-panel compact" onSubmit={submitSupportRequest}><header className="modal-header"><div><h2>Request evaluator assistance</h2><p>The evaluator must approve before temporary viewer control becomes available.</p></div><button type="button" className="icon-button" title="Close" onClick={() => setSupportTarget(null)}><X /></button></header><div className="form-grid"><div className="remote-support-summary full-field"><MonitorUp /><div><strong>{display(supportTarget.evaluator)}</strong><span>{display(supportTarget.script)} · {display(supportTarget.paper)}</span></div></div><label className="field full-field"><span>Why is assistance needed?</span><textarea value={supportReason} minLength={10} onChange={(event) => setSupportReason(event.target.value)} placeholder="Describe the problem the evaluator asked you to help resolve" required /></label></div><footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setSupportTarget(null)}>Cancel</button><button className="primary-button" disabled={busy || supportReason.trim().length < 10}><MonitorUp />Send approval request</button></footer></form></div>}
+    {selectedSupport && <div className="modal-backdrop"><section className="modal-panel compact"><header className="modal-header"><div><h2>Remote evaluator assistance</h2><p>{selectedSupport.evaluator} · {selectedSupport.script} · {selectedSupport.paper}</p></div><button type="button" className="icon-button" title="Close" onClick={() => setSupportSessionId("")}><X /></button></header><div className="remote-support-control"><div className={`remote-support-control-status ${selectedSupport.status}`}><span className="remote-support-live-dot" /><div><strong>{selectedSupport.status === "active" ? "Evaluator approved viewer control" : selectedSupport.status === "requested" ? "Waiting for evaluator approval" : `Session ${display(selectedSupport.status)}`}</strong><span>{selectedSupport.reason}</span></div></div>{selectedSupport.status === "active" && <><p>Controls are limited to the script viewer. Marks and submission remain exclusively with the evaluator.</p><div className="remote-support-control-buttons"><button disabled={busy} onClick={() => void sendSupportCommand(selectedSupport, "previous_page")}><ChevronLeft />Previous page</button><button disabled={busy} onClick={() => void sendSupportCommand(selectedSupport, "next_page")}>Next page<ChevronRight /></button><button disabled={busy} onClick={() => void sendSupportCommand(selectedSupport, "refresh_viewer")}><RefreshCw />Refresh viewer</button></div></>}<div className="remote-support-command-log"><strong>Recent activity</strong>{selectedSupport.commands?.length ? selectedSupport.commands.slice(-5).reverse().map((command) => <div key={command.id}><span>{display(command.kind)}</span><span className={`status-pill ${command.status}`}>{display(command.status)}</span><small>{command.result || "Waiting for evaluator screen"}</small></div>) : <span>No control actions sent.</span>}</div></div><footer className="modal-footer"><button className="danger-button" disabled={busy || !["requested", "active"].includes(String(selectedSupport.status))} onClick={() => void endSupport(selectedSupport)}>End assistance</button></footer></section></div>}
   </div>;
 }

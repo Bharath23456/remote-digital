@@ -43,6 +43,8 @@ from .models import (
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
+    RemoteSupportCommand,
+    RemoteSupportSession,
     RemunerationRule,
     RemunerationStatement,
     ResultHandover,
@@ -60,6 +62,8 @@ from .services import (
     consume_authorization,
     create_issue,
     create_notification,
+    create_remote_support_command,
+    request_remote_support,
     create_proctoring_evidence,
     create_revaluation,
     create_student_request,
@@ -67,10 +71,14 @@ from .services import (
     declare_and_sign,
     decide_authorization,
     decide_proctoring_review,
+    decide_remote_support,
+    end_remote_support,
+    expire_remote_support_sessions,
     finish_secure_evaluation_session,
     heartbeat_secure_evaluation_session,
     monitoring_snapshot,
     notification_action,
+    acknowledge_remote_support_command,
     productivity_snapshot,
     publish_article,
     queue_handover,
@@ -189,6 +197,25 @@ class PostureIn(Schema):
 
 class SecureSessionFinishIn(Schema):
     completed: bool = False
+
+
+class RemoteSupportRequestIn(Schema):
+    assignment_id: str
+    reason: str
+
+
+class RemoteSupportDecisionIn(Schema):
+    version: int
+    approve: bool
+
+
+class RemoteSupportCommandIn(Schema):
+    kind: str
+
+
+class RemoteSupportCommandAckIn(Schema):
+    applied: bool
+    result: str = ""
 
 
 class EvidenceIntentIn(Schema):
@@ -458,6 +485,38 @@ def _secure_session_data(item):
     }
 
 
+def _remote_support_data(item, *, include_commands=False):
+    requester = User.objects.filter(id=item.requested_by_id).first()
+    data = {
+        "id": str(item.id),
+        "assignment_id": str(item.assignment_id),
+        "script": item.assignment.script.script_code,
+        "paper": item.assignment.script.paper.code,
+        "evaluator": item.evaluator.display_name,
+        "evaluator_id": str(item.evaluator_id),
+        "requested_by": requester.get_full_name() or requester.username if requester else "University administrator",
+        "reason": item.reason,
+        "status": item.status,
+        "expires_at": item.expires_at.isoformat(),
+        "responded_at": item.responded_at.isoformat() if item.responded_at else None,
+        "ended_at": item.ended_at.isoformat() if item.ended_at else None,
+        "version": item.version,
+    }
+    if include_commands:
+        data["commands"] = [
+            {
+                "id": str(command.id),
+                "sequence": command.sequence,
+                "kind": command.kind,
+                "status": command.status,
+                "result": command.result,
+                "created_at": command.created_at.isoformat(),
+            }
+            for command in item.commands.order_by("sequence")
+        ]
+    return data
+
+
 def _serialize(items, fields):
     result = []
     for item in items:
@@ -514,6 +573,13 @@ def catalog(request, section: str = ""):
         "authorizations": _serialize(ControlledAuthorization.objects.filter(tenant_id=tenant_id), ["kind", "final_mark_id", "purpose", "proposed_change", "expires_at", "status", "version"]),
         "presence_events": _serialize(PresenceSecurityEvent.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["assignment_id", "category", "severity", "action", "created_at"]),
         "secure_sessions": _serialize(SecureEvaluationSession.objects.filter(tenant_id=tenant_id).order_by("-started_at")[:100], ["assignment_id", "evaluator_id", "status", "pause_reason", "violation_count", "started_at", "last_heartbeat_at", "ended_at", "version"]),
+        "remote_support_sessions": [
+            _remote_support_data(item, include_commands=True)
+            for item in RemoteSupportSession.objects.filter(tenant_id=tenant_id)
+            .select_related("assignment__script__paper", "evaluator")
+            .prefetch_related("commands")
+            .order_by("-created_at")[:100]
+        ],
         "proctoring_reviews": [
             {
                 "id": str(item.id),
@@ -551,7 +617,7 @@ def catalog(request, section: str = ""):
     }
     section_fields = {
         "assessment": {"moderation_policies", "moderation_cases", "revaluations", "completions", "authorizations"},
-        "operations": {"monitoring", "productivity", "active_evaluations", "presence_events", "secure_sessions", "proctoring_reviews", "attendance", "workload_actions", "runtime_incidents", "issues", "knowledge", "notifications", "centres", "readiness", "camps"},
+        "operations": {"monitoring", "productivity", "active_evaluations", "presence_events", "secure_sessions", "remote_support_sessions", "proctoring_reviews", "attendance", "workload_actions", "runtime_incidents", "issues", "knowledge", "notifications", "centres", "readiness", "camps"},
         "services": {"remuneration_rules", "statements", "student_requests"},
         "platform": {"evidence_packages", "integrations", "university_api_keys", "handovers", "recovery_plans", "recovery_drills"},
     }
@@ -559,6 +625,122 @@ def catalog(request, section: str = ""):
         allowed = section_fields[section] | {"references"}
         return {key: value for key, value in result.items() if key in allowed}
     return result
+
+
+def _evaluator_for_remote_support(request, tenant_id):
+    evaluator = Evaluator.objects.filter(
+        tenant_id=tenant_id,
+        status=Evaluator.Status.ACTIVE,
+    ).filter(user_id=request.auth.id).first()
+    if not evaluator:
+        evaluator = Evaluator.objects.filter(
+            tenant_id=tenant_id,
+            status=Evaluator.Status.ACTIVE,
+            email__iexact=request.auth.email,
+        ).first()
+    if not evaluator:
+        raise HttpError(404, "Evaluator profile not found")
+    return evaluator
+
+
+@router.get("/remote-support/inbox")
+def remote_support_inbox(request):
+    membership = require_roles(request, Membership.Role.EVALUATOR)
+    tenant_id = membership.institution.tenant_id
+    evaluator = _evaluator_for_remote_support(request, tenant_id)
+    expire_remote_support_sessions(tenant_id=tenant_id)
+    item = RemoteSupportSession.objects.filter(
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+        status__in=[RemoteSupportSession.Status.REQUESTED, RemoteSupportSession.Status.ACTIVE],
+    ).select_related("assignment__script__paper", "evaluator").prefetch_related("commands").order_by("-created_at").first()
+    return {"session": _remote_support_data(item, include_commands=True) if item else None}
+
+
+@router.get("/remote-support/sessions")
+def remote_support_sessions(request):
+    tenant_id = _tenant(request, *ADMIN_ROLES)
+    expire_remote_support_sessions(tenant_id=tenant_id)
+    items = RemoteSupportSession.objects.filter(tenant_id=tenant_id).select_related(
+        "assignment__script__paper", "evaluator"
+    ).prefetch_related("commands").order_by("-created_at")[:100]
+    return {"items": [_remote_support_data(item, include_commands=True) for item in items]}
+
+
+@router.post("/remote-support/requests")
+def create_remote_support_request(request, payload: RemoteSupportRequestIn):
+    membership = require_roles(request, *ADMIN_ROLES)
+    item = request_remote_support(
+        tenant_id=membership.institution.tenant_id,
+        actor_id=request.auth.id,
+        actor_name=request.auth.get_full_name() or request.auth.username,
+        assignment_id=payload.assignment_id,
+        reason=payload.reason,
+    )
+    item = RemoteSupportSession.objects.select_related("assignment__script__paper", "evaluator").get(id=item.id)
+    return _remote_support_data(item, include_commands=True)
+
+
+@router.post("/remote-support/{support_id}/decision")
+def remote_support_decision(request, support_id: str, payload: RemoteSupportDecisionIn):
+    membership = require_roles(request, Membership.Role.EVALUATOR)
+    evaluator = _evaluator_for_remote_support(request, membership.institution.tenant_id)
+    item = decide_remote_support(
+        tenant_id=membership.institution.tenant_id,
+        actor_id=request.auth.id,
+        evaluator=evaluator,
+        support_id=support_id,
+        expected_version=payload.version,
+        approve=payload.approve,
+    )
+    item = RemoteSupportSession.objects.select_related("assignment__script__paper", "evaluator").get(id=item.id)
+    return _remote_support_data(item, include_commands=True)
+
+
+@router.post("/remote-support/{support_id}/commands")
+def remote_support_command(request, support_id: str, payload: RemoteSupportCommandIn):
+    tenant_id = _tenant(request, *ADMIN_ROLES)
+    command = create_remote_support_command(
+        tenant_id=tenant_id,
+        actor_id=request.auth.id,
+        support_id=support_id,
+        kind=payload.kind,
+    )
+    return {"id": str(command.id), "sequence": command.sequence, "kind": command.kind, "status": command.status}
+
+
+@router.post("/remote-support/commands/{command_id}/acknowledge")
+def remote_support_command_acknowledge(request, command_id: str, payload: RemoteSupportCommandAckIn):
+    membership = require_roles(request, Membership.Role.EVALUATOR)
+    evaluator = _evaluator_for_remote_support(request, membership.institution.tenant_id)
+    command = acknowledge_remote_support_command(
+        tenant_id=membership.institution.tenant_id,
+        actor_id=request.auth.id,
+        evaluator=evaluator,
+        command_id=command_id,
+        applied=payload.applied,
+        result=payload.result,
+    )
+    return {"id": str(command.id), "status": command.status, "result": command.result}
+
+
+@router.post("/remote-support/{support_id}/end")
+def remote_support_end(request, support_id: str):
+    membership = membership_for(request)
+    tenant_id = membership.institution.tenant_id
+    evaluator = None
+    if membership.role == Membership.Role.EVALUATOR:
+        evaluator = _evaluator_for_remote_support(request, tenant_id)
+    else:
+        require_roles(request, *ADMIN_ROLES)
+    item = end_remote_support(
+        tenant_id=tenant_id,
+        actor_id=request.auth.id,
+        support_id=support_id,
+        evaluator=evaluator,
+    )
+    item = RemoteSupportSession.objects.select_related("assignment__script__paper", "evaluator").get(id=item.id)
+    return _remote_support_data(item, include_commands=True)
 
 
 @router.put("/moderation/policies")

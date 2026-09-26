@@ -42,6 +42,8 @@ from .models import (
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
+    RemoteSupportCommand,
+    RemoteSupportSession,
     RemunerationStatement,
     ResultHandover,
     RevaluationRequest,
@@ -104,6 +106,11 @@ RUNTIME_TRANSITIONS = {
     RuntimeIncident.Status.RETRYING: {RuntimeIncident.Status.RECOVERED, RuntimeIncident.Status.DEGRADED, RuntimeIncident.Status.FAILED},
     RuntimeIncident.Status.DEGRADED: {RuntimeIncident.Status.RETRYING, RuntimeIncident.Status.RECOVERED, RuntimeIncident.Status.FAILED},
     RuntimeIncident.Status.FAILED: {RuntimeIncident.Status.RETRYING},
+}
+
+REMOTE_SUPPORT_OPEN_STATUSES = {
+    RemoteSupportSession.Status.REQUESTED,
+    RemoteSupportSession.Status.ACTIVE,
 }
 
 
@@ -1234,6 +1241,228 @@ def notification_action(*, tenant_id, actor_id, notification_id, expected_versio
     item.version += 1
     item.save()
     record_event(tenant_id=tenant_id, actor_id=actor_id, action=f"notifications.{item.status}", aggregate="NotificationDelivery", aggregate_id=item.id, payload={"attempt_count": item.attempt_count})
+    return item
+
+
+@transaction.atomic
+def expire_remote_support_sessions(*, tenant_id):
+    now = timezone.now()
+    expired = RemoteSupportSession.objects.filter(
+        tenant_id=tenant_id,
+        status__in=REMOTE_SUPPORT_OPEN_STATUSES,
+        expires_at__lte=now,
+    )
+    for item in expired.select_for_update():
+        item.status = RemoteSupportSession.Status.EXPIRED
+        item.ended_at = now
+        item.version += 1
+        item.save(update_fields=["status", "ended_at", "version", "updated_at"])
+        item.commands.filter(status=RemoteSupportCommand.Status.QUEUED).update(
+            status=RemoteSupportCommand.Status.FAILED,
+            result="Remote support access expired before the command was applied.",
+            applied_at=now,
+        )
+        record_event(
+            tenant_id=tenant_id,
+            actor_id="remote-support-expiry",
+            action="remote_support.expired",
+            aggregate="RemoteSupportSession",
+            aggregate_id=item.id,
+            payload={"assignment_id": str(item.assignment_id)},
+        )
+
+
+@transaction.atomic
+def request_remote_support(*, tenant_id, actor_id, actor_name, assignment_id, reason):
+    expire_remote_support_sessions(tenant_id=tenant_id)
+    assignment = Assignment.objects.select_for_update().select_related("evaluator", "script").filter(
+        id=assignment_id,
+        tenant_id=tenant_id,
+        status__in=[Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS],
+    ).first()
+    if not assignment:
+        raise HttpError(404, "An active evaluation assignment was not found")
+    if not assignment.evaluator.user_id:
+        raise HttpError(409, "The evaluator does not have a linked login account")
+    if len(reason.strip()) < 10:
+        raise HttpError(422, "Explain why remote assistance is required")
+    if RemoteSupportSession.objects.filter(
+        tenant_id=tenant_id,
+        assignment=assignment,
+        status__in=REMOTE_SUPPORT_OPEN_STATUSES,
+    ).exists():
+        raise HttpError(409, "A remote assistance request is already open for this evaluation")
+
+    now = timezone.now()
+    secure_session = SecureEvaluationSession.objects.filter(
+        tenant_id=tenant_id,
+        assignment=assignment,
+        evaluator=assignment.evaluator,
+        status__in=[SecureEvaluationSession.Status.ACTIVE, SecureEvaluationSession.Status.PAUSED],
+    ).order_by("-started_at").first()
+    item = RemoteSupportSession.objects.create(
+        tenant_id=tenant_id,
+        assignment=assignment,
+        evaluator=assignment.evaluator,
+        secure_session=secure_session,
+        requested_by_id=actor_id,
+        reason=reason.strip(),
+        expires_at=now + timedelta(minutes=5),
+    )
+    notification = create_notification(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        user_id=assignment.evaluator.user_id,
+        category="remote_support",
+        title="Remote assistance requested",
+        body=f"{actor_name} is requesting temporary viewer control: {item.reason}",
+        severity="high",
+        channels=["in_app"],
+        mandatory_acknowledgement=True,
+    )
+    item.notification = notification
+    item.save(update_fields=["notification", "updated_at"])
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="remote_support.requested",
+        aggregate="RemoteSupportSession",
+        aggregate_id=item.id,
+        payload={
+            "assignment_id": str(assignment.id),
+            "evaluator_id": str(assignment.evaluator_id),
+            "reason": item.reason,
+            "expires_at": item.expires_at.isoformat(),
+        },
+    )
+    return item
+
+
+@transaction.atomic
+def decide_remote_support(*, tenant_id, actor_id, evaluator, support_id, expected_version, approve):
+    expire_remote_support_sessions(tenant_id=tenant_id)
+    item = RemoteSupportSession.objects.select_for_update().filter(
+        id=support_id,
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+    ).first()
+    if not item:
+        raise HttpError(404, "Remote assistance request not found")
+    if item.version != expected_version or item.status != RemoteSupportSession.Status.REQUESTED:
+        raise HttpError(409, "The remote assistance request is stale or no longer awaiting approval")
+
+    now = timezone.now()
+    item.status = RemoteSupportSession.Status.ACTIVE if approve else RemoteSupportSession.Status.REJECTED
+    item.responded_at = now
+    item.expires_at = now + timedelta(minutes=10) if approve else now
+    item.ended_at = None if approve else now
+    item.version += 1
+    item.save()
+    if item.notification_id:
+        notification = NotificationDelivery.objects.select_for_update().filter(id=item.notification_id).first()
+        if notification and notification.status != NotificationDelivery.Status.ACKNOWLEDGED:
+            notification.status = NotificationDelivery.Status.ACKNOWLEDGED
+            notification.acknowledged_at = now
+            notification.version += 1
+            notification.save()
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action=f"remote_support.{'approved' if approve else 'rejected'}",
+        aggregate="RemoteSupportSession",
+        aggregate_id=item.id,
+        payload={"assignment_id": str(item.assignment_id), "expires_at": item.expires_at.isoformat()},
+    )
+    return item
+
+
+@transaction.atomic
+def create_remote_support_command(*, tenant_id, actor_id, support_id, kind):
+    expire_remote_support_sessions(tenant_id=tenant_id)
+    item = RemoteSupportSession.objects.select_for_update().filter(
+        id=support_id,
+        tenant_id=tenant_id,
+        status=RemoteSupportSession.Status.ACTIVE,
+        expires_at__gt=timezone.now(),
+    ).first()
+    if not item:
+        raise HttpError(409, "Remote assistance is not active")
+    if kind not in RemoteSupportCommand.Kind.values:
+        raise HttpError(422, "Unsupported remote assistance command")
+    sequence = (item.commands.aggregate(Max("sequence"))["sequence__max"] or 0) + 1
+    command = RemoteSupportCommand.objects.create(
+        tenant_id=tenant_id,
+        support_session=item,
+        sequence=sequence,
+        kind=kind,
+        requested_by_id=actor_id,
+    )
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="remote_support.command.queued",
+        aggregate="RemoteSupportCommand",
+        aggregate_id=command.id,
+        payload={"support_session_id": str(item.id), "assignment_id": str(item.assignment_id), "kind": kind, "sequence": sequence},
+    )
+    return command
+
+
+@transaction.atomic
+def acknowledge_remote_support_command(*, tenant_id, actor_id, evaluator, command_id, applied, result):
+    command = RemoteSupportCommand.objects.select_for_update().select_related("support_session").filter(
+        id=command_id,
+        tenant_id=tenant_id,
+        support_session__evaluator=evaluator,
+        status=RemoteSupportCommand.Status.QUEUED,
+    ).first()
+    if not command:
+        raise HttpError(409, "Remote assistance command is missing or already handled")
+    command.status = RemoteSupportCommand.Status.APPLIED if applied else RemoteSupportCommand.Status.FAILED
+    command.result = result.strip()[:240]
+    command.applied_at = timezone.now()
+    command.save()
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action=f"remote_support.command.{command.status}",
+        aggregate="RemoteSupportCommand",
+        aggregate_id=command.id,
+        payload={"support_session_id": str(command.support_session_id), "kind": command.kind, "result": command.result},
+    )
+    return command
+
+
+@transaction.atomic
+def end_remote_support(*, tenant_id, actor_id, support_id, evaluator=None):
+    expire_remote_support_sessions(tenant_id=tenant_id)
+    query = RemoteSupportSession.objects.select_for_update().filter(id=support_id, tenant_id=tenant_id)
+    if evaluator is not None:
+        query = query.filter(evaluator=evaluator)
+    item = query.first()
+    if not item:
+        raise HttpError(404, "Remote assistance session not found")
+    if item.status not in REMOTE_SUPPORT_OPEN_STATUSES:
+        raise HttpError(409, "Remote assistance has already ended")
+    now = timezone.now()
+    item.status = RemoteSupportSession.Status.REVOKED if evaluator is not None else RemoteSupportSession.Status.ENDED
+    item.ended_at = now
+    item.expires_at = now
+    item.version += 1
+    item.save()
+    item.commands.filter(status=RemoteSupportCommand.Status.QUEUED).update(
+        status=RemoteSupportCommand.Status.FAILED,
+        result="Remote support access ended before the command was applied.",
+        applied_at=now,
+    )
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action=f"remote_support.{item.status}",
+        aggregate="RemoteSupportSession",
+        aggregate_id=item.id,
+        payload={"assignment_id": str(item.assignment_id)},
+    )
     return item
 
 
