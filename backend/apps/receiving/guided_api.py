@@ -20,11 +20,11 @@ from apps.core.authz import require_roles
 from apps.core.services import record_event
 from apps.custody.models import Script
 from apps.custody.services import register_script
-from apps.tenancy.models import Membership
+from apps.tenancy.models import Institution, Membership
 
-from .models import Dispatch, Packet
+from .models import Dispatch, Packet, PreparedPacket
 from .omr import RecognitionError, read_cover_qr_if_present, recognize_cover
-from .schemas import GuidedBundleIn, GuidedPacketScanIn, GuidedScanIn
+from .schemas import GuidedBundleIn, GuidedPacketScanIn, GuidedPreparedBundleIn, GuidedPreparedPacketIn, GuidedScanIn
 
 
 router = Router(tags=["Guided script intake"])
@@ -67,7 +67,23 @@ def _packet_row(packet):
 
 def _bundle_row(bundle):
     packets = [_packet_row(packet) for packet in bundle.packets.all()]
-    return {"id": str(bundle.id), "barcode": bundle.reference, "source_centre": bundle.source_centre, "mode": bundle.intake_mode, "status": bundle.status, "expected_packets": bundle.expected_packets, "received_packets": sum(item["status"] != "registered" for item in packets), "expected_scripts": bundle.expected_scripts, "scanned_scripts": sum(item["scanned_scripts"] for item in packets), "packets": packets}
+    return {"id": str(bundle.id), "barcode": bundle.reference, "source_centre": bundle.source_centre, "source_college_id": str(bundle.source_institution_id) if bundle.source_institution_id else None, "mode": bundle.intake_mode, "status": bundle.status, "expected_packets": bundle.expected_packets, "received_packets": sum(item["status"] != "registered" for item in packets), "expected_scripts": bundle.expected_scripts, "scanned_scripts": sum(item["scanned_scripts"] for item in packets), "packets": packets}
+
+
+def _prepared_packet_row(packet):
+    return {
+        "id": str(packet.id),
+        "barcode": packet.barcode,
+        "paper_id": str(packet.paper_id),
+        "subject": packet.paper.code,
+        "paper_title": packet.paper.title,
+        "source_college_id": str(packet.source_college_id),
+        "source_college": packet.source_college.name,
+        "expected_scripts": len(packet.script_manifest),
+        "status": packet.status,
+        "version": packet.version,
+        "created_at": packet.created_at.isoformat(),
+    }
 
 
 @router.get("/catalog")
@@ -76,6 +92,152 @@ def catalog(request):
     tenant_id = require_roles(request, *READERS).institution.tenant_id
     bundles = Dispatch.objects.filter(tenant_id=tenant_id).exclude(intake_mode=Dispatch.IntakeMode.LEGACY).prefetch_related("packets__paper", "packets__scripts").order_by("-created_at")[:100]
     return {"enabled": True, "bundles": [_bundle_row(bundle) for bundle in bundles]}
+
+
+@router.get("/preparation")
+def preparation_catalog(request):
+    _enabled()
+    tenant_id = require_roles(request, *PREPARERS).institution.tenant_id
+    packets = PreparedPacket.objects.filter(tenant_id=tenant_id).select_related("paper", "source_college").order_by("-created_at")[:200]
+    return {
+        "papers": list(Paper.objects.filter(tenant_id=tenant_id).order_by("code").values("id", "code", "title")),
+        "colleges": list(
+            Institution.objects.filter(
+                tenant_id=tenant_id,
+                kind=Institution.Kind.COLLEGE,
+                is_active=True,
+            ).order_by("name").values("id", "code", "name")
+        ),
+        "packets": [_prepared_packet_row(packet) for packet in packets],
+    }
+
+
+@router.post("/prepared-packets")
+def prepare_packet(request, payload: GuidedPreparedPacketIn):
+    _enabled()
+    membership = require_roles(request, *PREPARERS)
+    tenant_id = membership.institution.tenant_id
+    packet_code = _code(payload.barcode)
+    script_codes = [_code(code) for code in payload.script_barcodes]
+    if not 1 <= len(script_codes) <= 500:
+        raise HttpError(422, "A packet needs 1-500 booklet QR codes")
+    if len(set(script_codes)) != len(script_codes):
+        raise HttpError(422, "Each booklet QR can appear only once in a packet")
+    paper = Paper.objects.filter(tenant_id=tenant_id, id=payload.paper_id).first()
+    if not paper:
+        raise HttpError(422, "Select a valid subject for the packet")
+    college = Institution.objects.filter(
+        tenant_id=tenant_id,
+        id=payload.source_college_id,
+        kind=Institution.Kind.COLLEGE,
+        is_active=True,
+    ).first()
+    if not college:
+        raise HttpError(422, "Select a college configured by the university administrator")
+    if Packet.objects.filter(barcode=packet_code).exists() or PreparedPacket.objects.filter(barcode=packet_code).exists():
+        raise HttpError(409, "Packet barcode is already registered")
+    if Script.objects.filter(primary_barcode__in=script_codes).exists():
+        raise HttpError(409, "A booklet QR is already registered")
+    existing_manifests = PreparedPacket.objects.filter(tenant_id=tenant_id, status=PreparedPacket.Status.READY).values_list("script_manifest", flat=True)
+    registered_manifests = Packet.objects.filter(tenant_id=tenant_id).values_list("script_manifest", flat=True)
+    registered_codes = {code for manifest in list(existing_manifests) + list(registered_manifests) for code in manifest}
+    if registered_codes.intersection(script_codes):
+        raise HttpError(409, "A booklet QR already belongs to another packet")
+    try:
+        with transaction.atomic():
+            prepared = PreparedPacket.objects.create(
+                tenant_id=tenant_id,
+                barcode=packet_code,
+                paper=paper,
+                source_college=college,
+                script_manifest=script_codes,
+                prepared_by=request.auth,
+            )
+            record_event(
+                tenant_id=tenant_id,
+                actor_id=request.auth.id,
+                action="receiving.guided.packet_prepared",
+                aggregate="PreparedPacket",
+                aggregate_id=prepared.id,
+                payload={"college_id": str(college.id), "paper_id": str(paper.id), "scripts": len(script_codes)},
+            )
+    except IntegrityError as exc:
+        raise HttpError(409, "Packet barcode was registered concurrently") from exc
+    return _prepared_packet_row(prepared)
+
+
+@router.post("/bundles/from-packets")
+def create_bundle_from_packets(request, payload: GuidedPreparedBundleIn):
+    _enabled()
+    membership = require_roles(request, *PREPARERS)
+    tenant_id = membership.institution.tenant_id
+    if payload.mode not in (Dispatch.IntakeMode.TRANSFER, Dispatch.IntakeMode.ON_SITE):
+        raise HttpError(422, "Choose dispatch to university or on-site scanning")
+    if not 1 <= len(payload.packet_ids) <= 100 or len(set(payload.packet_ids)) != len(payload.packet_ids):
+        raise HttpError(422, "Select 1-100 different prepared packets")
+    bundle_code = _code(payload.barcode)
+    college = Institution.objects.filter(
+        tenant_id=tenant_id,
+        id=payload.source_college_id,
+        kind=Institution.Kind.COLLEGE,
+        is_active=True,
+    ).first()
+    if not college:
+        raise HttpError(422, "Select a college configured by the university administrator")
+    if Dispatch.objects.filter(tenant_id=tenant_id, reference=bundle_code).exists():
+        raise HttpError(409, "Bundle barcode is already registered")
+    with transaction.atomic():
+        selected = list(
+            PreparedPacket.objects.select_for_update()
+            .filter(tenant_id=tenant_id, id__in=payload.packet_ids)
+            .select_related("paper", "source_college")
+        )
+        by_id = {str(packet.id): packet for packet in selected}
+        if len(selected) != len(payload.packet_ids):
+            raise HttpError(422, "One or more prepared packets were not found")
+        packets = [by_id[packet_id] for packet_id in payload.packet_ids]
+        if any(packet.status != PreparedPacket.Status.READY for packet in packets):
+            raise HttpError(409, "One or more packets have already been bundled")
+        if any(packet.source_college_id != college.id for packet in packets):
+            raise HttpError(409, "Every packet in a bundle must come from the selected college")
+        if Packet.objects.filter(barcode__in=[packet.barcode for packet in packets]).exists():
+            raise HttpError(409, "One or more packet barcodes are already registered")
+        expected_scripts = sum(len(packet.script_manifest) for packet in packets)
+        bundle = Dispatch.objects.create(
+            tenant_id=tenant_id,
+            reference=bundle_code,
+            intake_mode=payload.mode,
+            paper=packets[0].paper,
+            source_centre=college.name,
+            source_institution=college,
+            expected_packets=len(packets),
+            expected_scripts=expected_scripts,
+            manifest_reference=bundle_code,
+            registered_by=request.auth,
+        )
+        for prepared in packets:
+            packet = Packet.objects.create(
+                tenant_id=tenant_id,
+                dispatch=bundle,
+                barcode=prepared.barcode,
+                paper=prepared.paper,
+                expected_scripts=len(prepared.script_manifest),
+                script_manifest=prepared.script_manifest,
+            )
+            prepared.status = PreparedPacket.Status.BUNDLED
+            prepared.packet = packet
+            prepared.bundled_at = timezone.now()
+            prepared.version += 1
+            prepared.save(update_fields=["status", "packet", "bundled_at", "version", "updated_at"])
+        record_event(
+            tenant_id=tenant_id,
+            actor_id=request.auth.id,
+            action="receiving.guided.manifest_created",
+            aggregate="Dispatch",
+            aggregate_id=bundle.id,
+            payload={"mode": payload.mode, "college_id": str(college.id), "packets": len(packets), "scripts": expected_scripts},
+        )
+    return {"id": str(bundle.id), "status": bundle.status, "barcode": bundle.reference}
 
 
 @router.get("/lookup/bundles/{barcode}")

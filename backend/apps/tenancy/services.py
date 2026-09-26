@@ -39,6 +39,22 @@ DEFAULT_MODULES = [
     "services", "security", "audit", "enterprise",
 ]
 
+BRAND_LOGO_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+
+
+def branding_for_account(account):
+    logo_url = ""
+    if account and account.logo_storage_key:
+        from apps.repository.storage import signed_object_url
+
+        logo_url, _ = signed_object_url(method="GET", key=account.logo_storage_key)
+    return {
+        "name": (account.brand_name or account.root_institution.name) if account else "ADMIEZO",
+        "description": account.brand_description if account else "",
+        "theme": account.brand_theme if account else TenantAccount.Theme.FOREST,
+        "logo_url": logo_url,
+    }
+
 
 def _validate_ai_governance(mode, confidence_threshold, model_name, *, tenant_id=None, api_key="", validate_model=True):
     if mode not in SecurityPolicy.AIEvaluationMode.values:
@@ -94,6 +110,7 @@ def tenant_control_plane_rows():
             "enabled_modules": account.enabled_modules,
             "storage_quota_bytes": account.storage_quota_bytes,
             "data_region": account.data_region,
+            "branding": branding_for_account(account),
             "version": account.version,
             "administrator_count": Membership.objects.filter(institution__tenant_id=account.root_institution.tenant_id, role=Membership.Role.UNIVERSITY_ADMIN, is_active=True).count(),
             "ai_policy": {
@@ -133,7 +150,7 @@ def tenant_rows(user):
 
 
 @transaction.atomic
-def provision_tenant(*, actor, name, code, admin_email, admin_first_name, admin_last_name, policy, subdomain=None, plan="standard", enabled_modules=None, storage_quota_gb=10, data_region="in-primary", ai_evaluation_mode="disabled", ai_confidence_threshold=85, ai_model_name="admiezo-ai-v1", ai_api_key=None):
+def provision_tenant(*, actor, name, code, admin_email, admin_first_name, admin_last_name, policy, subdomain=None, plan="standard", enabled_modules=None, storage_quota_gb=10, data_region="in-primary", brand_name="", brand_description="", brand_theme="forest", ai_evaluation_mode="disabled", ai_confidence_threshold=85, ai_model_name="admiezo-ai-v1", ai_api_key=None):
     slug = (subdomain or code).strip().lower()
     try:
         validate_slug(slug)
@@ -145,6 +162,8 @@ def provision_tenant(*, actor, name, code, admin_email, admin_first_name, admin_
         raise TenancyError("Unsupported subscription plan")
     if not 1 <= storage_quota_gb <= 10240:
         raise TenancyError("Storage quota must be between 1 GB and 10 TB")
+    if brand_theme not in TenantAccount.Theme.values:
+        raise TenancyError("Unsupported university theme")
     api_key = str(ai_api_key or "").strip()
     ai_confidence_threshold, ai_model_name = _validate_ai_governance(
         ai_evaluation_mode,
@@ -163,6 +182,9 @@ def provision_tenant(*, actor, name, code, admin_email, admin_first_name, admin_
         enabled_modules=sorted(set(enabled_modules or DEFAULT_MODULES) - {"ai_evaluation"}),
         storage_quota_bytes=storage_quota_gb * 1024 * 1024 * 1024,
         data_region=data_region.strip().lower()[:40],
+        brand_name=brand_name.strip()[:120],
+        brand_description=brand_description.strip()[:240],
+        brand_theme=brand_theme,
     )
     hostname = normalize_hostname(f"{slug}.{settings.TENANT_BASE_DOMAIN}")
     domain = TenantDomain.objects.create(
@@ -209,6 +231,8 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
         raise TenancyError("Unsupported university status")
     if changes.get("plan") and changes["plan"] not in TenantAccount.Plan.values:
         raise TenancyError("Unsupported subscription plan")
+    if changes.get("brand_theme") and changes["brand_theme"] not in TenantAccount.Theme.values:
+        raise TenancyError("Unsupported university theme")
     policy = SecurityPolicy.objects.select_for_update().filter(tenant_id=tenant_id).first() or SecurityPolicy(tenant_id=tenant_id)
     api_key = str(changes.pop("ai_api_key", "") or "").strip()
     provider_version = changes.pop("ai_provider_version", 0)
@@ -230,7 +254,7 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
             )
         ),
     )
-    for field in ("status", "plan", "enabled_modules", "data_region"):
+    for field in ("status", "plan", "enabled_modules", "data_region", "brand_name", "brand_description", "brand_theme"):
         if changes.get(field) is not None:
             value = changes[field]
             if field == "enabled_modules":
@@ -238,6 +262,10 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
                 if mode != SecurityPolicy.AIEvaluationMode.DISABLED:
                     modules.add("ai_evaluation")
                 value = sorted(modules)
+            elif field == "brand_name":
+                value = str(value).strip()[:120]
+            elif field == "brand_description":
+                value = str(value).strip()[:240]
             setattr(account, field, value)
     if changes.get("storage_quota_gb") is not None:
         if not 1 <= changes["storage_quota_gb"] <= 10240:
@@ -270,6 +298,60 @@ def update_tenant_account(*, actor_id, tenant_id, version, changes):
     synchronize_ai_governance(tenant_id=tenant_id, mode=mode)
     account.refresh_from_db()
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="tenancy.tenant.updated", aggregate="TenantAccount", aggregate_id=account.id, payload={"status": account.status, "plan": account.plan, "version": account.version})
+    return account
+
+
+def create_tenant_logo_upload(*, tenant_id, content_type, maximum_bytes):
+    extension = BRAND_LOGO_TYPES.get(content_type)
+    if not extension:
+        raise TenancyError("Use a PNG, JPEG or WebP logo")
+    if not 1 <= maximum_bytes <= 2_000_000:
+        raise TenancyError("University logos must be smaller than 2 MB")
+    if not TenantAccount.objects.filter(root_institution__tenant_id=tenant_id).exists():
+        raise TenancyError("University was not found")
+    from apps.repository.storage import signed_object_url
+
+    storage_key = f"branding/{tenant_id}/{uuid.uuid4().hex}.{extension}"
+    upload_url, expires_at = signed_object_url(method="PUT", key=storage_key, content_type=content_type, max_bytes=maximum_bytes)
+    return storage_key, upload_url, expires_at
+
+
+def finalize_tenant_logo(*, actor_id, tenant_id, version, storage_key, content_type):
+    expected_prefix = f"branding/{tenant_id}/"
+    if not storage_key.startswith(expected_prefix) or content_type not in BRAND_LOGO_TYPES:
+        raise TenancyError("Logo upload does not belong to this university")
+    from apps.repository.storage import delete_object, read_object_metadata
+
+    try:
+        metadata = read_object_metadata(storage_key)
+    except (OSError, ValueError, KeyError) as exc:
+        raise TenancyError("Uploaded logo could not be verified") from exc
+    if metadata.mime_type != content_type or metadata.byte_size > 2_000_000:
+        raise TenancyError("Uploaded logo type or size does not match the request")
+    with transaction.atomic():
+        account = TenantAccount.objects.select_for_update().select_related("root_institution").filter(root_institution__tenant_id=tenant_id).first()
+        if not account:
+            raise TenancyError("University was not found")
+        if account.version != version:
+            raise TenancyConflict("University account was changed by another operator")
+        previous_key = account.logo_storage_key
+        account.logo_storage_key = storage_key
+        account.logo_mime_type = content_type
+        account.version += 1
+        account.save(update_fields=["logo_storage_key", "logo_mime_type", "version", "updated_at"])
+        record_event(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            action="tenancy.branding.logo.updated",
+            aggregate="TenantAccount",
+            aggregate_id=account.id,
+            payload={"content_type": content_type, "byte_size": metadata.byte_size, "version": account.version},
+        )
+    if previous_key and previous_key != storage_key:
+        try:
+            delete_object(previous_key)
+        except OSError:
+            pass
     return account
 
 

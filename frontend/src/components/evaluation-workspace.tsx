@@ -1387,7 +1387,6 @@ export function EvaluationWorkspace({
     source?: Annotation,
   ) {
     if (!marking || !manifest || !lockToken || !target) return;
-
     setSaving(true);
     try {
       await api(

@@ -3,7 +3,7 @@
   "navigation": {
     "groups": { "operations": "कार्यप्रणाली", "administration": "प्रशासन", "evaluation": "मूल्यमापन", "governance": "शासन", "platform": "प्लॅटफॉर्म" },
     "items": {
-      "dashboard": "कमांड सेंटर", "receiving": "उत्तरपत्रिका प्राप्ती", "custody": "ताबा साखळी", "digitization": "डिजिटायझेशन", "liveControl": "थेट कार्यप्रणाली",
+      "dashboard": "कमांड सेंटर", "receiving": "बंडल तयारी", "custody": "ताबा साखळी", "digitization": "डिजिटायझेशन", "liveControl": "थेट कार्यप्रणाली",
       "configuration": "परीक्षा संरचना", "evaluators": "मूल्यमापक मास्टर", "allocation": "वाटप इंजिन", "assignmentGovernance": "वाटप इतिहास", "serviceControl": "निकाल आणि सेवा",
       "anonymisation": "अनामिकीकरण", "repository": "उत्तरपत्रिका भांडार", "rubrics": "गुणांकन योजना", "evaluation": "मूल्यमापन डेस्क", "valuation": "मूल्यांकन पुनरावलोकन", "assessmentControl": "असेसमेंट नियंत्रण",
       "security": "प्रवेश शासन", "tenancy": "एंटरप्राइझ सेटिंग्ज", "audit": "ऑडिट ट्रेल", "platformControl": "प्लॅटफॉर्म कार्यप्रणाली", "platformAdmin": "विद्यापीठे", "backToControlPlane": "नियंत्रण पटलावर परत जा"
@@ -16,7 +16,7 @@
     "dashboard": { "eyebrow": "थेट कार्यप्रणाली", "title": "मूल्यमापन कार्यप्रणाली", "description": "उत्तरपत्रिका हालचाल, वाटप आणि मूल्यमापन तयारी." },
     "configuration": { "title": "परीक्षा संरचना", "description": "आवृत्तीबद्ध प्रश्नपत्रिका नियम, गुण आणि तयारी स्थिती." },
     "evaluators": { "title": "मूल्यमापक मास्टर", "description": "सत्यापित प्रोफाइल, क्षमता आणि जीवनचक्र नियंत्रणे." },
-    "receiving": { "title": "उत्तरपत्रिका प्राप्ती", "description": "प्रेषण स्वीकार, मोजणी, जुळवणी आणि अपवाद." },
+    "receiving": { "title": "पॅकेट आणि बंडल तयारी", "description": "उत्तरपत्रिकांचे QR विषयवार पॅकेटमध्ये स्कॅन करा, नंतर पाठवणी किंवा स्थानिक स्कॅनिंगसाठी बंडल तयार करा." },
     "custody": { "title": "ताबा साखळी", "description": "गोपनीय उत्तरपत्रिका ओळखी आणि नियंत्रित हालचालींचा इतिहास." },
     "digitization": { "title": "डिजिटायझेशन नियंत्रण", "description": "स्कॅनर समूह, प्रतिमा गुणवत्ता प्रक्रिया आणि स्वाक्षरीकृत अखंडता पुरावा." },
     "repository": { "title": "उत्तरपत्रिका भांडार", "description": "अपरिवर्तनीय मालमत्ता मेटाडेटा, अखंडता आणि धारण." },

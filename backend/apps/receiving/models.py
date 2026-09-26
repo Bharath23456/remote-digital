@@ -3,6 +3,7 @@ from django.db import models
 
 from apps.configuration.models import Paper
 from apps.core.models import TenantModel
+from apps.tenancy.models import Institution
 
 
 class Dispatch(TenantModel):
@@ -24,6 +25,13 @@ class Dispatch(TenantModel):
     intake_mode = models.CharField(max_length=16, choices=IntakeMode.choices, default=IntakeMode.LEGACY)
     paper = models.ForeignKey(Paper, on_delete=models.PROTECT, related_name="dispatches")
     source_centre = models.CharField(max_length=120)
+    source_institution = models.ForeignKey(
+        Institution,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="intake_dispatches",
+    )
     expected_packets = models.PositiveIntegerField()
     expected_scripts = models.PositiveIntegerField()
     received_packets = models.PositiveIntegerField(default=0)
@@ -58,6 +66,22 @@ class Packet(TenantModel):
     handed_over_by = models.CharField(max_length=120, blank=True)
     received_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="packets_received")
     received_at = models.DateTimeField(null=True, blank=True)
+    version = models.PositiveIntegerField(default=1)
+
+
+class PreparedPacket(TenantModel):
+    class Status(models.TextChoices):
+        READY = "ready", "Ready for bundling"
+        BUNDLED = "bundled", "Bundled"
+
+    barcode = models.CharField(max_length=64, unique=True)
+    paper = models.ForeignKey(Paper, on_delete=models.PROTECT, related_name="prepared_intake_packets")
+    source_college = models.ForeignKey(Institution, on_delete=models.PROTECT, related_name="prepared_intake_packets")
+    script_manifest = models.JSONField(default=list)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.READY)
+    prepared_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="prepared_intake_packets")
+    packet = models.OneToOneField(Packet, null=True, blank=True, on_delete=models.PROTECT, related_name="preparation")
+    bundled_at = models.DateTimeField(null=True, blank=True)
     version = models.PositiveIntegerField(default=1)
 
 

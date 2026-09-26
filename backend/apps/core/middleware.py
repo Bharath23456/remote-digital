@@ -227,7 +227,10 @@ class IntakeDeskBoundaryMiddleware:
         Membership.Role.BUNDLE_PREPARER: {
             ("GET", "/api/v1/receiving/guided/catalog"),
             ("GET", "/api/v1/receiving/guided/papers"),
+            ("GET", "/api/v1/receiving/guided/preparation"),
+            ("POST", "/api/v1/receiving/guided/prepared-packets"),
             ("POST", "/api/v1/receiving/guided/bundles"),
+            ("POST", "/api/v1/receiving/guided/bundles/from-packets"),
             ("POST", "/api/v1/receiving/guided/bundles/start"),
         },
         Membership.Role.INTAKE_RECEIVER: {
@@ -242,7 +245,10 @@ class IntakeDeskBoundaryMiddleware:
         Membership.Role.OPERATIONS_SUPERVISOR: {
             ("GET", "/api/v1/receiving/guided/catalog"),
             ("GET", "/api/v1/receiving/guided/papers"),
+            ("GET", "/api/v1/receiving/guided/preparation"),
+            ("POST", "/api/v1/receiving/guided/prepared-packets"),
             ("POST", "/api/v1/receiving/guided/bundles"),
+            ("POST", "/api/v1/receiving/guided/bundles/from-packets"),
             ("POST", "/api/v1/receiving/guided/bundles/start"),
             ("POST", "/api/v1/receiving/guided/bundles/receive"),
             ("POST", "/api/v1/receiving/guided/packets/receive"),

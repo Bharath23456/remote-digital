@@ -5,6 +5,7 @@ const storageOrigin = process.env.STORAGE_GATEWAY_URL || "http://127.0.0.1:9000"
 const identityOrigin = process.env.IDENTITY_SERVICE_URL || "http://127.0.0.1:8100";
 const allowedDevOrigins = [
   "localhost",
+  "*.localhost",
   "127.0.0.1",
   ...(process.env.NGROK_DOMAIN ? [process.env.NGROK_DOMAIN] : []),
 ];

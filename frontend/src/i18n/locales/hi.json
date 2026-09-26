@@ -3,7 +3,7 @@
   "navigation": {
     "groups": { "operations": "संचालन", "administration": "प्रशासन", "evaluation": "मूल्यांकन", "governance": "शासन", "platform": "प्लेटफ़ॉर्म" },
     "items": {
-      "dashboard": "कमांड सेंटर", "receiving": "उत्तर-पुस्तिका प्राप्ति", "custody": "अभिरक्षा श्रृंखला", "digitization": "डिजिटलीकरण", "liveControl": "लाइव संचालन",
+      "dashboard": "कमांड सेंटर", "receiving": "बंडल तैयारी", "custody": "अभिरक्षा श्रृंखला", "digitization": "डिजिटलीकरण", "liveControl": "लाइव संचालन",
       "configuration": "परीक्षा कॉन्फ़िगरेशन", "evaluators": "मूल्यांकनकर्ता मास्टर", "allocation": "आवंटन इंजन", "assignmentGovernance": "आवंटन इतिहास", "serviceControl": "परिणाम और सेवाएँ",
       "anonymisation": "गुमनामीकरण", "repository": "उत्तर-पुस्तिका भंडार", "rubrics": "अंकन योजनाएँ", "evaluation": "मूल्यांकन डेस्क", "valuation": "मूल्यांकन समीक्षा", "assessmentControl": "आकलन नियंत्रण",
       "security": "पहुँच शासन", "tenancy": "उद्यम सेटिंग्स", "audit": "ऑडिट ट्रेल", "platformControl": "प्लेटफ़ॉर्म संचालन", "platformAdmin": "विश्वविद्यालय", "backToControlPlane": "नियंत्रण पटल पर वापस जाएँ"
@@ -26,7 +26,7 @@
     "dashboard": { "eyebrow": "लाइव संचालन", "title": "मूल्यांकन संचालन", "description": "उत्तर-पुस्तिकाओं की आवाजाही, आवंटन और मूल्यांकन की तैयारी।" },
     "configuration": { "title": "परीक्षा कॉन्फ़िगरेशन", "description": "संस्करणबद्ध प्रश्नपत्र नियम, अंक और तैयारी की स्थिति।" },
     "evaluators": { "title": "मूल्यांकनकर्ता मास्टर", "description": "सत्यापित प्रोफ़ाइल, क्षमता और जीवनचक्र नियंत्रण।" },
-    "receiving": { "title": "उत्तर-पुस्तिका प्राप्ति", "description": "प्रेषण प्राप्ति, गणना, मिलान और अपवाद।" },
+    "receiving": { "title": "पैकेट और बंडल तैयारी", "description": "उत्तर-पुस्तिका QR को विषयवार पैकेटों में स्कैन करें, फिर प्रेषण या स्थानीय स्कैनिंग के लिए बंडल बनाएं।" },
     "custody": { "title": "अभिरक्षा श्रृंखला", "description": "गोपनीय उत्तर-पुस्तिका पहचान और नियंत्रित आवागमन इतिहास।" },
     "digitization": { "title": "डिजिटलीकरण नियंत्रण", "description": "स्कैनर समूह, छवि गुणवत्ता प्रक्रिया और हस्ताक्षरित अखंडता प्रमाण।" },
     "repository": { "title": "उत्तर-पुस्तिका भंडार", "description": "अपरिवर्तनीय परिसंपत्ति मेटाडेटा, अखंडता और प्रतिधारण।" },

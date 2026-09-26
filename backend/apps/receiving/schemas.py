@@ -29,6 +29,20 @@ class GuidedBundleIn(Schema):
     packets: list[GuidedPacketIn]
 
 
+class GuidedPreparedPacketIn(Schema):
+    barcode: str
+    paper_id: str
+    source_college_id: str
+    script_barcodes: list[str]
+
+
+class GuidedPreparedBundleIn(Schema):
+    barcode: str
+    source_college_id: str
+    mode: str
+    packet_ids: list[str]
+
+
 class GuidedScanIn(Schema):
     barcode: str
 

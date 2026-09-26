@@ -8,6 +8,7 @@ from apps.core.models import AuditEvent, OutboxEvent
 from apps.ai_evaluation.models import AIProviderConfiguration
 from apps.ai_evaluation.provider import AdmiezoAIError
 from apps.evaluators.models import Evaluator
+from apps.repository.storage import ObjectMetadata
 from apps.security.crypto import decrypt_secret
 from apps.security.models import SecurityPolicy
 from apps.tenancy.models import Institution, Membership, TenantAccount, TenantDomain
@@ -88,7 +89,7 @@ class InstitutionHierarchyTests(TestCase):
         self.assertEqual(platform.post("/api/v1/auth/login", data=json.dumps({"email": "platform@admiezo.local", "password": "ChangeMe123!"}), content_type="application/json").status_code, 200)
         created = platform.post(
             "/api/v1/enterprise/tenants",
-            data=json.dumps({"name": "Domain University", "code": "domain-u", "subdomain": "domain", "admin_email": "admin@domain.example", "admin_first_name": "Domain", "admin_last_name": "Admin", "plan": "professional", "storage_quota_gb": 25, "data_region": "in-south", "policy": {"timezone": "Asia/Kolkata"}}),
+            data=json.dumps({"name": "Domain University", "code": "domain-u", "subdomain": "domain", "admin_email": "admin@domain.example", "admin_first_name": "Domain", "admin_last_name": "Admin", "plan": "professional", "storage_quota_gb": 25, "data_region": "in-south", "brand_name": "Domain Evaluation", "brand_description": "Secure digital assessment", "brand_theme": "ocean", "policy": {"timezone": "Asia/Kolkata"}}),
             content_type="application/json",
         )
         self.assertEqual(created.status_code, 200)
@@ -98,7 +99,11 @@ class InstitutionHierarchyTests(TestCase):
         account = TenantAccount.objects.get(root_institution__tenant_id=body["id"])
         self.assertEqual(account.plan, TenantAccount.Plan.PROFESSIONAL)
         self.assertEqual(account.storage_quota_bytes, 25 * 1024 * 1024 * 1024)
+        self.assertEqual((account.brand_name, account.brand_theme), ("Domain Evaluation", TenantAccount.Theme.OCEAN))
         self.assertTrue(TenantDomain.objects.filter(tenant_account=account, hostname="domain.localhost", status="active").exists())
+        domain_context = Client().get("/api/v1/enterprise/domain-context", HTTP_HOST="domain.localhost").json()
+        self.assertEqual(domain_context["university"]["branding"]["name"], "Domain Evaluation")
+        self.assertEqual(domain_context["university"]["branding"]["theme"], "ocean")
         audit_rows = platform.get("/api/v1/enterprise/control-plane/audit").json()
         self.assertTrue(any(row["university"] == "Domain University" and row["action"] == "tenancy.tenant.provisioned" for row in audit_rows))
 
@@ -111,6 +116,7 @@ class InstitutionHierarchyTests(TestCase):
         )
         self.assertEqual(login.status_code, 200)
         self.assertTrue(login.json()["must_change_password"])
+        self.assertEqual(login.json()["branding"]["description"], "Secure digital assessment")
         self.assertEqual(university.get("/api/v1/operations/overview", HTTP_HOST="domain.localhost").status_code, 428)
         csrf = university.get("/api/v1/auth/csrf", HTTP_HOST="domain.localhost")
         self.assertEqual(csrf.status_code, 200)
@@ -133,6 +139,43 @@ class InstitutionHierarchyTests(TestCase):
             HTTP_HOST="domain.localhost",
         )
         self.assertEqual(denied.status_code, 403)
+
+    def test_platform_host_blocks_university_login_and_supports_tenant_logo(self):
+        self.assertEqual(self.client.get("/api/v1/auth/me", HTTP_HOST="localhost").status_code, 403)
+        blocked = Client().post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!"}),
+            content_type="application/json",
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(blocked.status_code, 403)
+        self.assertIn("subdomain", blocked.json()["detail"])
+
+        platform = Client()
+        login = platform.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": "platform@admiezo.local", "password": "ChangeMe123!"}),
+            content_type="application/json",
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(login.status_code, 200, login.content)
+        account = Institution.objects.get(code="northbridge-university").tenant_account
+        intent = platform.post(
+            f"/api/v1/enterprise/tenants/{account.root_institution.tenant_id}/branding/logo-upload",
+            data=json.dumps({"content_type": "image/png", "maximum_bytes": 1024}),
+            content_type="application/json",
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(intent.status_code, 200, intent.content)
+        with patch("apps.repository.storage.read_object_metadata", return_value=ObjectMetadata(sha256="a" * 64, byte_size=1024, mime_type="image/png")):
+            finalized = platform.post(
+                f"/api/v1/enterprise/tenants/{account.root_institution.tenant_id}/branding/logo-finalize",
+                data=json.dumps({"version": account.version, "storage_key": intent.json()["storage_key"], "content_type": "image/png"}),
+                content_type="application/json",
+                HTTP_HOST="localhost",
+            )
+        self.assertEqual(finalized.status_code, 200, finalized.content)
+        self.assertTrue(finalized.json()["branding"]["logo_url"])
 
     def test_platform_ai_policy_uses_a_verified_key_per_university_and_controls_system_evaluator(self):
         platform = Client()
