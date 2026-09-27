@@ -71,6 +71,7 @@ class TenantEntitlementMiddleware:
     evaluator_evaluation_prefixes = (
         "/api/v1/allocation/assignments/",
         "/api/v1/assignment-governance/assignments/",
+        "/api/v1/phase4/remote-support/",
         "/api/v1/phase4/remote-security/",
         "/api/v1/valuation/evaluations/",
     )
@@ -103,6 +104,7 @@ class TenantEntitlementMiddleware:
         ("/api/v1/phase4/revaluation/", "assessment"),
         ("/api/v1/phase4/completion/", "assessment"),
         ("/api/v1/phase4/remote-security/", "operations"),
+        ("/api/v1/phase4/remote-support/", "operations"),
         ("/api/v1/phase4/monitoring/", "operations"),
         ("/api/v1/phase4/workload/", "operations"),
         ("/api/v1/phase4/runtime/", "operations"),
@@ -177,6 +179,7 @@ class EvaluatorRoleBoundaryMiddleware:
         "/api/v1/allocation/assignments/",
         "/api/v1/assignment-governance/assignments/",
         "/api/v1/marking/",
+        "/api/v1/phase4/remote-support/",
         "/api/v1/phase4/remote-security/",
         "/api/v1/valuation/evaluations/",
         "/api/v1/workflow/",

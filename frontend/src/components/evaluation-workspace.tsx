@@ -59,6 +59,10 @@ import { flushSync } from "react-dom";
 import { csrfFetch } from "@/lib/api";
 import { IdentityVerificationModal } from "@/components/evaluator-identity-verification";
 import {
+  REMOTE_SUPPORT_COMMAND_EVENT,
+  type SupportCommandEvent,
+} from "@/components/remote-support-receiver";
+import {
   CameraPreview,
   SecurePreflightDialog,
   SecurityPauseOverlay,
@@ -1160,6 +1164,35 @@ export function EvaluationWorkspace({
     },
     [manifest?.page_count, saveProgress, security.paused],
   );
+  useEffect(() => {
+    function onRemoteSupportCommand(event: Event) {
+      const { assignmentId, command, complete } = (event as SupportCommandEvent).detail;
+      if (!manifest || manifest.assignment.id !== assignmentId) {
+        complete(false, "The requested assignment is not open in the evaluator desk.");
+        return;
+      }
+      if (security.paused && command.kind !== "refresh_viewer") {
+        complete(false, "The secure evaluation session is paused.");
+        return;
+      }
+      if (command.kind === "previous_page") {
+        goTo(currentPage - 1);
+        complete(true, `Moved to page ${Math.max(1, currentPage - 1)}.`);
+      } else if (command.kind === "next_page") {
+        const next = Math.min(manifest.page_count, currentPage + 1);
+        goTo(next);
+        complete(true, `Moved to page ${next}.`);
+      } else if (command.kind === "refresh_viewer") {
+        setViewerLoading(true);
+        void refreshMarking(manifest.assignment.id)
+          .then(() => complete(true, "The script viewer was refreshed."))
+          .catch((reason) => complete(false, reason instanceof Error ? reason.message : "The script viewer could not be refreshed."))
+          .finally(() => setViewerLoading(false));
+      }
+    }
+    window.addEventListener(REMOTE_SUPPORT_COMMAND_EVENT, onRemoteSupportCommand);
+    return () => window.removeEventListener(REMOTE_SUPPORT_COMMAND_EVENT, onRemoteSupportCommand);
+  }, [currentPage, goTo, manifest, refreshMarking, security.paused]);
   const pageForQuestion = useCallback(
     (id: string) => {
       if (!marking) return null;

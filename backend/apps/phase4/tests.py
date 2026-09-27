@@ -43,6 +43,8 @@ from .models import (
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
+    RemoteSupportCommand,
+    RemoteSupportSession,
     RemunerationRule,
     ResultHandover,
     SecureEvaluationSession,
@@ -56,13 +58,19 @@ from .services import (
     consume_authorization,
     create_issue,
     create_notification,
+    create_remote_support_command,
     create_revaluation,
     create_student_request,
     create_workload_action,
     decide_authorization,
+    decide_remote_support,
+    end_remote_support,
+    expire_remote_support_sessions,
     notification_action,
+    acknowledge_remote_support_command,
     queue_handover,
     request_authorization,
+    request_remote_support,
     sample_moderation_cases,
     seal_evidence,
     set_locale,
@@ -185,6 +193,25 @@ class RemainingModulesTests(TestCase):
             "model_version": "opencv-sface-v1",
             "device_fingerprint": "f" * 64,
         }
+
+    def remote_support_assignment(self, evaluator, suffix):
+        script = Script.objects.create(
+            tenant_id=self.tenant_id,
+            script_code=f"AS-SUPPORT-{suffix}",
+            primary_barcode=f"NB-SUPPORT-{suffix}",
+            packet=self.phase4_script.packet,
+            paper=self.paper,
+            page_count=2,
+            state=Script.State.FINALIZED,
+        )
+        return Assignment.objects.create(
+            tenant_id=self.tenant_id,
+            script=script,
+            evaluator=evaluator,
+            valuation_round=1,
+            status=Assignment.Status.ACCEPTED,
+            due_at=timezone.now() + timedelta(days=1),
+        )
 
     def verify_identity_for_secure_session(self, evaluator, assignment):
         enroll_face_template(tenant_id=self.tenant_id, actor_id=self.admin.id, evaluator_id=evaluator.id, capture=self.face_capture())
@@ -357,6 +384,133 @@ class RemainingModulesTests(TestCase):
         item = notification_action(tenant_id=self.tenant_id, actor_id=self.admin.id, notification_id=item.id, expected_version=item.version, action="deliver")
         item = notification_action(tenant_id=self.tenant_id, actor_id=self.controller.id, notification_id=item.id, expected_version=item.version, action="acknowledge")
         self.assertEqual(item.status, NotificationDelivery.Status.ACKNOWLEDGED)
+
+    def test_remote_support_requires_consent_limits_commands_and_is_revocable(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = self.remote_support_assignment(evaluator, "CONSENT")
+
+        support = request_remote_support(
+            tenant_id=self.tenant_id,
+            actor_id=self.admin.id,
+            actor_name="University Admin",
+            assignment_id=assignment.id,
+            reason="The evaluator requested help recovering the script viewer.",
+        )
+        self.assertEqual(support.status, RemoteSupportSession.Status.REQUESTED)
+        self.assertTrue(NotificationDelivery.objects.filter(
+            id=support.notification_id,
+            user_id=evaluator.user_id,
+            category="remote_support",
+            mandatory_acknowledgement=True,
+        ).exists())
+        with self.assertRaises(HttpError):
+            create_remote_support_command(
+                tenant_id=self.tenant_id,
+                actor_id=self.admin.id,
+                support_id=support.id,
+                kind=RemoteSupportCommand.Kind.NEXT_PAGE,
+            )
+
+        support = decide_remote_support(
+            tenant_id=self.tenant_id,
+            actor_id=evaluator.user_id,
+            evaluator=evaluator,
+            support_id=support.id,
+            expected_version=support.version,
+            approve=True,
+        )
+        self.assertEqual(support.status, RemoteSupportSession.Status.ACTIVE)
+        command = create_remote_support_command(
+            tenant_id=self.tenant_id,
+            actor_id=self.admin.id,
+            support_id=support.id,
+            kind=RemoteSupportCommand.Kind.NEXT_PAGE,
+        )
+        command = acknowledge_remote_support_command(
+            tenant_id=self.tenant_id,
+            actor_id=evaluator.user_id,
+            evaluator=evaluator,
+            command_id=command.id,
+            applied=True,
+            result="Moved to page 2.",
+        )
+        self.assertEqual(command.status, RemoteSupportCommand.Status.APPLIED)
+
+        support = end_remote_support(
+            tenant_id=self.tenant_id,
+            actor_id=evaluator.user_id,
+            support_id=support.id,
+            evaluator=evaluator,
+        )
+        self.assertEqual(support.status, RemoteSupportSession.Status.REVOKED)
+        with self.assertRaises(HttpError):
+            create_remote_support_command(
+                tenant_id=self.tenant_id,
+                actor_id=self.admin.id,
+                support_id=support.id,
+                kind=RemoteSupportCommand.Kind.REFRESH_VIEWER,
+            )
+        self.assertTrue(AuditEvent.objects.filter(
+            tenant_id=self.tenant_id,
+            aggregate_type="RemoteSupportSession",
+            action="remote_support.revoked",
+        ).exists())
+
+    def test_remote_support_request_expires_without_evaluator_approval(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = self.remote_support_assignment(evaluator, "EXPIRE")
+        support = request_remote_support(
+            tenant_id=self.tenant_id,
+            actor_id=self.admin.id,
+            actor_name="University Admin",
+            assignment_id=assignment.id,
+            reason="The evaluator requested temporary viewer navigation assistance.",
+        )
+        RemoteSupportSession.objects.filter(id=support.id).update(expires_at=timezone.now() - timedelta(seconds=1))
+        expire_remote_support_sessions(tenant_id=self.tenant_id)
+        support.refresh_from_db()
+        self.assertEqual(support.status, RemoteSupportSession.Status.EXPIRED)
+
+    def test_remote_support_api_is_available_only_through_evaluator_consent(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = self.remote_support_assignment(evaluator, "API")
+        admin_client = Client()
+        self.assertEqual(admin_client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": self.admin.email, "password": "ChangeMe123!", "device_id": "support-admin"}),
+            content_type="application/json",
+        ).status_code, 200)
+        created = admin_client.post(
+            "/api/v1/phase4/remote-support/requests",
+            data=json.dumps({"assignment_id": str(assignment.id), "reason": "The evaluator asked for help restoring the script viewer."}),
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 200)
+        support = created.json()
+        self.assertEqual(support["status"], "requested")
+
+        evaluator_client = Client()
+        self.assertEqual(evaluator_client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "support-evaluator"}),
+            content_type="application/json",
+        ).status_code, 200)
+        inbox = evaluator_client.get("/api/v1/phase4/remote-support/inbox")
+        self.assertEqual(inbox.status_code, 200)
+        self.assertEqual(inbox.json()["session"]["id"], support["id"])
+        approved = evaluator_client.post(
+            f"/api/v1/phase4/remote-support/{support['id']}/decision",
+            data=json.dumps({"version": support["version"], "approve": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "active")
+        command = admin_client.post(
+            f"/api/v1/phase4/remote-support/{support['id']}/commands",
+            data=json.dumps({"kind": "refresh_viewer"}),
+            content_type="application/json",
+        )
+        self.assertEqual(command.status_code, 200)
 
     def test_result_release_and_integration_handover_are_controlled(self):
         script = Script.objects.filter(tenant_id=self.tenant_id).exclude(final_mark__isnull=False).first()
