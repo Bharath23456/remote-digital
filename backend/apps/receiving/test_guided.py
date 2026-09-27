@@ -18,6 +18,7 @@ from apps.core.models import AuditEvent
 from apps.custody.models import Script
 from apps.anonymisation.models import IdentityLink
 from apps.repository.models import UploadIntent
+from apps.phase4.models import CentreProfile
 from apps.tenancy.models import Institution, Membership
 
 from .models import Dispatch, Packet, PreparedPacket
@@ -35,7 +36,19 @@ class GuidedIntakeTests(TestCase):
         response = self.post("/api/v1/auth/login", {"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "guided-intake-tests"})
         self.assertEqual(response.status_code, 200)
         self.paper = Paper.objects.first()
-        root = Membership.objects.get(user__email="admin@admiezo.local").institution
+        admin_membership = Membership.objects.get(user__email="admin@admiezo.local")
+        root = admin_membership.institution
+        self.centre = CentreProfile.objects.create(
+            tenant_id=root.tenant_id,
+            code="TEST-CENTRE",
+            name="Test Evaluation Centre",
+            location="Academic Block",
+            capacity=100,
+            workstation_count=20,
+            status=CentreProfile.Status.ACTIVE,
+        )
+        admin_membership.operational_centre_id = self.centre.id
+        admin_membership.save(update_fields=["operational_centre_id", "updated_at"])
         self.college, _ = Institution.objects.get_or_create(
             tenant_id=root.tenant_id,
             code="test-college",
@@ -154,7 +167,9 @@ class GuidedIntakeTests(TestCase):
         with patch("apps.receiving.guided_api.recognize_cover", return_value=("QR-GUIDED-1", "AB12345678")), patch("apps.receiving.guided_api.urlopen", return_value=io.BytesIO(b'{"receipt":"test"}')), patch("apps.receiving.guided_api.confirm_identity_storage"):
             response = self.client.post(f"/api/v1/receiving/guided/packets/{packet.id}/recognize", {"cover": SimpleUploadedFile("front.png", b"cover", content_type="image/png")})
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(Script.objects.get(id=response.json()["script_id"]).paper_id, self.paper.id)
+        recognized_script = Script.objects.get(id=response.json()["script_id"])
+        self.assertEqual(recognized_script.paper_id, self.paper.id)
+        self.assertEqual(recognized_script.digitized_centre_id, self.centre.id)
         self.assertNotIn("AB12345678", response.content.decode())
         link = IdentityLink.objects.get(script_id=response.json()["script_id"])
         link.stored_at = timezone.now()
@@ -209,6 +224,32 @@ class GuidedIntakeTests(TestCase):
         self.assertTrue(AuditEvent.objects.filter(action="receiving.guided.packet_prepared", aggregate_id=prepared_packet.id).exists())
         self.assertEqual(self.post("/api/v1/receiving/guided/bundles/start", {"barcode": "BND-PREP-001"}).json()["status"], Dispatch.Status.IN_TRANSIT)
 
+    def test_packet_and_bundle_qr_codes_are_generated_and_centre_stamped(self):
+        prepared = self.post("/api/v1/receiving/guided/prepared-packets", {
+            "paper_id": str(self.paper.id),
+            "source_college_id": str(self.college.id),
+            "script_barcodes": ["QR-AUTO-001"],
+        })
+        self.assertEqual(prepared.status_code, 200, prepared.content)
+        self.assertRegex(prepared.json()["qr_value"], r"^PKT-\d{6}-[A-F0-9]{10}$")
+        packet = PreparedPacket.objects.get(id=prepared.json()["id"])
+        self.assertEqual(packet.prepared_centre_id, self.centre.id)
+
+        bundled = self.post("/api/v1/receiving/guided/bundles/from-packets", {
+            "source_college_id": str(self.college.id),
+            "mode": "on_site",
+            "packet_ids": [str(packet.id)],
+        })
+        self.assertEqual(bundled.status_code, 200, bundled.content)
+        self.assertRegex(bundled.json()["qr_value"], r"^BND-\d{6}-[A-F0-9]{10}$")
+        dispatch = Dispatch.objects.get(id=bundled.json()["id"])
+        self.assertEqual(dispatch.prepared_centre_id, self.centre.id)
+        self.assertEqual(self.post("/api/v1/receiving/guided/bundles/start", {"barcode": dispatch.reference}).status_code, 200)
+        self.assertEqual(self.post("/api/v1/receiving/guided/packets/receive", {"barcode": packet.barcode, "bundle_barcode": dispatch.reference}).status_code, 200)
+        packet.refresh_from_db()
+        packet.packet.refresh_from_db()
+        self.assertEqual(packet.packet.received_centre_id, self.centre.id)
+
     def test_legacy_receiving_cannot_change_guided_bundle(self):
         created = self.create_manifest()
         legacy = self.client.get("/api/v1/receiving/catalog").json()
@@ -250,7 +291,7 @@ class GuidedIntakeTests(TestCase):
 
         def worker(role, module):
             user = User.objects.create_user(username=f"{role}@example.test", email=f"{role}@example.test", password="ChangeMe123!")
-            Membership.objects.create(user=user, institution=institution, role=role, enabled_modules=[module])
+            Membership.objects.create(user=user, institution=institution, role=role, enabled_modules=[module], operational_centre_id=self.centre.id)
             client = Client()
             response = client.post("/api/v1/auth/login", data=json.dumps({"email": user.email, "password": "ChangeMe123!", "device_id": f"desk-{role}"}), content_type="application/json")
             self.assertEqual(response.status_code, 200, response.content)
@@ -291,7 +332,7 @@ class GuidedIntakeTests(TestCase):
     def test_operations_supervisor_can_work_across_intake_but_not_other_modules(self):
         institution = Membership.objects.get(user__email="admin@admiezo.local").institution
         user = User.objects.create_user(username="intake.supervisor@example.test", email="intake.supervisor@example.test", password="ChangeMe123!")
-        Membership.objects.create(user=user, institution=institution, role=Membership.Role.OPERATIONS_SUPERVISOR, enabled_modules=["receiving", "custody", "digitization"])
+        Membership.objects.create(user=user, institution=institution, role=Membership.Role.OPERATIONS_SUPERVISOR, enabled_modules=["receiving", "custody", "digitization"], operational_centre_id=self.centre.id)
         supervisor = Client()
         login = supervisor.post("/api/v1/auth/login", data=json.dumps({"email": user.email, "password": "ChangeMe123!", "device_id": "supervisor-test"}), content_type="application/json")
         self.assertEqual(login.status_code, 200, login.content)
@@ -317,6 +358,16 @@ class GuidedIntakeTests(TestCase):
         self.assertEqual(uploaded.status_code, 200, uploaded.content)
         for path in ("/api/v1/operations/overview", "/api/v1/receiving/catalog", "/api/v1/security/catalog", "/api/v1/phase4/catalog?section=operations"):
             self.assertEqual(supervisor.get(path).status_code, 403, path)
+
+    def test_operational_user_without_active_centre_is_blocked(self):
+        institution = Membership.objects.get(user__email="admin@admiezo.local").institution
+        user = User.objects.create_user(username="unassigned.preparer@example.test", email="unassigned.preparer@example.test", password="ChangeMe123!")
+        Membership.objects.create(user=user, institution=institution, role=Membership.Role.BUNDLE_PREPARER, enabled_modules=["receiving"])
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": user.email, "password": "ChangeMe123!", "device_id": "unassigned-centre"}), content_type="application/json").status_code, 200)
+        response = client.get("/api/v1/receiving/guided/preparation")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("active centre", response.json()["detail"])
 
 
 class OMRReaderTests(TestCase):

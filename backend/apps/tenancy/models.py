@@ -54,6 +54,7 @@ class Membership(TimeStampedModel):
     permissions = models.JSONField(default=list, blank=True)
     enabled_modules = models.JSONField(default=list, blank=True)
     custom_fields = models.JSONField(default=dict, blank=True)
+    operational_centre_id = models.UUIDField(null=True, blank=True, db_index=True)
     is_active = models.BooleanField(default=True)
     must_change_password = models.BooleanField(default=False)
 

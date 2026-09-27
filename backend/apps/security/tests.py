@@ -5,6 +5,7 @@ from django.core.management import call_command
 from django.test import Client, TestCase
 
 from apps.core.models import AuditEvent, OutboxEvent
+from apps.phase4.models import CentreProfile
 from apps.tenancy.models import Membership
 
 from .models import DlpIncident, PrivilegedAccessRequest, SecurityPolicy
@@ -26,6 +27,16 @@ class SecurityGovernanceTests(TestCase):
             {"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "admin-device"},
         )
         self.assertEqual(response.status_code, 200)
+        membership = Membership.objects.get(user__email="admin@admiezo.local")
+        self.centre = CentreProfile.objects.create(
+            tenant_id=membership.institution.tenant_id,
+            code="SEC-CENTRE",
+            name="Security Test Centre",
+            location="Block S",
+            capacity=50,
+            workstation_count=10,
+            status=CentreProfile.Status.ACTIVE,
+        )
 
     def post(self, client, path, payload):
         return client.post(path, data=json.dumps(payload), content_type="application/json")
@@ -131,7 +142,7 @@ class SecurityGovernanceTests(TestCase):
         for role, module in (("bundle_preparer", "receiving"), ("intake_receiver", "custody"), ("scan_operator", "digitization")):
             payload = {
                 "first_name": "Desk", "last_name": "Worker", "email": f"{role}@example.edu",
-                "role": role, "permissions": [], "enabled_modules": [module], "custom_fields": {},
+                "role": role, "permissions": [], "enabled_modules": [module], "operational_centre_id": str(self.centre.id), "custom_fields": {},
             }
             created = self.post(self.admin, "/api/v1/security/memberships", payload)
             self.assertEqual(created.status_code, 200, created.content)
@@ -146,7 +157,7 @@ class SecurityGovernanceTests(TestCase):
         payload = {
             "first_name": "Intake", "last_name": "Supervisor", "email": "intake.supervisor@example.edu",
             "role": "operations_supervisor", "permissions": [],
-            "enabled_modules": ["receiving", "custody", "digitization"], "custom_fields": {},
+            "enabled_modules": ["receiving", "custody", "digitization"], "operational_centre_id": str(self.centre.id), "custom_fields": {},
         }
         created = self.post(self.admin, "/api/v1/security/memberships", payload)
         self.assertEqual(created.status_code, 200, created.content)
@@ -159,6 +170,20 @@ class SecurityGovernanceTests(TestCase):
         payload["enabled_modules"] = ["receiving", "custody", "digitization"]
         payload["permissions"] = ["identity.resolve"]
         self.assertEqual(self.post(self.admin, "/api/v1/security/memberships", payload).status_code, 422)
+
+    def test_operational_user_requires_an_active_centre(self):
+        self.assertEqual(self.post(self.admin, "/api/v1/auth/step-up", {"password": "ChangeMe123!"}).status_code, 200)
+        payload = {
+            "first_name": "No", "last_name": "Centre", "email": "no-centre@example.edu",
+            "role": "bundle_preparer", "permissions": [], "enabled_modules": ["receiving"], "custom_fields": {},
+        }
+        missing = self.post(self.admin, "/api/v1/security/memberships", payload)
+        self.assertEqual(missing.status_code, 422)
+        self.assertIn("active centre", missing.json()["detail"])
+        payload["operational_centre_id"] = str(self.centre.id)
+        created = self.post(self.admin, "/api/v1/security/memberships", payload)
+        self.assertEqual(created.status_code, 200, created.content)
+        self.assertEqual(Membership.objects.get(user__email=payload["email"]).operational_centre_id, self.centre.id)
 
     def test_emergency_role_grant_is_time_bound_and_revocable(self):
         auditor_client = Client()

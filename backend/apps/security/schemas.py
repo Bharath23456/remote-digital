@@ -59,6 +59,7 @@ class MembershipAccessIn(Schema):
     permissions: list[str]
     enabled_modules: list[str]
     is_active: bool
+    operational_centre_id: str | None = None
 
 
 class MembershipCreateIn(Schema):
@@ -69,6 +70,7 @@ class MembershipCreateIn(Schema):
     permissions: list[str] = Field(default_factory=list)
     enabled_modules: list[str] = Field(default_factory=list)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+    operational_centre_id: str | None = None
 
 
 class OidcProviderIn(Schema):
