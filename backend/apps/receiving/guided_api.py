@@ -63,14 +63,20 @@ def _generated_code(prefix, tenant_id):
     raise HttpError(503, "A unique QR label could not be generated; retry the operation")
 
 
-def _operational_centre(membership):
+def _assigned_operational_centre(membership):
     if not membership.operational_centre_id:
-        raise HttpError(409, "Assign this user to an active centre in Access governance before continuing")
-    centre = CentreProfile.objects.filter(
+        return None
+    return CentreProfile.objects.filter(
         id=membership.operational_centre_id,
         tenant_id=membership.institution.tenant_id,
         status=CentreProfile.Status.ACTIVE,
     ).first()
+
+
+def _operational_centre(membership):
+    centre = _assigned_operational_centre(membership)
+    if not centre and not membership.operational_centre_id:
+        raise HttpError(409, "Assign this user to an active centre in Access governance before continuing")
     if not centre:
         raise HttpError(409, "The assigned centre is not active; update it in Access governance before continuing")
     return centre
@@ -144,8 +150,20 @@ def preparation_catalog(request):
     _enabled()
     membership = require_roles(request, *PREPARERS)
     tenant_id = membership.institution.tenant_id
-    centre = _operational_centre(membership)
-    packets = PreparedPacket.objects.filter(tenant_id=tenant_id, prepared_centre_id=centre.id).select_related("paper", "source_college").order_by("-created_at")[:200]
+    centre = _assigned_operational_centre(membership)
+    packets = (
+        PreparedPacket.objects.filter(tenant_id=tenant_id, prepared_centre_id=centre.id)
+        .select_related("paper", "source_college")
+        .order_by("-created_at")[:200]
+        if centre else []
+    )
+    centre_error = None
+    if not centre:
+        centre_error = (
+            "The assigned centre is not active; update it in Access governance before continuing"
+            if membership.operational_centre_id
+            else "Assign this user to an active centre in Access governance before continuing"
+        )
     return {
         "papers": list(Paper.objects.filter(tenant_id=tenant_id).order_by("code").values("id", "code", "title")),
         "colleges": list(
@@ -155,8 +173,9 @@ def preparation_catalog(request):
                 is_active=True,
             ).order_by("name").values("id", "code", "name")
         ),
-        "centre": _centre_row(centre),
-        "packets": [_prepared_packet_row(packet, {centre.id: _centre_row(centre)}) for packet in packets],
+        "centre": _centre_row(centre) if centre else None,
+        "centre_error": centre_error,
+        "packets": [_prepared_packet_row(packet, {centre.id: _centre_row(centre)}) for packet in packets] if centre else [],
     }
 
 

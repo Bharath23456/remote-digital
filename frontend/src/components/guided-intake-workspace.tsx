@@ -65,16 +65,22 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
 
   const load = useCallback(async () => {
     try {
-      const intake = await api(`${root}/catalog`);
-      if (stage !== "digitization") setBundles(intake.bundles || []);
-      setCurrentCentre(intake.centre || null);
       if (stage === "receiving") {
-        const preparation = await api(`${root}/preparation`);
+        const [intakeResult, preparationResult] = await Promise.allSettled([api(`${root}/catalog`), api(`${root}/preparation`)]);
+        if (preparationResult.status === "rejected") throw preparationResult.reason;
+        const preparation = preparationResult.value;
         setPapers(preparation.papers || []);
         setColleges(preparation.colleges || []);
         setPreparedPackets(preparation.packets || []);
         setCurrentCentre(preparation.centre || null);
         setCollegeId((current) => current || preparation.colleges?.[0]?.id || "");
+        if (intakeResult.status === "fulfilled") setBundles(intakeResult.value.bundles || []);
+        const setupError = preparation.centre_error || (intakeResult.status === "rejected" ? intakeResult.reason?.message : "");
+        setError(setupError || "");
+      } else {
+        const intake = await api(`${root}/catalog`);
+        if (stage !== "digitization") setBundles(intake.bundles || []);
+        setCurrentCentre(intake.centre || null);
       }
       if (stage === "custody" && activeBundleCode) setActiveBundle(await api(`${root}/lookup/bundles/${encodeURIComponent(activeBundleCode)}`));
       if (stage === "digitization" && selectedPacketBarcode) setActivePacket(await api(`${root}/lookup/packets/${encodeURIComponent(selectedPacketBarcode)}`));
