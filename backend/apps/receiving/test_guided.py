@@ -185,9 +185,24 @@ class GuidedIntakeTests(TestCase):
         response = self.post("/api/v1/receiving/guided/bundles", {"barcode": "BND-DUP-001", "source_centre": "Test", "mode": "transfer", "packets": packets})
         self.assertEqual(response.status_code, 422)
 
+    def test_preparation_lists_colleges_when_centre_assignment_is_missing(self):
+        membership = Membership.objects.get(user__email="admin@admiezo.local")
+        membership.operational_centre_id = None
+        membership.save(update_fields=["operational_centre_id", "updated_at"])
+
+        catalog = self.client.get("/api/v1/receiving/guided/preparation")
+
+        self.assertEqual(catalog.status_code, 200, catalog.content)
+        self.assertIsNone(catalog.json()["centre"])
+        self.assertIn("Assign this user", catalog.json()["centre_error"])
+        self.assertIn(str(self.college.id), {item["id"] for item in catalog.json()["colleges"]})
+        self.assertEqual(catalog.json()["packets"], [])
+
     def test_prepared_packets_are_saved_then_bundled_for_selected_college(self):
         catalog = self.client.get("/api/v1/receiving/guided/preparation")
         self.assertEqual(catalog.status_code, 200, catalog.content)
+        self.assertIsNone(catalog.json()["centre_error"])
+        self.assertEqual(catalog.json()["centre"]["id"], str(self.centre.id))
         self.assertIn(str(self.college.id), {item["id"] for item in catalog.json()["colleges"]})
         prepared = self.post("/api/v1/receiving/guided/prepared-packets", {
             "barcode": "PKT-PREP-001",
