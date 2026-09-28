@@ -52,7 +52,7 @@ def repository_catalog(request, q: str = "", script_id: str | None = None, asset
     assets = ScriptAsset.objects.filter(tenant_id=tenant_id, deleted_at__isnull=True).select_related("script")
     intents = UploadIntent.objects.filter(tenant_id=tenant_id).select_related("script")
     if membership.role == Membership.Role.EVALUATOR:
-        evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+        evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
         assigned_scripts = Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator).values_list("script_id", flat=True) if evaluator else []
         assets = assets.filter(script_id__in=assigned_scripts, kind__in=[ScriptAsset.Kind.EVALUATION, ScriptAsset.Kind.THUMBNAIL])
         intents = intents.none()
@@ -197,7 +197,7 @@ def _can_read_asset(request, membership, asset):
     if membership.role == Membership.Role.EVALUATOR:
         if asset.kind not in (ScriptAsset.Kind.EVALUATION, ScriptAsset.Kind.THUMBNAIL):
             return False
-        evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+        evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
         return bool(evaluator and Assignment.objects.filter(tenant_id=membership.institution.tenant_id, evaluator=evaluator, script=asset.script).exists())
     return False
 

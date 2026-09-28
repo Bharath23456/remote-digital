@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
@@ -15,12 +15,15 @@ from apps.custody.models import Script
 from apps.discrepancy.models import DiscrepancyCase
 from apps.eligibility.models import EligibilityRecord
 from apps.evaluators.models import Evaluator, Expertise
+from apps.evaluators.face_engine import FaceEngineError, analyze_face_posture
+from apps.identity_auth.models import AccessSession
 from apps.integrity.models import IntegrityAlert
 from apps.marking.models import Evaluation
 from apps.repository.models import ScriptAsset
 from apps.repository.storage import delete_object
 from apps.security.models import SecurityAlert, SecurityPolicy
 from apps.scan_processing.models import ScanQualityException
+from apps.tenancy.models import Membership
 from apps.valuation.models import FinalMark, ValuationResult
 
 from .models import (
@@ -59,8 +62,12 @@ SECURE_PAUSE_CATEGORIES = {
     "camera_stopped",
     "external_media_device",
     "fullscreen_exited",
+    "headphones_detected",
     "heartbeat_lost",
     "identity_mismatch",
+    "face_misaligned",
+    "phone_detected",
+    "phone_call_suspected",
     "multiple_faces",
     "multiple_screens",
     "viewer_hidden",
@@ -863,6 +870,14 @@ def _security_action(category, severity):
 
 def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id, category, severity, device_fingerprint, session_fingerprint, details, secure_session=None):
     action = _security_action(category, severity)
+    checks = int(details.get("consecutive_checks") or 0)
+    terminal = (
+        (category == "multiple_faces" and checks >= 3)
+        or (category == "phone_detected" and checks >= 2)
+        or (category == "identity_mismatch" and checks >= 2)
+        or category in {"headphones_detected", "external_media_device"}
+    )
+    now = timezone.now()
     item = PresenceSecurityEvent.objects.create(
         tenant_id=tenant_id,
         assignment=assignment,
@@ -876,10 +891,26 @@ def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id
     )
     if secure_session and action in {"warn", "pause"}:
         secure_session.violation_count += 1
-        if action == "pause":
+        if terminal:
+            secure_session.status = SecureEvaluationSession.Status.ABANDONED
+            secure_session.ended_at = now
+            secure_session.pause_reason = category
+            secure_session.paused_at = now
+            revoked_reasons = {
+                "headphones_detected": "headphones_detected",
+                "external_media_device": "external_media_device",
+                "phone_detected": "phone_detected",
+                "identity_mismatch": "identity_mismatch",
+                "multiple_faces": "multiple_faces_detected",
+            }
+            AccessSession.objects.filter(id=access_session_id, tenant_id=tenant_id, revoked_at__isnull=True).update(
+                revoked_at=now,
+                revoked_reason=revoked_reasons[category],
+            )
+        elif action == "pause":
             secure_session.status = SecureEvaluationSession.Status.PAUSED
             secure_session.pause_reason = category
-            secure_session.paused_at = timezone.now()
+            secure_session.paused_at = now
         secure_session.version += 1
         secure_session.save()
     if secure_session and action == "pause":
@@ -888,11 +919,103 @@ def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id
             tenant_id=tenant_id,
             category="secure_evaluation",
             severity=severity,
-            title="Secure evaluation session paused",
+            title="Secure evaluation session terminated" if terminal else "Secure evaluation session paused",
             details={"assignment_id": str(assignment.id), "session_id": str(secure_session.id), "event_id": str(item.id), "reason": category},
         )
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="remote_security.event.recorded", aggregate="PresenceSecurityEvent", aggregate_id=item.id, payload={"assignment_id": str(assignment.id), "category": category, "severity": severity, "response": action, "secure_session_id": str(secure_session.id) if secure_session else None})
     return item
+
+
+@transaction.atomic
+def monitor_face_presence(*, tenant_id, actor_id, secure_session, access_session, image_base64):
+    secure_session = SecureEvaluationSession.objects.select_for_update().filter(
+        id=secure_session.id,
+        tenant_id=tenant_id,
+        access_session_id=access_session.id,
+        status=SecureEvaluationSession.Status.ACTIVE,
+    ).select_related("assignment").first()
+    if not secure_session:
+        raise HttpError(409, "Secure evaluation session is not active")
+    try:
+        posture = analyze_face_posture(image_base64)
+        face_count = int(posture.get("face_count") or 0)
+    except FaceEngineError as exc:
+        raise HttpError(422, str(exc)) from exc
+
+    now = timezone.now()
+    inventory = dict(secure_session.device_inventory or {})
+    monitor = dict(inventory.get("face_monitor") or {})
+    previous_at = monitor.get("last_multiple_faces_at")
+    previous_time = None
+    if previous_at:
+        try:
+            previous_time = datetime.fromisoformat(previous_at)
+        except (TypeError, ValueError):
+            previous_time = None
+    consecutive = int(monitor.get("consecutive_multiple_faces") or 0)
+    if face_count > 1:
+        consecutive = consecutive + 1 if previous_time and now - previous_time <= timedelta(seconds=4) else 1
+        monitor["last_multiple_faces_at"] = now.isoformat()
+    else:
+        consecutive = 0
+        monitor.pop("last_multiple_faces_at", None)
+    previous_phone_at = monitor.get("last_phone_detected_at")
+    previous_phone_time = None
+    if previous_phone_at:
+        try:
+            previous_phone_time = datetime.fromisoformat(previous_phone_at)
+        except (TypeError, ValueError):
+            previous_phone_time = None
+    phone_detected = bool(posture.get("phone_detected") or posture.get("phone_call_suspected"))
+    consecutive_phone = int(monitor.get("consecutive_phone_detections") or 0)
+    if phone_detected:
+        consecutive_phone = consecutive_phone + 1 if previous_phone_time and now - previous_phone_time <= timedelta(seconds=4) else 1
+        monitor["last_phone_detected_at"] = now.isoformat()
+    else:
+        consecutive_phone = 0
+        monitor.pop("last_phone_detected_at", None)
+    monitor["consecutive_multiple_faces"] = consecutive
+    monitor["consecutive_phone_detections"] = consecutive_phone
+    monitor["last_face_count"] = face_count
+    monitor["last_face_aligned"] = bool(posture.get("face_aligned", face_count == 1))
+    monitor["last_phone_call_suspected"] = bool(posture.get("phone_call_suspected"))
+    monitor["last_posture_details"] = dict(posture.get("details") or {})
+    inventory["face_monitor"] = monitor
+    secure_session.device_inventory = inventory
+    secure_session.save(update_fields=["device_inventory", "updated_at"])
+
+    event = None
+    if consecutive >= 3:
+        event = _create_security_event(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            assignment=secure_session.assignment,
+            access_session_id=access_session.id,
+            category="multiple_faces",
+            severity="critical",
+            device_fingerprint=secure_session.device_fingerprint,
+            session_fingerprint=secure_session.session_fingerprint,
+            details={"face_count": face_count, "consecutive_checks": consecutive, "detection_window_seconds": 4},
+            secure_session=secure_session,
+        )
+    elif consecutive_phone >= 2:
+        event = _create_security_event(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            assignment=secure_session.assignment,
+            access_session_id=access_session.id,
+            category="phone_detected",
+            severity="critical",
+            device_fingerprint=secure_session.device_fingerprint,
+            session_fingerprint=secure_session.session_fingerprint,
+            details={
+                "consecutive_checks": consecutive_phone,
+                "detection_window_seconds": 4,
+                "confidence": (posture.get("details") or {}).get("phone_confidence", 0),
+            },
+            secure_session=secure_session,
+        )
+    return secure_session, face_count, consecutive, event, posture
 
 
 @transaction.atomic
@@ -906,11 +1029,15 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
         or device_inventory.get("video_inputs") < 1
     ):
         raise HttpError(409, "A working webcam is required")
+    if policy["camera_required"] and not preflight.get("face_ready"):
+        raise HttpError(409, "Open the webcam shutter and keep your face clearly visible")
     if policy["fullscreen_required"] and not preflight.get("fullscreen_active"):
         raise HttpError(409, "Fullscreen mode is required")
     screen_count = preflight.get("screen_count")
     if policy["single_screen_required"] and isinstance(screen_count, int) and screen_count > 1:
         raise HttpError(409, "Disconnect additional displays before evaluation")
+    if device_inventory.get("headphones_detected"):
+        raise HttpError(409, "Disconnect headphones, headsets, earbuds, and AirPods before evaluation")
     if len(session_fingerprint) != 64 or len(device_fingerprint) != 64:
         raise HttpError(422, "Secure device fingerprints are invalid")
     if policy["identity_verification_required"]:
@@ -1213,6 +1340,71 @@ def create_notification(*, tenant_id, actor_id, user_id, category, title, body, 
     item = NotificationDelivery.objects.create(tenant_id=tenant_id, user_id=user_id, category=category, title=title.strip(), body=body.strip(), severity=severity, channels=channels, mandatory_acknowledgement=mandatory_acknowledgement)
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="notifications.queued", aggregate="NotificationDelivery", aggregate_id=item.id, payload={"user_id": user_id, "channels": channels, "mandatory_acknowledgement": mandatory_acknowledgement})
     return item
+
+
+@transaction.atomic
+def request_evaluator_help(*, tenant_id, actor_id, evaluator, assignment_id, query):
+    assignment = Assignment.objects.select_for_update().select_related("script__paper").filter(
+        id=assignment_id,
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+        status__in=[Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS],
+    ).first()
+    if not assignment:
+        raise HttpError(404, "An active evaluation assignment was not found")
+    query = query.strip()
+    if len(query) < 10:
+        raise HttpError(422, "Describe the help you need in at least 10 characters")
+    if len(query) > 1000:
+        raise HttpError(422, "Help requests cannot exceed 1000 characters")
+
+    recipient_ids = list(
+        Membership.objects.filter(
+            institution__tenant_id=tenant_id,
+            role__in=[
+                Membership.Role.PLATFORM_ADMIN,
+                Membership.Role.UNIVERSITY_ADMIN,
+                Membership.Role.EXAM_CONTROLLER,
+            ],
+            is_active=True,
+        ).values_list("user_id", flat=True)
+    )
+    if not recipient_ids:
+        raise HttpError(409, "No live operations recipient is available")
+
+    title = f"SOS from {evaluator.display_name} · {assignment.script.script_code}"[:180]
+    body = (
+        f"{query}\n\nPaper {assignment.script.paper.code}. "
+        "Open Live monitoring and choose Request help for this evaluator."
+    )
+    notifications = [
+        create_notification(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            user_id=user_id,
+            category="evaluator_help",
+            title=title,
+            body=body,
+            severity="high",
+            channels=["in_app"],
+            mandatory_acknowledgement=True,
+        )
+        for user_id in dict.fromkeys(recipient_ids)
+    ]
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="evaluator_help.requested",
+        aggregate="Assignment",
+        aggregate_id=assignment.id,
+        payload={
+            "evaluator_id": str(evaluator.id),
+            "script": assignment.script.script_code,
+            "query": query,
+            "recipient_count": len(notifications),
+        },
+    )
+    return notifications
 
 
 @transaction.atomic

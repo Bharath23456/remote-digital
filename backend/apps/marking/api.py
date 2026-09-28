@@ -69,7 +69,7 @@ class TransitionIn(Schema):
 def _evaluator_context(request, assignment_id=None):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
     if not evaluator:
         raise HttpError(403, "Active evaluator profile not found")
     assignment = None

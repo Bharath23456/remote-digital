@@ -47,7 +47,7 @@ class ExtensionDecisionIn(Schema):
 def _evaluator_assignment(request, assignment_id):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
     assignment = Assignment.objects.filter(id=assignment_id, tenant_id=tenant_id, evaluator=evaluator).select_related("script__paper").first() if evaluator else None
     if not assignment:
         raise HttpError(404, "Assignment not found")
@@ -60,7 +60,7 @@ def catalog(request):
     tenant_id = membership.institution.tenant_id
     workflows = EvaluationWorkflow.objects.filter(tenant_id=tenant_id).select_related("assignment__script")
     if membership.role == Membership.Role.EVALUATOR:
-        workflows = workflows.filter(assignment__evaluator__email__iexact=request.auth.email)
+        workflows = workflows.filter(assignment__evaluator__user_id=request.auth.id)
     return {
         "workflows": [{"id": str(item.id), "assignment_id": str(item.assignment_id), "script": item.assignment.script.script_code, "state": item.state, "last_page": item.last_page, "expires_at": item.draft_expires_at.isoformat() if item.draft_expires_at else None, "version": item.version} for item in workflows[:1000]],
         "extensions": [{"id": str(item.id), "workflow_id": str(item.workflow_id), "status": item.status, "requested_until": item.requested_until.isoformat(), "reason": item.reason, "version": item.version} for item in EvaluationExtension.objects.filter(tenant_id=tenant_id, workflow__in=workflows)[:1000]],
@@ -83,7 +83,7 @@ def store_draft(request, assignment_id: str, payload: DraftIn):
 def submit(request, evaluation_id: str, payload: SubmitIn):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
     evaluation = Evaluation.objects.filter(id=evaluation_id, tenant_id=tenant_id, assignment__evaluator=evaluator).select_related("assignment").first() if evaluator else None
     if not evaluation:
         raise HttpError(404, "Evaluation not found")

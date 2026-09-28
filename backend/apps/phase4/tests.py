@@ -40,6 +40,7 @@ from .models import (
     ModerationCase,
     ModerationPolicy,
     NotificationDelivery,
+    PresenceSecurityEvent,
     ProctoringReview,
     RecoveryDrill,
     RecoveryPlan,
@@ -229,7 +230,7 @@ class RemainingModulesTests(TestCase):
             "session_fingerprint": "a" * 64,
             "device_fingerprint": "b" * 64,
             "consent": True,
-            "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
+            "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1},
             "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
         }
         with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=False):
@@ -291,7 +292,7 @@ class RemainingModulesTests(TestCase):
                 "session_fingerprint": "a" * 64,
                 "device_fingerprint": "b" * 64,
                 "consent": True,
-                "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
+                "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1},
                 "device_inventory": {"video_inputs": 1, "audio_inputs": 1, "digest": "c" * 64},
             }),
             content_type="application/json",
@@ -317,6 +318,194 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(resumed.status_code, 200)
         self.assertEqual(resumed.json()["status"], "active")
 
+    @patch("apps.phase4.api.analyze_face_posture", return_value={"face_count": 0, "face_aligned": False, "phone_detected": False, "details": {}})
+    def test_closed_camera_shutter_blocks_paper_preflight(self, _analyze_face_posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "closed-shutter-test"}), content_type="application/json").status_code, 200)
+        preflight = client.post(
+            "/api/v1/phase4/remote-security/camera-preflight",
+            data=json.dumps({"image_base64": "data:image/jpeg;base64,frame"}),
+            content_type="application/json",
+        )
+        self.assertEqual(preflight.status_code, 409)
+        self.assertIn("shutter", preflight.json()["detail"].lower())
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            blocked = client.post(
+                "/api/v1/phase4/remote-security/sessions",
+                data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "4" * 64, "device_fingerprint": "5" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": False, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "6" * 64}}),
+                content_type="application/json",
+            )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertFalse(SecureEvaluationSession.objects.filter(assignment=assignment).exists())
+
+    def test_headphones_block_secure_session_start(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "headphones-preflight"}), content_type="application/json").status_code, 200)
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            blocked = client.post(
+                "/api/v1/phase4/remote-security/sessions",
+                data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "a" * 64, "device_fingerprint": "b" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": True, "headphone_devices": 1, "digest": "c" * 64}}),
+                content_type="application/json",
+            )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertIn("headphones", blocked.json()["detail"].lower())
+
+    @patch("apps.phase4.services.analyze_face_posture", return_value={"face_count": 2, "face_aligned": False, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_three_multi_face_frames_terminate_session_and_revoke_login(self, _extract_embedding, _enrollment_posture, _presence_posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "multi-face-test"}), content_type="application/json").status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
+        started = client.post(
+            "/api/v1/phase4/remote-security/sessions",
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "7" * 64, "device_fingerprint": "8" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "9" * 64}}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 200)
+        session_id = started.json()["id"]
+        access_session = AccessSession.objects.filter(user=evaluator.user, tenant_id=self.tenant_id, revoked_at__isnull=True).latest("created_at")
+
+        responses = [
+            client.post(
+                f"/api/v1/phase4/remote-security/sessions/{session_id}/face-presence",
+                data=json.dumps({"image_base64": "data:image/jpeg;base64,frame"}),
+                content_type="application/json",
+            )
+            for _ in range(3)
+        ]
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertFalse(responses[1].json()["terminated"])
+        self.assertTrue(responses[2].json()["terminated"])
+        session = SecureEvaluationSession.objects.get(id=session_id)
+        self.assertEqual(session.status, SecureEvaluationSession.Status.ABANDONED)
+        self.assertEqual(session.pause_reason, "multiple_faces")
+        access_session.refresh_from_db()
+        self.assertEqual(access_session.revoked_reason, "multiple_faces_detected")
+        self.assertIsNotNone(access_session.revoked_at)
+        self.assertTrue(PresenceSecurityEvent.objects.filter(details__secure_session_id=str(session_id), category="multiple_faces", severity="critical").exists())
+
+    @patch("apps.phase4.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": True, "phone_call_suspected": True, "details": {"phone_confidence": 0.86}})
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_two_phone_frames_terminate_session(self, _extract_embedding, _enrollment_posture, _presence_posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "phone-test"}), content_type="application/json").status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
+        started = client.post(
+            "/api/v1/phase4/remote-security/sessions",
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "1" * 64, "device_fingerprint": "2" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "3" * 64}}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 200)
+        session_id = started.json()["id"]
+        responses = [
+            client.post(
+                f"/api/v1/phase4/remote-security/sessions/{session_id}/face-presence",
+                data=json.dumps({"image_base64": "data:image/jpeg;base64,frame"}),
+                content_type="application/json",
+            )
+            for _ in range(2)
+        ]
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertIsNone(responses[0].json()["event_id"])
+        self.assertIsNotNone(responses[1].json()["event_id"])
+        self.assertTrue(responses[1].json()["terminated"])
+        self.assertEqual(responses[1].json()["termination_reason"], "phone_detected")
+        session = SecureEvaluationSession.objects.get(id=session_id)
+        self.assertEqual(session.status, SecureEvaluationSession.Status.ABANDONED)
+        self.assertEqual(session.pause_reason, "phone_detected")
+        access_session = AccessSession.objects.filter(user=evaluator.user, tenant_id=self.tenant_id).latest("created_at")
+        self.assertEqual(access_session.revoked_reason, "phone_detected")
+        self.assertIsNotNone(access_session.revoked_at)
+        self.assertTrue(PresenceSecurityEvent.objects.filter(details__secure_session_id=str(session_id), category="phone_detected", severity="critical").exists())
+
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_headphones_connected_during_session_terminate_login(self, _extract_embedding, _enrollment_posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "headphones-live"}), content_type="application/json").status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
+        started = client.post(
+            "/api/v1/phase4/remote-security/sessions",
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "4" * 64, "device_fingerprint": "5" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "6" * 64}}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 200)
+        session_id = started.json()["id"]
+        event = client.post(
+            "/api/v1/phase4/remote-security/events",
+            data=json.dumps({"assignment_id": str(assignment.id), "secure_session_id": session_id, "category": "headphones_detected", "severity": "critical", "device_fingerprint": "5" * 64, "session_fingerprint": "4" * 64, "details": {"headphone_devices": 1}}),
+            content_type="application/json",
+        )
+        self.assertEqual(event.status_code, 200)
+        self.assertEqual(event.json()["session"]["status"], "abandoned")
+        access_session = AccessSession.objects.filter(user=evaluator.user, tenant_id=self.tenant_id).latest("created_at")
+        self.assertEqual(access_session.revoked_reason, "headphones_detected")
+        self.assertIsNotNone(access_session.revoked_at)
+
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_two_confirmed_identity_mismatches_terminate_login(self, _extract_embedding, _enrollment_posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "identity-mismatch-live"}), content_type="application/json").status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
+        started = client.post(
+            "/api/v1/phase4/remote-security/sessions",
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "a" * 64, "device_fingerprint": "b" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "c" * 64}}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 200)
+        session_id = started.json()["id"]
+        event = client.post(
+            "/api/v1/phase4/remote-security/events",
+            data=json.dumps({"assignment_id": str(assignment.id), "secure_session_id": session_id, "category": "identity_mismatch", "severity": "critical", "device_fingerprint": "b" * 64, "session_fingerprint": "a" * 64, "details": {"consecutive_checks": 2}}),
+            content_type="application/json",
+        )
+        self.assertEqual(event.status_code, 200)
+        self.assertEqual(event.json()["session"]["status"], "abandoned")
+        self.assertEqual(event.json()["session"]["pause_reason"], "identity_mismatch")
+        access_session = AccessSession.objects.filter(user=evaluator.user, tenant_id=self.tenant_id).latest("created_at")
+        self.assertEqual(access_session.revoked_reason, "identity_mismatch")
+        self.assertIsNotNone(access_session.revoked_at)
+
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_external_media_device_change_terminates_login(self, _extract_embedding, _enrollment_posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "external-device-live"}), content_type="application/json").status_code, 200)
+        self.verify_identity_for_secure_session(evaluator, assignment)
+        started = client.post(
+            "/api/v1/phase4/remote-security/sessions",
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "f" * 64}}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 200)
+        event = client.post(
+            "/api/v1/phase4/remote-security/events",
+            data=json.dumps({"assignment_id": str(assignment.id), "secure_session_id": started.json()["id"], "category": "external_media_device", "severity": "critical", "device_fingerprint": "e" * 64, "session_fingerprint": "d" * 64, "details": {"connected_or_changed": True}}),
+            content_type="application/json",
+        )
+        self.assertEqual(event.status_code, 200)
+        self.assertEqual(event.json()["session"]["status"], "abandoned")
+        access_session = AccessSession.objects.filter(user=evaluator.user, tenant_id=self.tenant_id).latest("created_at")
+        self.assertEqual(access_session.revoked_reason, "external_media_device")
+        self.assertIsNotNone(access_session.revoked_at)
+
     @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
     def test_submit_recovers_previous_permission_failure_and_locks_result(self, _extract_embedding):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
@@ -326,7 +515,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "f" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "f" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)
@@ -384,6 +573,53 @@ class RemainingModulesTests(TestCase):
         item = notification_action(tenant_id=self.tenant_id, actor_id=self.admin.id, notification_id=item.id, expected_version=item.version, action="deliver")
         item = notification_action(tenant_id=self.tenant_id, actor_id=self.controller.id, notification_id=item.id, expected_version=item.version, action="acknowledge")
         self.assertEqual(item.status, NotificationDelivery.Status.ACKNOWLEDGED)
+
+    def test_evaluator_sos_notifies_live_operations_with_the_query(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = self.remote_support_assignment(evaluator, "SOS")
+        client = Client()
+        self.assertEqual(client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "evaluator-sos"}),
+            content_type="application/json",
+        ).status_code, 200)
+
+        response = client.post(
+            "/api/v1/phase4/remote-support/help-requests",
+            data=json.dumps({"assignment_id": str(assignment.id), "query": "The answer script image is too blurred to evaluate question three."}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "sent")
+        self.assertGreater(response.json()["recipient_count"], 0)
+        notification = NotificationDelivery.objects.filter(
+            tenant_id=self.tenant_id,
+            user_id=self.controller.id,
+            category="evaluator_help",
+        ).latest("created_at")
+        self.assertEqual(notification.severity, "high")
+        self.assertTrue(notification.mandatory_acknowledgement)
+        self.assertIn("too blurred", notification.body)
+        self.assertIn(assignment.script.script_code, notification.title)
+        operations_client = Client()
+        self.assertEqual(operations_client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": self.controller.email, "password": "ChangeMe123!", "device_id": "operations-sos"}),
+            content_type="application/json",
+        ).status_code, 200)
+        inbox = operations_client.get("/api/v1/auth/notifications")
+        self.assertEqual(inbox.status_code, 200)
+        self.assertTrue(any(item["id"] == str(notification.id) and "too blurred" in item["body"] for item in inbox.json()["items"]))
+        catalog = operations_client.get("/api/v1/phase4/catalog?section=operations")
+        self.assertEqual(catalog.status_code, 200)
+        self.assertTrue(any(item["id"] == str(notification.id) and "too blurred" in item["body"] for item in catalog.json()["notifications"]))
+        self.assertTrue(AuditEvent.objects.filter(
+            tenant_id=self.tenant_id,
+            aggregate_type="Assignment",
+            aggregate_id=assignment.id,
+            action="evaluator_help.requested",
+        ).exists())
 
     def test_remote_support_requires_consent_limits_commands_and_is_revocable(self):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")

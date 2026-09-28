@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   Circle,
   Clock,
   Columns2,
@@ -86,6 +87,23 @@ type Assignment = {
   due_at: string;
   version: number;
 };
+
+function EvaluationCountdown({ dueAt }: { dueAt: string }) {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    const update = () => setNow(Date.now());
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [dueAt]);
+  if (now === null) return null;
+  const ms = Math.max(0, new Date(dueAt).getTime() - now);
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  const value = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return <span className="viewer-timer"><Clock />{value}</span>;
+}
 type Page = {
   page_number: number;
   asset_id: string;
@@ -241,6 +259,13 @@ type ContinuityItem = {
   page: number;
   progress: number;
   savedAt: string;
+};
+type AllocationMoreStatus = {
+  eligible: boolean;
+  pending?: boolean;
+  reason: string;
+  total: number;
+  submitted: number;
 };
 const filters: { key: Filter; label: string }[] = [
   { key: "all", label: "Assigned" },
@@ -643,6 +668,13 @@ export function EvaluationWorkspace({
   const [securityNotice, setSecurityNotice] = useState("");
   const [pagesCollapsed, setPagesCollapsed] = useState(false);
   const [flaggingAssignmentId, setFlaggingAssignmentId] = useState<string | null>(null);
+  const [allocationMore, setAllocationMore] = useState<AllocationMoreStatus>({ eligible: false, reason: "Complete your current queue before requesting more.", total: 0, submitted: 0 });
+  const [allocatingMore, setAllocatingMore] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpQuery, setHelpQuery] = useState("");
+  const [helpSending, setHelpSending] = useState(false);
+  const [helpError, setHelpError] = useState("");
+  const [helpSent, setHelpSent] = useState(false);
   const viewerRef = useRef<HTMLDivElement>(null);
   const documentStageRef = useRef<HTMLElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -699,6 +731,7 @@ export function EvaluationWorkspace({
     try {
       const body = await api("/api/v1/allocation/catalog");
       setAssignments(body.assignments || []);
+      if (body.allocation_more) setAllocationMore(body.allocation_more);
       setError("");
     } catch (reason) {
       setError(
@@ -710,6 +743,31 @@ export function EvaluationWorkspace({
       setLoading(false);
     }
   }, []);
+  const refreshAssignment = useCallback(async (assignmentId: string) => {
+    const body = await api("/api/v1/allocation/catalog");
+    const fresh = (body.assignments || []).find((item: Assignment) => item.id === assignmentId);
+    if (!fresh) throw new Error("Assignment is no longer available");
+    setAssignments(body.assignments || []);
+    if (body.allocation_more) setAllocationMore(body.allocation_more);
+    return fresh as Assignment;
+  }, []);
+  async function requestMoreAssignments() {
+    if (!allocationMore.eligible || allocatingMore) return;
+    setAllocatingMore(true);
+    setError("");
+    setNotice("");
+    try {
+      const body = await api("/api/v1/allocation/allocate-more", { method: "POST" });
+      setNotice(body.message || "Request sent to the Allocation Engine.");
+      setFilter("all");
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The allocation request could not be sent");
+      await load();
+    } finally {
+      setAllocatingMore(false);
+    }
+  }
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
@@ -797,6 +855,7 @@ export function EvaluationWorkspace({
             ? { ...current, assignment: { ...current.assignment, ...updated } }
             : current,
         );
+        await load();
       } catch (reason) {
         setAssignments((current) =>
           current.map((candidate) =>
@@ -815,7 +874,7 @@ export function EvaluationWorkspace({
         setFlaggingAssignmentId(null);
       }
     },
-    [],
+    [load],
   );
   const syncQuestionFlagToAssignment = useCallback(
     async (flagged: boolean) => {
@@ -851,25 +910,25 @@ export function EvaluationWorkspace({
     setError("");
     let acquiredToken = "";
     try {
-      let current = item;
-      if (evaluatorMode && item.status !== "submitted") {
+      let current = evaluatorMode ? await refreshAssignment(item.id) : item;
+      if (evaluatorMode && current.status !== "submitted") {
         const lock = await api(
           `/api/v1/assignment-governance/assignments/${item.id}/lock`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ version: item.version }),
+            body: JSON.stringify({ version: current.version }),
           },
         );
         acquiredToken = lock.token;
       }
-      if (item.status !== "submitted")
+      if (current.status !== "submitted")
         current = await api(
           `/api/v1/allocation/assignments/${item.id}/action`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ version: item.version, action: "start" }),
+            body: JSON.stringify({ version: current.version, action: "start" }),
           },
         );
       if (evaluatorMode) {
@@ -938,6 +997,35 @@ export function EvaluationWorkspace({
     } catch {
       /* Security controller displays the actionable reason. */
     }
+  }
+  async function submitHelpRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!manifest || helpQuery.trim().length < 10) return;
+    setHelpSending(true);
+    setHelpError("");
+    try {
+      await api("/api/v1/phase4/remote-support/help-requests", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assignment_id: manifest.assignment.id,
+          query: helpQuery.trim(),
+        }),
+      });
+      setHelpSent(true);
+      setHelpQuery("");
+    } catch (reason) {
+      setHelpError(reason instanceof Error ? reason.message : "Your help request could not be sent");
+    } finally {
+      setHelpSending(false);
+    }
+  }
+  function closeHelpRequest() {
+    if (helpSending) return;
+    setHelpOpen(false);
+    setHelpQuery("");
+    setHelpError("");
+    setHelpSent(false);
   }
   async function cancelPreflight() {
     setPendingAssignment(null);
@@ -1715,28 +1803,6 @@ export function EvaluationWorkspace({
       .filter((item) => item.marked_for_review)
       .map((item) => item.question_id) || [],
   );
-  const [clockNow, setClockNow] = useState<number | null>(null);
-  useEffect(() => {
-    if (!manifest) {
-      setClockNow(null);
-      return;
-    }
-    const updateClock = () => setClockNow(Date.now());
-    updateClock();
-    const timer = window.setInterval(updateClock, 1000);
-    return () => window.clearInterval(timer);
-  }, [manifest?.assignment.due_at]);
-  const timeLeft = useMemo(() => {
-    if (!manifest || clockNow === null) return "--:--:--";
-    const ms = Math.max(
-      0,
-      new Date(manifest.assignment.due_at).getTime() - clockNow,
-    );
-    const h = Math.floor(ms / 3600000);
-    const m = Math.floor((ms % 3600000) / 60000);
-    const sec = Math.floor((ms % 60000) / 1000);
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  }, [clockNow, manifest]);
   const syncLabel = saving
     ? "Saving"
     : syncStatus === "queued"
@@ -1800,7 +1866,7 @@ export function EvaluationWorkspace({
       ? "Detected"
       : "None";
   const mobileLabel =
-    security.pauseReason === "phone_detected" ? "Detected" : "Not Detected";
+    security.monitoringStatus.mobile === "detected" ? "Detected" : "Not Detected";
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -1835,20 +1901,22 @@ export function EvaluationWorkspace({
           ADMIEZO · {manifest.assignment.script} · {securityCode || "SECURE"}
         </div>
         <header className="viewer-header evaluation-desk-header">
-          <button
-            className="icon-button"
-            title="Close viewer"
-            onClick={closeViewer}
-          >
-            <X />
-          </button>
-          <div className="viewer-title">
-            <div>
-              <strong>
-                {marking?.evaluation.id.slice(0, 12).toUpperCase() ||
-                  manifest.assignment.id.slice(0, 12).toUpperCase()}
-              </strong>
-              <span>{manifest.assignment.paper}</span>
+          <div className="viewer-identity">
+            <button
+              className="icon-button"
+              title="Close viewer"
+              onClick={closeViewer}
+            >
+              <X />
+            </button>
+            <div className="viewer-title">
+              <div>
+                <strong>
+                  {marking?.evaluation.id.slice(0, 12).toUpperCase() ||
+                    manifest.assignment.id.slice(0, 12).toUpperCase()}
+                </strong>
+                <span>{manifest.assignment.paper}</span>
+              </div>
             </div>
           </div>
           <div className="viewer-progress">
@@ -1859,71 +1927,84 @@ export function EvaluationWorkspace({
             </div>
             <small>{manifest.assignment.progress_percent}% reviewed</small>
           </div>
-          {(aiAssist?.enabled || aiAssist?.analysis) && (
-            <button
-              className="ai-assist-button"
-              title="Analyze this script with ADMIEZO AI Assistant"
-              onClick={() =>
-                aiAssist.analysis
-                  ? setAIPanel(true)
-                  : void requestAIAnalysis()
-              }
-              disabled={saving || !aiAssist.provider.configured}
-            >
-              <Sparkles />
-              AI analysis
-            </button>
-          )}
-          {evaluatorMode && <CameraPreview stream={security.stream} compact />}
-          <span className={`viewer-network ${online ? "online" : "offline"}`}>
-            {online ? <Wifi /> : <WifiOff />}
-            {online ? "Connected" : "Continuity"}
-          </span>
-          {evaluatorMode && (
-            <>
-              <span className="viewer-secure" title="Restricted secure session">
-                <ShieldAlert />
-                {securityCode || "Secure"}
-              </span>
-              {timeLeft !== "--:--:--" && (
-                <span className="viewer-timer">
-                  <Clock />
-                  {timeLeft}
+          <div className="viewer-header-actions">
+            {(aiAssist?.enabled || aiAssist?.analysis) && (
+              <button
+                className="ai-assist-button"
+                title="Analyze this script with ADMIEZO AI Assistant"
+                onClick={() =>
+                  aiAssist.analysis
+                    ? setAIPanel(true)
+                    : void requestAIAnalysis()
+                }
+                disabled={saving || !aiAssist.provider.configured}
+              >
+                <Sparkles />
+                AI analysis
+              </button>
+            )}
+            {evaluatorMode && <CameraPreview stream={security.stream} compact />}
+            <span className={`viewer-network ${online ? "online" : "offline"}`}>
+              {online ? <Wifi /> : <WifiOff />}
+              {online ? "Connected" : "Continuity"}
+            </span>
+            {evaluatorMode && (
+              <>
+                <span className="viewer-secure" title="Restricted secure session">
+                  <ShieldAlert />
+                  {securityCode || "Secure"}
                 </span>
-              )}
-            </>
-          )}
-          <button
-            className="icon-button"
-            title="Previous assigned script"
-            disabled={activeIndex <= 0}
-            onClick={() =>
-              void closeViewer().then(() =>
-                openAssignment(visible[activeIndex - 1]),
-              )
-            }
-          >
-            <ChevronLeft />
-          </button>
-          <button
-            className="icon-button"
-            title="Next assigned script"
-            disabled={activeIndex < 0 || activeIndex >= visible.length - 1}
-            onClick={() =>
-              void closeViewer().then(() =>
-                openAssignment(visible[activeIndex + 1]),
-              )
-            }
-          >
-            <ChevronRight />
-          </button>
-          <button
-            className="icon-button"
-            title="Full screen"
-            onClick={() => viewerRef.current?.requestFullscreen()}
-          >
-            <Expand />
-          </button>
+                <EvaluationCountdown dueAt={manifest.assignment.due_at} />
+              </>
+            )}
+            {evaluatorMode && (
+              <button
+                className="sos-help-button"
+                title="Request help from Live Operations"
+                onClick={() => {
+                  setHelpSent(false);
+                  setHelpError("");
+                  setHelpOpen(true);
+                }}
+              >
+                <CircleHelp />
+                <span>SOS Help</span>
+              </button>
+            )}
+            <div className="viewer-navigation">
+              <button
+                className="icon-button"
+                title="Previous assigned script"
+                disabled={activeIndex <= 0}
+                onClick={() =>
+                  void closeViewer().then(() =>
+                    openAssignment(visible[activeIndex - 1]),
+                  )
+                }
+              >
+                <ChevronLeft />
+              </button>
+              <button
+                className="icon-button"
+                title="Next assigned script"
+                disabled={activeIndex < 0 || activeIndex >= visible.length - 1}
+                onClick={() =>
+                  void closeViewer().then(() =>
+                    openAssignment(visible[activeIndex + 1]),
+                  )
+                }
+              >
+                <ChevronRight />
+              </button>
+              <button
+                className="icon-button"
+                title="Full screen"
+                onClick={() => viewerRef.current?.requestFullscreen()}
+              >
+                <Expand />
+              </button>
+            </div>
+          </div>
         </header>
         <div
           className="viewer-toolbar"
@@ -2201,6 +2282,39 @@ export function EvaluationWorkspace({
             onClose={() => setAIPanel(false)}
           />
         )}
+        {helpOpen && (
+          <div className="modal-backdrop">
+            <form className="modal-panel compact evaluator-help-modal" onSubmit={submitHelpRequest} role="dialog" aria-modal="true" aria-labelledby="evaluator-help-title">
+              <header className="modal-header">
+                <div>
+                  <h2 id="evaluator-help-title">Request help</h2>
+                  <p>Your query will alert the Live Operations team immediately.</p>
+                </div>
+                <button type="button" className="icon-button" title="Close help request" onClick={closeHelpRequest} disabled={helpSending}><X /></button>
+              </header>
+              {helpSent ? (
+                <div className="evaluator-help-success" role="status">
+                  <Check />
+                  <div><strong>Help request sent</strong><p>Live Operations has been notified and can start an assistance session for this script.</p></div>
+                </div>
+              ) : (
+                <div className="evaluator-help-body">
+                  <div className="evaluator-help-context"><strong>{manifest.assignment.script}</strong><span>{manifest.assignment.paper}</span></div>
+                  <label className="field">
+                    <span>What do you need help with?</span>
+                    <textarea autoFocus minLength={10} maxLength={1000} value={helpQuery} onChange={(event) => setHelpQuery(event.target.value)} placeholder="Describe the issue or question for the operations team" required />
+                    <small>{helpQuery.trim().length}/1000 characters</small>
+                  </label>
+                  {helpError && <div className="form-error" role="alert">{helpError}</div>}
+                </div>
+              )}
+              <footer className="modal-footer">
+                <button type="button" className="secondary-button" onClick={closeHelpRequest} disabled={helpSending}>{helpSent ? "Close" : "Cancel"}</button>
+                {!helpSent && <button className="primary-button" disabled={helpSending || helpQuery.trim().length < 10}><CircleHelp />{helpSending ? "Sending…" : "Send help request"}</button>}
+              </footer>
+            </form>
+          </div>
+        )}
         <footer className="evaluation-bottom-bar">
           <button
             className="secondary-button"
@@ -2303,32 +2417,45 @@ export function EvaluationWorkspace({
             </button>
           ))}
         </div>
-        {assignments.some(
-          (item) =>
-            item.last_opened_at && item.status !== "submitted" && !item.locked,
-        ) && (
-          <button
-            className="primary-button"
-            onClick={() => {
-              const resume = assignments
-                .filter(
-                  (item) =>
-                    item.last_opened_at &&
-                    item.status !== "submitted" &&
-                    !item.locked,
-                )
-                .sort((a, b) =>
-                  String(b.last_opened_at).localeCompare(
-                    String(a.last_opened_at),
-                  ),
-                )[0];
-              if (resume) void openAssignment(resume);
-            }}
-          >
-            <Eye />
-            Resume last script
-          </button>
-        )}
+        <div className="header-actions evaluation-queue-actions">
+          {evaluatorMode && (
+            <button
+              className="secondary-button allocate-more-button"
+              title={allocationMore.reason}
+              disabled={!allocationMore.eligible || allocatingMore || loading}
+              onClick={() => void requestMoreAssignments()}
+            >
+              {allocatingMore ? <RefreshCw className="spin" /> : <Plus />}
+              {allocatingMore ? "Checking availability…" : allocationMore.pending ? "Retry Allocate More" : "Allocate More"}
+            </button>
+          )}
+          {assignments.some(
+            (item) =>
+              item.last_opened_at && item.status !== "submitted" && !item.locked,
+          ) && (
+            <button
+              className="primary-button"
+              onClick={() => {
+                const resume = assignments
+                  .filter(
+                    (item) =>
+                      item.last_opened_at &&
+                      item.status !== "submitted" &&
+                      !item.locked,
+                  )
+                  .sort((a, b) =>
+                    String(b.last_opened_at).localeCompare(
+                      String(a.last_opened_at),
+                    ),
+                  )[0];
+                if (resume) void openAssignment(resume);
+              }}
+            >
+              <Eye />
+              Resume last script
+            </button>
+          )}
+        </div>
       </div>
       {notice && (
         <div className="success-banner">

@@ -16,6 +16,7 @@ from apps.core.models import AuditEvent, OutboxEvent
 from apps.core.services import record_event
 from apps.custody.models import CustodyEvent, Script
 from apps.evaluators.models import Evaluator
+from apps.evaluators.face_engine import FaceEngineError, analyze_face_posture
 from apps.marking.models import Evaluation
 from apps.repository.models import ScriptAsset
 from apps.repository.storage import read_object_metadata, signed_object_url
@@ -77,6 +78,7 @@ from .services import (
     finish_secure_evaluation_session,
     heartbeat_secure_evaluation_session,
     monitoring_snapshot,
+    monitor_face_presence,
     notification_action,
     acknowledge_remote_support_command,
     productivity_snapshot,
@@ -85,6 +87,7 @@ from .services import (
     record_presence_event,
     resume_secure_evaluation_session,
     request_authorization,
+    request_evaluator_help,
     review_completion,
     sample_moderation_cases,
     save_moderation_policy,
@@ -204,6 +207,11 @@ class RemoteSupportRequestIn(Schema):
     reason: str
 
 
+class EvaluatorHelpRequestIn(Schema):
+    assignment_id: str
+    query: str
+
+
 class RemoteSupportDecisionIn(Schema):
     version: int
     approve: bool
@@ -216,6 +224,10 @@ class RemoteSupportCommandIn(Schema):
 class RemoteSupportCommandAckIn(Schema):
     applied: bool
     result: str = ""
+
+
+class FacePresenceIn(Schema):
+    image_base64: str
 
 
 class EvidenceIntentIn(Schema):
@@ -463,7 +475,7 @@ def _official_portal_context(request, required_scope):
 def _secure_evaluator_context(request, assignment_id=None):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
     assignment = None
     if assignment_id and evaluator:
         assignment = Assignment.objects.filter(id=assignment_id, tenant_id=tenant_id, evaluator=evaluator).first()
@@ -601,7 +613,7 @@ def catalog(request, section: str = ""):
         "runtime_incidents": _serialize(RuntimeIncident.objects.filter(tenant_id=tenant_id).order_by("-detected_at")[:100], ["service", "category", "severity", "status", "retry_count", "detected_at", "recovered_at", "version"]),
         "issues": _serialize(OperationalIssue.objects.filter(tenant_id=tenant_id).order_by("priority", "sla_due_at")[:200], ["issue_type", "title", "classification", "priority", "status", "owner_id", "sla_due_at", "resolution", "resolution_locked", "version"]),
         "knowledge": _serialize(KnowledgeArticle.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["title", "category", "issue_id", "is_global", "version"]),
-        "notifications": _serialize(NotificationDelivery.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["user_id", "category", "title", "severity", "channels", "status", "mandatory_acknowledgement", "attempt_count", "version"]),
+        "notifications": _serialize(NotificationDelivery.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:200], ["user_id", "category", "title", "body", "severity", "channels", "status", "mandatory_acknowledgement", "attempt_count", "created_at", "version"]),
         "centres": _serialize(CentreProfile.objects.filter(tenant_id=tenant_id), ["code", "name", "location", "capacity", "workstation_count", "status", "version"]),
         "readiness": _serialize(CentreReadiness.objects.filter(tenant_id=tenant_id).order_by("-created_at")[:100], ["centre_id", "decision", "scanner_ready", "workstation_ready", "network_ready", "power_ready", "secure_lan_ready", "operators_ready", "notes"]),
         "camps": _serialize(EvaluationCamp.objects.filter(tenant_id=tenant_id), ["centre_id", "session_id", "name", "starts_at", "ends_at", "status", "performance", "version"]),
@@ -656,6 +668,23 @@ def remote_support_inbox(request):
         status__in=[RemoteSupportSession.Status.REQUESTED, RemoteSupportSession.Status.ACTIVE],
     ).select_related("assignment__script__paper", "evaluator").prefetch_related("commands").order_by("-created_at").first()
     return {"session": _remote_support_data(item, include_commands=True) if item else None}
+
+
+@router.post("/remote-support/help-requests")
+def create_evaluator_help_request(request, payload: EvaluatorHelpRequestIn):
+    membership, evaluator, assignment = _secure_evaluator_context(request, payload.assignment_id)
+    notifications = request_evaluator_help(
+        tenant_id=membership.institution.tenant_id,
+        actor_id=request.auth.id,
+        evaluator=evaluator,
+        assignment_id=assignment.id,
+        query=payload.query,
+    )
+    return {
+        "status": "sent",
+        "recipient_count": len(notifications),
+        "notification_ids": [str(item.id) for item in notifications],
+    }
 
 
 @router.get("/remote-support/sessions")
@@ -842,6 +871,21 @@ def secure_evaluation_policy(request):
     return security_policy_snapshot(membership.institution.tenant_id)
 
 
+@router.post("/remote-security/camera-preflight")
+def secure_evaluation_camera_preflight(request, payload: FacePresenceIn):
+    _secure_evaluator_context(request)
+    try:
+        posture = analyze_face_posture(payload.image_base64)
+        face_count = int(posture.get("face_count") or 0)
+    except FaceEngineError as exc:
+        raise HttpError(422, str(exc)) from exc
+    if face_count == 0:
+        raise HttpError(409, "Open the webcam shutter and keep your face clearly visible")
+    if face_count > 1:
+        raise HttpError(409, "Only the evaluator may be visible before opening the paper")
+    return {"camera_ready": True, "face_ready": bool(posture.get("face_aligned", True)), "face_count": face_count, "face_aligned": bool(posture.get("face_aligned", True)), "phone_detected": bool(posture.get("phone_detected")), "phone_call_suspected": bool(posture.get("phone_call_suspected")), "posture_details": posture.get("details", {})}
+
+
 @router.post("/remote-security/sessions")
 def secure_evaluation_start(request, payload: SecureSessionIn):
     membership, evaluator, assignment = _secure_evaluator_context(request, payload.assignment_id)
@@ -894,6 +938,39 @@ def secure_evaluation_heartbeat(request, session_id: str, payload: PostureIn):
     item, event = heartbeat_secure_evaluation_session(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, session_id=session_id, access_session=request.access_session, posture=payload.posture)
     item.refresh_from_db()
     return {"session": _secure_session_data(item), "action": event.action if event else ("pause" if item.status == SecureEvaluationSession.Status.PAUSED else "record")}
+
+
+@router.post("/remote-security/sessions/{session_id}/face-presence")
+def secure_evaluation_face_presence(request, session_id: str, payload: FacePresenceIn):
+    membership, evaluator, _ = _secure_evaluator_context(request)
+    tenant_id = membership.institution.tenant_id
+    secure_session = SecureEvaluationSession.objects.filter(
+        id=session_id,
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+        access_session_id=request.access_session.id,
+    ).first()
+    if not secure_session:
+        raise HttpError(404, "Secure evaluation session not found")
+    item, face_count, consecutive, event, posture = monitor_face_presence(
+        tenant_id=tenant_id,
+        actor_id=request.auth.id,
+        secure_session=secure_session,
+        access_session=request.access_session,
+        image_base64=payload.image_base64,
+    )
+    return {
+        "face_count": face_count,
+        "consecutive_multiple_faces": consecutive,
+        "terminated": item.status == SecureEvaluationSession.Status.ABANDONED,
+        "termination_reason": item.pause_reason if item.status == SecureEvaluationSession.Status.ABANDONED else "",
+        "event_id": str(event.id) if event else None,
+        "face_aligned": bool(posture.get("face_aligned", face_count == 1)),
+        "phone_detected": bool(posture.get("phone_detected")),
+        "phone_call_suspected": bool(posture.get("phone_call_suspected")),
+        "posture_details": posture.get("details", {}),
+        "session": _secure_session_data(item),
+    }
 
 
 @router.post("/remote-security/sessions/{session_id}/resume")
