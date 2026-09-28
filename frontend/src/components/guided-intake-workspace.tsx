@@ -15,6 +15,10 @@ type Bundle = { id: string; barcode: string; qr_value: string; source_centre: st
 type PrintableLabel = { kind: "Packet" | "Bundle"; code: string; college: string; centre: string; detail: string };
 
 const root = "/api/v1/receiving/guided";
+const centreAssignmentErrors = new Set([
+  "Assign this user to an active centre in Access governance before continuing",
+  "The assigned centre is not active; update it in Access governance before continuing",
+]);
 
 async function api(path: string, init?: RequestInit) {
   const response = await csrfFetch(path, init);
@@ -76,7 +80,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         setCollegeId((current) => current || preparation.colleges?.[0]?.id || "");
         if (intakeResult.status === "fulfilled") setBundles(intakeResult.value.bundles || []);
         const setupError = preparation.centre_error || (intakeResult.status === "rejected" ? intakeResult.reason?.message : "");
-        setError(setupError || "");
+        setError(preparation.centre && centreAssignmentErrors.has(setupError) ? "" : setupError || "");
       } else {
         const intake = await api(`${root}/catalog`);
         if (stage !== "digitization") setBundles(intake.bundles || []);

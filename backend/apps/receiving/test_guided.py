@@ -201,6 +201,8 @@ class GuidedIntakeTests(TestCase):
     def test_prepared_packets_are_saved_then_bundled_for_selected_college(self):
         catalog = self.client.get("/api/v1/receiving/guided/preparation")
         self.assertEqual(catalog.status_code, 200, catalog.content)
+        self.assertIsNone(catalog.json()["centre_error"])
+        self.assertEqual(catalog.json()["centre"]["id"], str(self.centre.id))
         self.assertIn(str(self.college.id), {item["id"] for item in catalog.json()["colleges"]})
         prepared = self.post("/api/v1/receiving/guided/prepared-packets", {
             "barcode": "PKT-PREP-001",
