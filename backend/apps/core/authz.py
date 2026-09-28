@@ -67,13 +67,22 @@ def require_step_up(request):
 
 def require_secure_evaluation_session(request, assignment, *, allow_paused=False):
     from apps.phase4.models import SecureEvaluationSession
+    from apps.phase4.services import expire_secure_evaluation_session, secure_evaluation_session_timed_out
 
-    other_session = SecureEvaluationSession.objects.select_related("assignment", "assignment__script").filter(
+    other_sessions = SecureEvaluationSession.objects.select_related("assignment", "assignment__script").filter(
         tenant_id=assignment.tenant_id,
         evaluator=assignment.evaluator,
         status__in=[SecureEvaluationSession.Status.ACTIVE, SecureEvaluationSession.Status.PAUSED],
-    ).exclude(assignment=assignment).order_by("-started_at").first()
-    if other_session:
+    ).exclude(assignment=assignment).order_by("-started_at")
+    for other_session in other_sessions:
+        if secure_evaluation_session_timed_out(other_session):
+            expire_secure_evaluation_session(
+                tenant_id=assignment.tenant_id,
+                actor_id=request.auth.id,
+                session_id=other_session.id,
+                access_session_id=other_session.access_session_id,
+            )
+            continue
         script_code = getattr(other_session.assignment.script, "script_code", "")
         suffix = f" Current assignment: {script_code}." if script_code else ""
         raise HttpError(409, f"Finish or exit the current evaluation before opening another paper.{suffix}")
@@ -91,4 +100,12 @@ def require_secure_evaluation_session(request, assignment, *, allow_paused=False
     ).first()
     if not secure_session:
         raise HttpError(423, "An active secure evaluation session is required")
+    if secure_evaluation_session_timed_out(secure_session):
+        expire_secure_evaluation_session(
+            tenant_id=assignment.tenant_id,
+            actor_id=request.auth.id,
+            session_id=secure_session.id,
+            access_session_id=request.access_session.id,
+        )
+        raise HttpError(423, "Secure evaluation session has expired")
     return secure_session

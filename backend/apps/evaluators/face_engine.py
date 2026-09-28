@@ -107,8 +107,8 @@ def _detect_mobile_phone(image):
                 continue
             class_id = int(np.argmax(scores))
             objectness = float(detection[4])
-            confidence = float(scores[class_id])
-            if class_id != 67 or objectness < 0.05 or confidence < 0.20:
+            confidence = objectness * float(scores[class_id])
+            if class_id != 67 or confidence < 0.15:
                 continue
             center_x, center_y, box_width, box_height = detection[:4]
             pixel_width = int(float(box_width) * width)
@@ -122,7 +122,7 @@ def _detect_mobile_phone(image):
             confidences.append(confidence)
     if not boxes:
         return False, 0.0, []
-    indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.20, 0.4)
+    indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.15, 0.4)
     kept = [int(index) for index in np.array(indexes).flatten()] if len(indexes) else []
     detections = [
         {"box": boxes[index], "confidence": round(confidences[index], 3)}

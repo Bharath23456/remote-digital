@@ -332,6 +332,9 @@ class AllocationEngineTests(TestCase):
         self.assertEqual(available_retry.status_code, 200)
         self.assertEqual(available_retry.json()["status"], "allocated")
         self.assertEqual(available_retry.json()["allocated"], 1)
+        notification.refresh_from_db()
+        self.assertEqual(notification.status, NotificationDelivery.Status.ACKNOWLEDGED)
+        self.assertNotIn(str(notification.id), {item["id"] for item in admin_client.get("/api/v1/allocation/catalog").json()["allocation_requests"]})
 
         AuditEvent.objects.filter(action="allocation.evaluator.more_requested", aggregate_id=str(evaluator.id)).delete()
         Assignment.objects.filter(id=completed.id).update(is_flagged=True)

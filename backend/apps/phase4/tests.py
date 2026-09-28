@@ -67,6 +67,7 @@ from .services import (
     decide_remote_support,
     end_remote_support,
     expire_remote_support_sessions,
+    issue_secure_preflight_token,
     notification_action,
     acknowledge_remote_support_command,
     queue_handover,
@@ -219,6 +220,21 @@ class RemainingModulesTests(TestCase):
         access_session = AccessSession.objects.filter(user_id=evaluator.user_id, tenant_id=self.tenant_id, revoked_at__isnull=True).latest("created_at")
         verify_evaluator_access(tenant_id=self.tenant_id, actor_id=evaluator.user_id, evaluator=evaluator, assignment=assignment, access_session=access_session, capture=self.face_capture())
 
+    def secure_preflight_token(self, evaluator, assignment, *, camera_ready=True, face_ready=True):
+        access_session = AccessSession.objects.filter(
+            user_id=evaluator.user_id,
+            tenant_id=self.tenant_id,
+            revoked_at__isnull=True,
+        ).latest("created_at")
+        return issue_secure_preflight_token(
+            tenant_id=self.tenant_id,
+            evaluator_id=evaluator.id,
+            assignment_id=assignment.id,
+            access_session_id=access_session.id,
+            camera_ready=camera_ready,
+            face_ready=face_ready,
+        )
+
     def test_demo_face_bypass_requires_explicit_setting_and_keeps_secure_session(self):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
@@ -230,6 +246,7 @@ class RemainingModulesTests(TestCase):
             "session_fingerprint": "a" * 64,
             "device_fingerprint": "b" * 64,
             "consent": True,
+            "preflight_token": self.secure_preflight_token(evaluator, assignment),
             "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1},
             "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
         }
@@ -254,11 +271,16 @@ class RemainingModulesTests(TestCase):
             "session_fingerprint": "a" * 64,
             "device_fingerprint": "b" * 64,
             "consent": True,
+            "preflight_token": self.secure_preflight_token(evaluator, assignment),
             "preflight": {"camera_ready": True, "fullscreen_active": True, "screen_count": 1},
             "device_inventory": {"video_inputs": 1, "digest": "c" * 64},
         }
         with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
-            unavailable = {**base, "preflight": {**base["preflight"], "camera_ready": False}}
+            unavailable = {
+                **base,
+                "preflight_token": self.secure_preflight_token(evaluator, assignment, camera_ready=False),
+                "preflight": {**base["preflight"], "camera_ready": False},
+            }
             self.assertEqual(client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(unavailable), content_type="application/json").status_code, 409)
             no_camera = {**base, "device_inventory": {"video_inputs": 0, "digest": "c" * 64}}
             self.assertEqual(client.post("/api/v1/phase4/remote-security/sessions", data=json.dumps(no_camera), content_type="application/json").status_code, 409)
@@ -273,8 +295,9 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(item.status, WorkloadAction.Status.EXECUTED)
         self.assertTrue(OutboxEvent.objects.filter(topic="workload.action.executed", aggregate_id=str(item.id)).exists())
 
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
     @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
-    def test_secure_evaluation_session_pauses_and_creates_human_review(self, _extract_embedding):
+    def test_secure_evaluation_session_pauses_and_creates_human_review(self, _extract_embedding, _enrollment_posture):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
         client = Client()
@@ -292,6 +315,7 @@ class RemainingModulesTests(TestCase):
                 "session_fingerprint": "a" * 64,
                 "device_fingerprint": "b" * 64,
                 "consent": True,
+                "preflight_token": self.secure_preflight_token(evaluator, assignment),
                 "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1},
                 "device_inventory": {"video_inputs": 1, "audio_inputs": 1, "digest": "c" * 64},
             }),
@@ -310,9 +334,15 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(session.status, SecureEvaluationSession.Status.PAUSED)
         self.assertEqual(session.violation_count, 1)
         self.assertTrue(ProctoringReview.objects.filter(secure_session=session, event_id=event.json()["id"]).exists())
-        resumed = client.post(
+        missing_preflight = client.post(
             f"/api/v1/phase4/remote-security/sessions/{session_id}/resume",
             data=json.dumps({"posture": {"camera_active": True, "fullscreen_active": True, "screen_count": 1, "device_changed": False}}),
+            content_type="application/json",
+        )
+        self.assertEqual(missing_preflight.status_code, 409)
+        resumed = client.post(
+            f"/api/v1/phase4/remote-security/sessions/{session_id}/resume",
+            data=json.dumps({"posture": {"camera_active": True, "fullscreen_active": True, "screen_count": 1, "device_changed": False}, "preflight_token": self.secure_preflight_token(evaluator, assignment)}),
             content_type="application/json",
         )
         self.assertEqual(resumed.status_code, 200)
@@ -326,7 +356,7 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "closed-shutter-test"}), content_type="application/json").status_code, 200)
         preflight = client.post(
             "/api/v1/phase4/remote-security/camera-preflight",
-            data=json.dumps({"image_base64": "data:image/jpeg;base64,frame"}),
+            data=json.dumps({"assignment_id": str(assignment.id), "image_base64": "data:image/jpeg;base64,frame"}),
             content_type="application/json",
         )
         self.assertEqual(preflight.status_code, 409)
@@ -348,11 +378,43 @@ class RemainingModulesTests(TestCase):
         with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
             blocked = client.post(
                 "/api/v1/phase4/remote-security/sessions",
-                data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "a" * 64, "device_fingerprint": "b" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": True, "headphone_devices": 1, "digest": "c" * 64}}),
+                data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "a" * 64, "device_fingerprint": "b" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": True, "headphone_devices": 1, "digest": "c" * 64}}),
                 content_type="application/json",
             )
         self.assertEqual(blocked.status_code, 409)
         self.assertIn("headphones", blocked.json()["detail"].lower())
+
+    def test_missing_server_face_presence_pauses_active_session(self):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
+        client = Client()
+        self.assertEqual(client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "presence-timeout"}),
+            content_type="application/json",
+        ).status_code, 200)
+        with override_settings(DEMO_SKIP_EVALUATOR_FACE_VERIFICATION=True):
+            started = client.post(
+                "/api/v1/phase4/remote-security/sessions",
+                data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "1" * 64, "device_fingerprint": "2" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "3" * 64}}),
+                content_type="application/json",
+            )
+        self.assertEqual(started.status_code, 200)
+        secure_session = SecureEvaluationSession.objects.get(id=started.json()["id"])
+        inventory = dict(secure_session.device_inventory)
+        inventory["face_monitor"] = {"last_presence_at": (timezone.now() - timedelta(minutes=1)).isoformat()}
+        secure_session.device_inventory = inventory
+        secure_session.save(update_fields=["device_inventory", "updated_at"])
+        heartbeat = client.post(
+            f"/api/v1/phase4/remote-security/sessions/{secure_session.id}/heartbeat",
+            data=json.dumps({"posture": {"camera_active": True, "fullscreen_active": True, "screen_count": 1, "device_changed": False}}),
+            content_type="application/json",
+        )
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(heartbeat.json()["action"], "pause")
+        secure_session.refresh_from_db()
+        self.assertEqual(secure_session.status, SecureEvaluationSession.Status.PAUSED)
+        self.assertEqual(secure_session.pause_reason, "camera_stopped")
 
     @patch("apps.phase4.services.analyze_face_posture", return_value={"face_count": 2, "face_aligned": False, "phone_detected": False, "details": {}})
     @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
@@ -365,7 +427,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "7" * 64, "device_fingerprint": "8" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "9" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "7" * 64, "device_fingerprint": "8" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "9" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)
@@ -402,7 +464,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "1" * 64, "device_fingerprint": "2" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "3" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "1" * 64, "device_fingerprint": "2" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "3" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)
@@ -438,7 +500,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "4" * 64, "device_fingerprint": "5" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "6" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "4" * 64, "device_fingerprint": "5" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "6" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)
@@ -464,7 +526,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "a" * 64, "device_fingerprint": "b" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "c" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "a" * 64, "device_fingerprint": "b" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "c" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)
@@ -491,7 +553,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "f" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "headphones_detected": False, "digest": "f" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)
@@ -506,8 +568,9 @@ class RemainingModulesTests(TestCase):
         self.assertEqual(access_session.revoked_reason, "external_media_device")
         self.assertIsNotNone(access_session.revoked_at)
 
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
     @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
-    def test_submit_recovers_previous_permission_failure_and_locks_result(self, _extract_embedding):
+    def test_submit_recovers_previous_permission_failure_and_locks_result(self, _extract_embedding, _enrollment_posture):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=self.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
         client = Client()
@@ -515,7 +578,7 @@ class RemainingModulesTests(TestCase):
         self.verify_identity_for_secure_session(evaluator, assignment)
         started = client.post(
             "/api/v1/phase4/remote-security/sessions",
-            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "f" * 64}}),
+            data=json.dumps({"assignment_id": str(assignment.id), "session_fingerprint": "d" * 64, "device_fingerprint": "e" * 64, "consent": True, "preflight_token": self.secure_preflight_token(evaluator, assignment), "preflight": {"camera_ready": True, "face_ready": True, "fullscreen_active": True, "screen_count": 1}, "device_inventory": {"video_inputs": 1, "digest": "f" * 64}}),
             content_type="application/json",
         )
         self.assertEqual(started.status_code, 200)

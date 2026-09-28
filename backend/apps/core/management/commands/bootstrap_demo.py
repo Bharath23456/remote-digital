@@ -37,7 +37,6 @@ from apps.receiving.models import Dispatch, Packet, ReceivingException
 from apps.repository.models import ScriptAsset
 from apps.rubrics.models import InstructionAcknowledgement, MarkingScheme, RubricCriterion
 from apps.rubrics.services import content_digest
-from apps.security.models import SecurityPolicy
 from apps.scan_processing.models import ProcessingProfile, ProcessingRun
 from apps.scanning.models import ScanBatch, ScanJob, ScannerDevice
 from apps.tenancy.models import Institution, Membership, TenantAccount, TenantDomain
@@ -57,15 +56,9 @@ class Command(BaseCommand):
             user.save()
         institution, _ = Institution.objects.get_or_create(
             code="northbridge-university",
-            defaults={"name": "Northbridge University", "kind": Institution.Kind.UNIVERSITY, "policy": {"mfa_required": False, "session_minutes": 30}},
+            defaults={"name": "Northbridge University", "kind": Institution.Kind.UNIVERSITY, "policy": {"mfa_required": True, "session_minutes": 30}},
         )
         tenant_id = institution.tenant_id
-        institution_policy = dict(institution.policy or {})
-        if institution_policy.get("mfa_required") is not False:
-            institution_policy["mfa_required"] = False
-            institution.policy = institution_policy
-            institution.save(update_fields=["policy", "updated_at"])
-        SecurityPolicy.objects.update_or_create(tenant_id=tenant_id, defaults={"require_mfa": False})
         account, _ = TenantAccount.objects.get_or_create(
             root_institution=institution,
             defaults={"slug": "northbridge", "status": TenantAccount.Status.ACTIVE, "plan": TenantAccount.Plan.ENTERPRISE, "enabled_modules": DEFAULT_MODULES},

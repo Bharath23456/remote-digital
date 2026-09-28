@@ -80,6 +80,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         setCurrentCentre(preparation.centre || null);
         setCollegeId((current) => current || preparation.colleges?.[0]?.id || "");
         if (intakeResult.status === "fulfilled") setBundles(intakeResult.value.bundles || []);
+        else setBundles([]);
         const intakeError = intakeResult.status === "rejected" ? intakeResult.reason?.message || "Intake could not be loaded" : "";
         setError(centreAssignmentErrors.has(intakeError) ? "" : intakeError);
       } else {
@@ -269,7 +270,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
               </div>
               {bookletCodes.length ? <div className="booklet-code-list">{bookletCodes.map((code, index) => <div key={code}><span>{index + 1}</span><strong>{code}</strong><button type="button" className="icon-button" title={`Remove ${code}`} onClick={() => setBookletCodes((current) => current.filter((item) => item !== code))}><X /></button></div>)}</div> : <div className="empty-state compact">No booklet QR codes scanned for this packet.</div>}
             </div>
-            <footer className="modal-footer"><button type="submit" className="primary-button" disabled={busy || !colleges.length}>{busy ? "Generating packet..." : "Create packet and QR"}<PackagePlus /></button></footer>
+            <footer className="modal-footer"><button type="submit" className="primary-button" disabled={busy || !currentCentre || !colleges.length}>{busy ? "Generating packet..." : "Create packet and QR"}<PackagePlus /></button></footer>
           </form>
         </section>
         <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Ready packets</h2><p className="panel-subtitle">Saved packets can be grouped into a bundle in the next step.</p></div><button type="button" className="secondary-button" disabled={!readyPackets.length} onClick={() => setPreparationStep("bundle")}>Create bundle<ChevronRight /></button></header>

@@ -77,6 +77,7 @@ from .services import (
     expire_remote_support_sessions,
     finish_secure_evaluation_session,
     heartbeat_secure_evaluation_session,
+    issue_secure_preflight_token,
     monitoring_snapshot,
     monitor_face_presence,
     notification_action,
@@ -190,12 +191,14 @@ class SecureSessionIn(Schema):
     session_fingerprint: str
     device_fingerprint: str
     consent: bool
+    preflight_token: str = ""
     preflight: dict = Field(default_factory=dict)
     device_inventory: dict = Field(default_factory=dict)
 
 
 class PostureIn(Schema):
     posture: dict = Field(default_factory=dict)
+    preflight_token: str = ""
 
 
 class SecureSessionFinishIn(Schema):
@@ -228,6 +231,10 @@ class RemoteSupportCommandAckIn(Schema):
 
 class FacePresenceIn(Schema):
     image_base64: str
+
+
+class CameraPreflightIn(FacePresenceIn):
+    assignment_id: str
 
 
 class EvidenceIntentIn(Schema):
@@ -872,8 +879,8 @@ def secure_evaluation_policy(request):
 
 
 @router.post("/remote-security/camera-preflight")
-def secure_evaluation_camera_preflight(request, payload: FacePresenceIn):
-    _secure_evaluator_context(request)
+def secure_evaluation_camera_preflight(request, payload: CameraPreflightIn):
+    membership, evaluator, assignment = _secure_evaluator_context(request, payload.assignment_id)
     try:
         posture = analyze_face_posture(payload.image_base64)
         face_count = int(posture.get("face_count") or 0)
@@ -883,7 +890,24 @@ def secure_evaluation_camera_preflight(request, payload: FacePresenceIn):
         raise HttpError(409, "Open the webcam shutter and keep your face clearly visible")
     if face_count > 1:
         raise HttpError(409, "Only the evaluator may be visible before opening the paper")
-    return {"camera_ready": True, "face_ready": bool(posture.get("face_aligned", True)), "face_count": face_count, "face_aligned": bool(posture.get("face_aligned", True)), "phone_detected": bool(posture.get("phone_detected")), "phone_call_suspected": bool(posture.get("phone_call_suspected")), "posture_details": posture.get("details", {})}
+    face_ready = bool(posture.get("face_aligned", True))
+    return {
+        "camera_ready": True,
+        "face_ready": face_ready,
+        "face_count": face_count,
+        "face_aligned": face_ready,
+        "phone_detected": bool(posture.get("phone_detected")),
+        "phone_call_suspected": bool(posture.get("phone_call_suspected")),
+        "posture_details": posture.get("details", {}),
+        "preflight_token": issue_secure_preflight_token(
+            tenant_id=membership.institution.tenant_id,
+            evaluator_id=evaluator.id,
+            assignment_id=assignment.id,
+            access_session_id=request.access_session.id,
+            camera_ready=True,
+            face_ready=face_ready,
+        ),
+    }
 
 
 @router.post("/remote-security/sessions")
@@ -909,8 +933,10 @@ def secure_evaluation_start(request, payload: SecureSessionIn):
         session_fingerprint=payload.session_fingerprint,
         device_fingerprint=payload.device_fingerprint,
         consent=payload.consent,
+        preflight_token=payload.preflight_token,
         preflight=payload.preflight,
         device_inventory=payload.device_inventory,
+        user_agent=request.headers.get("User-Agent", ""),
     )
     return _secure_session_data(item)
 
@@ -976,7 +1002,7 @@ def secure_evaluation_face_presence(request, session_id: str, payload: FacePrese
 @router.post("/remote-security/sessions/{session_id}/resume")
 def secure_evaluation_resume(request, session_id: str, payload: PostureIn):
     membership, _, _ = _secure_evaluator_context(request)
-    item = resume_secure_evaluation_session(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, session_id=session_id, access_session=request.access_session, posture=payload.posture)
+    item = resume_secure_evaluation_session(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, session_id=session_id, access_session=request.access_session, posture=payload.posture, preflight_token=payload.preflight_token)
     return _secure_session_data(item)
 
 
