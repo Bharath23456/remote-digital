@@ -54,7 +54,7 @@ def _assignment_for_request(request, assignment_id):
         tenant_id=membership.institution.tenant_id,
     ).select_related("script__paper__session", "evaluator")
     if membership.role == Membership.Role.EVALUATOR:
-        queryset = queryset.filter(evaluator__email__iexact=request.auth.email)
+        queryset = queryset.filter(evaluator__user_id=request.auth.id)
     assignment = queryset.first()
     if not assignment:
         raise HttpError(404, "Assignment not found")
@@ -67,7 +67,7 @@ def catalog(request):
     tenant_id = membership.institution.tenant_id
     assignments = Assignment.objects.filter(tenant_id=tenant_id).select_related("script__paper", "evaluator")
     if membership.role == Membership.Role.EVALUATOR:
-        assignments = assignments.filter(evaluator__email__iexact=request.auth.email)
+        assignments = assignments.filter(evaluator__user_id=request.auth.id)
     assignment_ids = assignments.values_list("id", flat=True)
     return {
         "evaluators": [{"id": str(item.id), "code": item.evaluator_code, "name": item.display_name, "status": item.status} for item in Evaluator.objects.filter(tenant_id=tenant_id).order_by("display_name")],

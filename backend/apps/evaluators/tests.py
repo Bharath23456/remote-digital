@@ -9,6 +9,7 @@ from apps.allocation.models import Assignment
 from apps.configuration.models import Subject
 from apps.core.models import AuditEvent, OutboxEvent
 from apps.evaluators.models import Evaluator, EvaluatorIdentityVerification, Expertise
+from apps.evaluators.services import EvaluatorError, require_recent_identity_verification
 from apps.tenancy.models import Membership
 
 
@@ -35,6 +36,20 @@ class EvaluatorManagementTests(TestCase):
             "model_version": "opencv-sface-v1",
             "device_fingerprint": "f" * 64,
         }
+
+    def test_one_login_cannot_link_to_two_evaluator_profiles(self):
+        response = self.post("/api/v1/evaluator-management", {
+            "evaluator_code": "EV-DUPLICATE-LOGIN",
+            "display_name": "Duplicate Evaluator",
+            "email": "evaluator1043@admiezo.local",
+            "institution_name": "Northbridge University",
+            "department": "Computer Science",
+            "designation": "Professor",
+            "qualification": "PhD",
+            "years_experience": 12,
+            "daily_capacity": 20,
+        })
+        self.assertEqual(response.status_code, 409)
 
     def test_profile_expertise_availability_and_lifecycle(self):
         response = self.post("/api/v1/evaluator-management", {
@@ -96,8 +111,9 @@ class EvaluatorManagementTests(TestCase):
         self.assertIn("assignments", work.json())
         self.assertNotIn("candidate_name", json.dumps(work.json()))
 
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
     @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
-    def test_face_template_enrollment_status_and_audit_do_not_expose_template(self, _extract_embedding):
+    def test_face_template_enrollment_status_and_audit_do_not_expose_template(self, _extract_embedding, _posture):
         membership = Membership.objects.get(user__username="admin@admiezo.local")
         evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, status=Evaluator.Status.ACTIVE).first()
         response = self.post(f"/api/v1/evaluator-management/{evaluator.id}/face/enroll", self.face_capture())
@@ -112,8 +128,9 @@ class EvaluatorManagementTests(TestCase):
         self.assertTrue(status.json()["enrolled"])
         self.assertTrue(AuditEvent.objects.filter(action="evaluator.face.enrolled", aggregate_id=body["id"]).exists())
 
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
     @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
-    def test_evaluator_face_verification_gates_assignment_access(self, _extract_embedding):
+    def test_evaluator_face_verification_gates_assignment_access(self, _extract_embedding, _posture):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=evaluator.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
         self.assertIsNotNone(assignment)
@@ -123,6 +140,9 @@ class EvaluatorManagementTests(TestCase):
         evaluator_client = Client()
         login = evaluator_client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "face-access-test"}), content_type="application/json")
         self.assertEqual(login.status_code, 200)
+        evaluator.email = "outdated-profile-email@example.edu"
+        evaluator.save(update_fields=["email"])
+        self.assertEqual(evaluator_client.get("/api/v1/evaluator-management/face/status").json()["evaluator_id"], str(evaluator.id))
         verified = evaluator_client.post(
             "/api/v1/evaluator-management/face/verify-access",
             data=json.dumps({"assignment_id": str(assignment.id), **self.face_capture()}),
@@ -130,10 +150,26 @@ class EvaluatorManagementTests(TestCase):
         )
         self.assertEqual(verified.status_code, 200)
         self.assertTrue(verified.json()["access_granted"])
+        self.assertEqual(verified.json()["evaluator_id"], str(evaluator.id))
+        self.assertEqual(verified.json()["evaluator_code"], evaluator.evaluator_code)
+        self.assertEqual(verified.json()["evaluator_name"], evaluator.display_name)
         self.assertTrue(EvaluatorIdentityVerification.objects.filter(evaluator=evaluator, assignment=assignment, access_granted=True).exists())
 
+        verification = EvaluatorIdentityVerification.objects.get(id=verified.json()["id"])
+        require_recent_identity_verification(
+            tenant_id=evaluator.tenant_id, evaluator=evaluator, assignment=assignment,
+            access_session=type("Session", (), {"id": verification.access_session_id})(),
+        )
+        self.assertEqual(self.post(f"/api/v1/evaluator-management/{evaluator.id}/face/enroll", self.face_capture()).status_code, 200)
+        with self.assertRaises(EvaluatorError):
+            require_recent_identity_verification(
+                tenant_id=evaluator.tenant_id, evaluator=evaluator, assignment=assignment,
+                access_session=type("Session", (), {"id": verification.access_session_id})(),
+            )
+
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
     @patch("apps.evaluators.services.extract_embedding", side_effect=[[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
-    def test_face_mismatch_is_denied_and_audited(self, _extract_embedding):
+    def test_face_mismatch_is_denied_and_audited(self, _extract_embedding, _posture):
         evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
         assignment = Assignment.objects.filter(tenant_id=evaluator.tenant_id, evaluator=evaluator).exclude(status=Assignment.Status.SUBMITTED).first()
         self.assertEqual(self.post(f"/api/v1/evaluator-management/{evaluator.id}/face/enroll", self.face_capture()).status_code, 200)
@@ -150,3 +186,20 @@ class EvaluatorManagementTests(TestCase):
         self.assertFalse(attempt.access_granted)
         self.assertEqual(attempt.failure_reason, "face_mismatch")
         self.assertTrue(AuditEvent.objects.filter(action="evaluator.face.denied", aggregate_id=str(attempt.id)).exists())
+
+    @patch("apps.evaluators.services.analyze_face_posture", return_value={"face_count": 1, "face_aligned": True, "phone_detected": False, "details": {}})
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_face_verification_rejects_another_evaluators_assignment(self, _extract_embedding, _posture):
+        evaluator = Evaluator.objects.get(email="evaluator1043@admiezo.local")
+        other_assignment = Assignment.objects.filter(tenant_id=evaluator.tenant_id).exclude(evaluator=evaluator).first()
+        self.assertIsNotNone(other_assignment)
+        self.assertEqual(self.post(f"/api/v1/evaluator-management/{evaluator.id}/face/enroll", self.face_capture()).status_code, 200)
+
+        evaluator_client = Client()
+        self.assertEqual(evaluator_client.post("/api/v1/auth/login", data=json.dumps({"email": evaluator.email, "password": "ChangeMe123!", "device_id": "face-ownership-test"}), content_type="application/json").status_code, 200)
+        denied = evaluator_client.post(
+            "/api/v1/evaluator-management/face/verify-access",
+            data=json.dumps({"assignment_id": str(other_assignment.id), **self.face_capture()}),
+            content_type="application/json",
+        )
+        self.assertEqual(denied.status_code, 404)

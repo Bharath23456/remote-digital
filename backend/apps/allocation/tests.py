@@ -12,6 +12,7 @@ from ninja.errors import HttpError
 
 from apps.configuration.models import Paper, Subject
 from apps.core.models import AuditEvent, OutboxEvent
+from apps.core.services import record_event
 from apps.custody.models import Script
 from apps.eligibility.models import EligibilityRecord
 from apps.evaluators.models import Evaluator, Expertise
@@ -182,3 +183,159 @@ class AllocationEngineTests(TestCase):
         self.assertEqual(body["policies"], [])
         self.assertEqual(body["runs"], [])
         self.assertNotIn("evaluator_id", body["assignments"][0])
+
+    def test_evaluator_self_allocates_or_notifies_engine_after_completing_queue(self):
+        user = User.objects.create_user(
+            username=f"allocate-more-{self._testMethodName}@example.test",
+            email=f"allocate-more-{self._testMethodName}@example.test",
+            password="ChangeMe123!",
+            first_name="Queue",
+            last_name="Evaluator",
+        )
+        institution = Membership.objects.filter(institution__tenant_id=self.paper.tenant_id).first().institution
+        Membership.objects.create(
+            user=user,
+            institution=institution,
+            role=Membership.Role.EVALUATOR,
+            enabled_modules=["evaluation"],
+        )
+        evaluator = Evaluator.objects.create(
+            tenant_id=self.paper.tenant_id,
+            user=user,
+            evaluator_code=f"MORE-{self.paper.code[-8:]}",
+            display_name="Queue Evaluator",
+            email=user.email,
+            institution_name="Independent University",
+            department="Evaluation",
+            designation="Evaluator",
+            qualification="Masters",
+            years_experience=8,
+            daily_capacity=2,
+            status=Evaluator.Status.ACTIVE,
+        )
+        Expertise.objects.create(
+            tenant_id=self.paper.tenant_id,
+            evaluator=evaluator,
+            subject=self.paper.subject,
+            level=5,
+            years_experience=8,
+            verified=True,
+        )
+        EligibilityRecord.objects.create(
+            tenant_id=self.paper.tenant_id,
+            evaluator=evaluator,
+            subject=self.paper.subject,
+            status=EligibilityRecord.Status.ELIGIBLE,
+            qualification_ok=True,
+            experience_ok=True,
+            institution_ok=True,
+            expertise_ok=True,
+            has_conflict=False,
+            is_debarred=False,
+            is_blacklisted=False,
+            expires_on=timezone.localdate() + timedelta(days=90),
+        )
+        completed = create_assignment(
+            tenant_id=self.paper.tenant_id,
+            actor_id=self.actor.id,
+            script=self.scripts[0],
+            evaluator=evaluator,
+            backup_evaluator=self.evaluators[0],
+            valuation_round=1,
+            due_at=timezone.now() + timedelta(days=3),
+            source="intelligent",
+            quality_score=None,
+            score_breakdown=None,
+        )
+        Assignment.objects.filter(id=completed.id).update(
+            status=Assignment.Status.SUBMITTED,
+            progress_percent=100,
+            submitted_at=timezone.now(),
+        )
+        record_event(
+            tenant_id=self.paper.tenant_id,
+            actor_id=user.id,
+            action="allocation.evaluator.more_requested",
+            aggregate="Evaluator",
+            aggregate_id=evaluator.id,
+            payload={"allocated": 2, "available_capacity": 2},
+        )
+
+        client = Client()
+        self.assertEqual(client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": user.email, "password": "ChangeMe123!", "device_id": "allocate-more-test"}),
+            content_type="application/json",
+        ).status_code, 200)
+        catalog = client.get("/api/v1/allocation/catalog")
+        self.assertEqual(catalog.status_code, 200)
+        self.assertTrue(catalog.json()["allocation_more"]["eligible"])
+        self.assertFalse(catalog.json()["allocation_more"]["pending"])
+
+        assignment_count = Assignment.objects.filter(tenant_id=self.paper.tenant_id, evaluator=evaluator).count()
+        response = client.post("/api/v1/allocation/allocate-more")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "allocated")
+        self.assertEqual(response.json()["allocated"], 2)
+        allocated_ids = {item["id"] for item in response.json()["assignments"]}
+        self.assertEqual(Assignment.objects.filter(id__in=allocated_ids, evaluator=evaluator, source="evaluator_request").count(), 2)
+        self.assertEqual(Assignment.objects.filter(tenant_id=self.paper.tenant_id, evaluator=evaluator).count(), assignment_count + 2)
+        self.assertEqual(NotificationDelivery.objects.filter(tenant_id=self.paper.tenant_id, category="allocation_request").count(), 0)
+
+        Assignment.objects.filter(id__in=allocated_ids).update(
+            status=Assignment.Status.SUBMITTED,
+            progress_percent=100,
+            submitted_at=timezone.now(),
+        )
+        allocated_script_ids = Assignment.objects.filter(id__in=allocated_ids).values_list("script_id", flat=True)
+        Script.objects.filter(tenant_id=self.paper.tenant_id).exclude(id__in=allocated_script_ids).exclude(id=completed.script_id).update(state=Script.State.ARCHIVED)
+
+        fallback_count = Assignment.objects.filter(tenant_id=self.paper.tenant_id, evaluator=evaluator).count()
+        response = client.post("/api/v1/allocation/allocate-more")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "requested")
+        self.assertGreater(response.json()["recipient_count"], 0)
+        self.assertEqual(Assignment.objects.filter(tenant_id=self.paper.tenant_id, evaluator=evaluator).count(), fallback_count)
+        self.assertTrue(AuditEvent.objects.filter(action="allocation.evaluator.more_requested", aggregate_id=str(evaluator.id)).exists())
+        notification = NotificationDelivery.objects.filter(
+            tenant_id=self.paper.tenant_id,
+            user_id=self.actor.id,
+            category="allocation_request",
+        ).latest("created_at")
+        self.assertEqual(notification.status, NotificationDelivery.Status.DELIVERED)
+        self.assertIn(evaluator.display_name, notification.title)
+
+        admin_client = Client()
+        self.assertEqual(admin_client.post(
+            "/api/v1/auth/login",
+            data=json.dumps({"email": "admin@admiezo.local", "password": "ChangeMe123!", "device_id": "allocation-request-admin"}),
+            content_type="application/json",
+        ).status_code, 200)
+        admin_catalog = admin_client.get("/api/v1/allocation/catalog")
+        self.assertEqual(admin_catalog.status_code, 200)
+        self.assertIn(str(notification.id), {item["id"] for item in admin_catalog.json()["allocation_requests"]})
+
+        notification_count = NotificationDelivery.objects.filter(tenant_id=self.paper.tenant_id, category="allocation_request").count()
+        retry = client.post("/api/v1/allocation/allocate-more")
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json()["status"], "requested")
+        self.assertEqual(retry.json()["recipient_count"], 0)
+        self.assertIn("remains pending", retry.json()["message"])
+        self.assertEqual(NotificationDelivery.objects.filter(tenant_id=self.paper.tenant_id, category="allocation_request").count(), notification_count)
+        pending_catalog = client.get("/api/v1/allocation/catalog").json()["allocation_more"]
+        self.assertTrue(pending_catalog["eligible"])
+        self.assertTrue(pending_catalog["pending"])
+
+        self.scripts[3].state = Script.State.STORED
+        self.scripts[3].save(update_fields=["state", "updated_at"])
+        available_retry = client.post("/api/v1/allocation/allocate-more")
+        self.assertEqual(available_retry.status_code, 200)
+        self.assertEqual(available_retry.json()["status"], "allocated")
+        self.assertEqual(available_retry.json()["allocated"], 1)
+
+        AuditEvent.objects.filter(action="allocation.evaluator.more_requested", aggregate_id=str(evaluator.id)).delete()
+        Assignment.objects.filter(id=completed.id).update(is_flagged=True)
+        flagged_catalog = client.get("/api/v1/allocation/catalog")
+        self.assertFalse(flagged_catalog.json()["allocation_more"]["eligible"])
+        self.assertIn("flagged", flagged_catalog.json()["allocation_more"]["reason"].lower())
+        self.assertEqual(client.post("/api/v1/allocation/allocate-more").status_code, 409)

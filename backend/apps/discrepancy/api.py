@@ -43,7 +43,7 @@ def catalog(request):
     tenant_id = membership.institution.tenant_id
     cases = DiscrepancyCase.objects.filter(tenant_id=tenant_id).select_related("comparison__script")
     if membership.role == Membership.Role.EVALUATOR:
-        evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email).first()
+        evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id).first()
         allowed_rounds = set(evaluator.assignments.values_list("script_id", "valuation_round")) if evaluator else set()
         clarifications = ExaminerClarification.objects.filter(tenant_id=tenant_id).select_related("case__comparison")
         own_clarifications = [item for item in clarifications if (item.case.comparison.script_id, item.valuation_round) in allowed_rounds]
@@ -77,7 +77,7 @@ def clarification(request, case_id: str, payload: ClarificationIn):
 @router.post("/clarifications/{clarification_id}/respond")
 def clarification_response(request, clarification_id: str, payload: ResponseIn):
     membership = require_roles(request, Membership.Role.EVALUATOR)
-    evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
     if not evaluator:
         raise HttpError(403, "Active evaluator profile not found")
     item = respond_clarification(tenant_id=membership.institution.tenant_id, actor_id=request.auth.id, clarification_id=clarification_id, evaluator=evaluator, response=payload.response)

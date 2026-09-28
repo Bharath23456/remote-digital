@@ -8,6 +8,8 @@ from django.db.models import Avg, Count
 from django.utils import timezone
 from ninja.errors import HttpError
 
+from apps.configuration.models import Paper
+from apps.core.models import AuditEvent
 from apps.core.services import record_event
 from apps.custody.models import Script
 from apps.custody.services import transition_script
@@ -76,6 +78,29 @@ def evaluator_work_history(*, tenant_id, evaluator_id):
         },
         "assignments": rows,
     }
+
+
+def evaluator_allocation_more_status(*, tenant_id, evaluator):
+    assignments = Assignment.objects.filter(tenant_id=tenant_id, evaluator=evaluator)
+    total = assignments.count()
+    submitted = assignments.filter(status=Assignment.Status.SUBMITTED).count()
+    if not total:
+        return {"eligible": False, "reason": "Complete at least one assigned script before requesting more.", "total": total, "submitted": submitted}
+    if assignments.filter(is_flagged=True).exists():
+        return {"eligible": False, "reason": "Clear every flagged script before requesting more.", "total": total, "submitted": submitted}
+    if assignments.exclude(status=Assignment.Status.SUBMITTED).exists():
+        return {"eligible": False, "reason": "Submit every assigned, in-progress, and draft script before requesting more.", "total": total, "submitted": submitted}
+    latest_assignment_at = assignments.order_by("-assigned_at").values_list("assigned_at", flat=True).first()
+    latest_request = AuditEvent.objects.filter(
+        tenant_id=tenant_id,
+        action="allocation.evaluator.more_requested",
+        aggregate_type="Evaluator",
+        aggregate_id=str(evaluator.id),
+    ).order_by("-occurred_at").first()
+    request_was_notified = bool(latest_request and (latest_request.payload or {}).get("recipient_count", 0))
+    if request_was_notified and latest_assignment_at and latest_request.occurred_at >= latest_assignment_at:
+        return {"eligible": True, "pending": True, "reason": "Your Allocation Engine request is pending. You can retry self-allocation when more scripts become available.", "total": total, "submitted": submitted}
+    return {"eligible": True, "pending": False, "reason": "Your queue is complete and ready for another allocation request.", "total": total, "submitted": submitted}
 
 
 def _policy_for(tenant_id, paper):
@@ -294,6 +319,157 @@ def create_assignment(*, tenant_id, actor_id, script, evaluator, backup_evaluato
     except IntegrityError as exc:
         raise HttpError(409, "This script and valuation round are already assigned") from exc
     return assignment
+
+
+@transaction.atomic
+def request_more_allocation(*, tenant_id, actor_id, evaluator_id):
+    evaluator = Evaluator.objects.select_for_update().filter(
+        id=evaluator_id,
+        tenant_id=tenant_id,
+        status=Evaluator.Status.ACTIVE,
+        is_system_ai=False,
+    ).first()
+    if not evaluator:
+        raise HttpError(404, "Active evaluator profile not found")
+    status = evaluator_allocation_more_status(tenant_id=tenant_id, evaluator=evaluator)
+    if not status["eligible"]:
+        raise HttpError(409, status["reason"])
+
+    active_load = Assignment.objects.filter(
+        tenant_id=tenant_id,
+        evaluator=evaluator,
+        status__in=ACTIVE_STATUSES,
+    ).count()
+    remaining_capacity = max(0, _availability_capacity(evaluator, timezone.localdate()) - active_load)
+    evaluator_loads = defaultdict(int, dict(
+        Assignment.objects.filter(tenant_id=tenant_id, status__in=ACTIVE_STATUSES)
+        .values_list("evaluator_id")
+        .annotate(count=Count("id"))
+    ))
+    created = []
+    scripts = Script.objects.filter(
+        tenant_id=tenant_id,
+        paper__status=Paper.Status.FROZEN,
+        state__in=[Script.State.STORED, Script.State.ASSIGNED, Script.State.SUBMITTED],
+    ).select_related("paper__subject", "packet__dispatch").prefetch_related(
+        "valuation_results", "assignments", "final_mark"
+    ).order_by("created_at")
+
+    for script in scripts.iterator(chunk_size=500):
+        if len(created) >= remaining_capacity:
+            break
+        valuation_round = next_valuation_round(script)
+        if valuation_round is None:
+            continue
+        policy = _policy_for(tenant_id, script.paper)
+        prior_ids = set(script.assignments.values_list("evaluator_id", flat=True))
+        score, breakdown, blockers = score_evaluator(
+            tenant_id=tenant_id,
+            evaluator=evaluator,
+            script=script,
+            policy=policy,
+            projected_load=active_load + len(created),
+            round_evaluator_ids=prior_ids,
+        )
+        if blockers:
+            continue
+
+        backup = None
+        if policy.backup_required:
+            backups = []
+            for candidate in Evaluator.objects.filter(
+                tenant_id=tenant_id,
+                status=Evaluator.Status.ACTIVE,
+                is_system_ai=False,
+            ).exclude(id=evaluator.id):
+                backup_score, _, backup_blockers = score_evaluator(
+                    tenant_id=tenant_id,
+                    evaluator=candidate,
+                    script=script,
+                    policy=policy,
+                    projected_load=evaluator_loads[candidate.id],
+                    round_evaluator_ids=prior_ids | {evaluator.id},
+                )
+                if not backup_blockers:
+                    backups.append((backup_score, -evaluator_loads[candidate.id], candidate))
+            if not backups:
+                continue
+            backup = max(backups, key=lambda item: (item[0], item[1]))[2]
+
+        try:
+            assignment = create_assignment(
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                script=script,
+                evaluator=evaluator,
+                backup_evaluator=backup,
+                valuation_round=valuation_round,
+                due_at=timezone.now() + timedelta(hours=policy.assignment_due_hours),
+                source="evaluator_request",
+                quality_score=score,
+                score_breakdown=breakdown,
+            )
+        except HttpError:
+            continue
+        created.append(assignment)
+        if backup:
+            evaluator_loads[backup.id] += 1
+
+    if created:
+        record_event(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            action="allocation.evaluator.more_self_allocated",
+            aggregate="Evaluator",
+            aggregate_id=evaluator.id,
+            payload={"allocated": len(created)},
+        )
+        return {"status": "allocated", "assignments": created, "notifications": []}
+
+    if status.get("pending"):
+        return {"status": "requested", "assignments": [], "notifications": [], "already_pending": True}
+
+    recipient_ids = list(Membership.objects.filter(
+        institution__tenant_id=tenant_id,
+        role__in=[Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN, Membership.Role.EXAM_CONTROLLER],
+        is_active=True,
+        user__is_active=True,
+    ).values_list("user_id", flat=True).distinct())
+    if not recipient_ids:
+        raise HttpError(409, "No allocation administrator is currently available to receive this request")
+
+    notifications = []
+    for user_id in recipient_ids:
+        notification = create_notification(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            user_id=user_id,
+            category="allocation_request",
+            title=f"Allocate more request · {evaluator.display_name}",
+            body=f"{evaluator.display_name} ({evaluator.evaluator_code}) has submitted all {status['submitted']} assigned scripts and is requesting another allocation batch.",
+            severity="normal",
+            channels=["in_app"],
+            mandatory_acknowledgement=True,
+        )
+        notification_action(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            notification_id=notification.id,
+            expected_version=notification.version,
+            action="deliver",
+        )
+        notification.refresh_from_db()
+        notifications.append(notification)
+
+    record_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        action="allocation.evaluator.more_requested",
+        aggregate="Evaluator",
+        aggregate_id=evaluator.id,
+        payload={"completed_assignments": status["submitted"], "recipient_count": len(notifications)},
+    )
+    return {"status": "requested", "assignments": [], "notifications": notifications}
 
 
 def execute_plan(*, tenant_id, actor_id, run_id):

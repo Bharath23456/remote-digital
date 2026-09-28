@@ -65,6 +65,7 @@ class TenantEntitlementMiddleware:
 
     evaluator_evaluation_paths = {
         "/api/v1/allocation/catalog",
+        "/api/v1/allocation/allocate-more",
         "/api/v1/evaluator-management/face/status",
         "/api/v1/evaluator-management/face/verify-access",
     }
@@ -171,6 +172,7 @@ class EvaluatorRoleBoundaryMiddleware:
     allowed_paths = {
         "/api/health",
         "/api/v1/allocation/catalog",
+        "/api/v1/allocation/allocate-more",
         "/api/v1/evaluator-management/face/status",
         "/api/v1/evaluator-management/face/verify-access",
     }

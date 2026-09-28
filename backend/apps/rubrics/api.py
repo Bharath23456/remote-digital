@@ -141,7 +141,7 @@ def acknowledge_instructions(request, scheme_id: str, payload: AcknowledgeIn):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
     scheme = _scheme(tenant_id, scheme_id)
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id).first()
     clarification = SchemeClarification.objects.filter(id=payload.clarification_id, tenant_id=tenant_id).first() if payload.clarification_id else None
     if not evaluator:
         raise HttpError(403, "Evaluator profile not found")

@@ -15,7 +15,7 @@ from apps.allocation.models import Assignment
 from apps.configuration.models import Subject
 from apps.core.services import record_event
 from apps.evaluators.models import Evaluator, EvaluatorAvailability, EvaluatorFaceTemplate, EvaluatorHistory, EvaluatorIdentityVerification, Expertise
-from apps.evaluators.face_engine import FaceEngineError, extract_embedding
+from apps.evaluators.face_engine import FaceEngineError, analyze_face_posture, extract_embedding
 from apps.security.crypto import SecretDecryptionError, decrypt_secret, encrypt_secret
 from apps.security.models import SecurityPolicy
 from apps.tenancy.custom_fields import validate_custom_values
@@ -84,8 +84,13 @@ def _quality_score(quality):
 
 
 def _normalise_capture(capture):
+    image_base64 = capture.get("image_base64", "")
     try:
-        embedding = extract_embedding(capture.get("image_base64", ""))
+        posture = analyze_face_posture(image_base64)
+    except FaceEngineError as exc:
+        raise EvaluatorError(str(exc)) from exc
+    try:
+        embedding = extract_embedding(image_base64)
     except FaceEngineError as exc:
         raise EvaluatorError(str(exc)) from exc
 
@@ -95,7 +100,7 @@ def _normalise_capture(capture):
         quality = {}
 
     try:
-        face_count = int(capture.get("face_count", 1))
+        face_count = int(posture.get("face_count", capture.get("face_count", 1)))
     except (TypeError, ValueError):
         face_count = 0
 
@@ -107,6 +112,8 @@ def _normalise_capture(capture):
         "liveness_passed": bool(capture.get("liveness_passed")),
         "quality": quality,
         "quality_score": _quality_score(quality),
+        "face_aligned": bool(posture.get("face_aligned", False)),
+        "posture_details": dict(posture.get("details") or {}),
         "model_version": str(capture.get("model_version") or "opencv-sface-v1")[:64],
         "device_fingerprint": str(capture.get("device_fingerprint") or "")[:128],
     }
@@ -136,6 +143,8 @@ def _validate_capture(capture, *, purpose):
         raise EvaluatorError("Face capture quality is too low")
     if purpose == "enroll" and capture["quality_score"] < max(_face_min_quality(), Decimal("0.60")):
         raise EvaluatorError("Enrollment requires a clearer live face capture")
+    if purpose == "enroll" and not capture.get("face_aligned"):
+        raise EvaluatorError("Enrollment requires the evaluator to face the camera directly")
 
 
 def _template_payload(capture):
@@ -259,7 +268,7 @@ def face_status(*, tenant_id, evaluator_id):
     evaluator = Evaluator.objects.select_related("face_template").filter(id=evaluator_id, tenant_id=tenant_id).first()
     if not evaluator:
         raise EvaluatorError("Evaluator was not found")
-    return {"evaluator_id": str(evaluator.id), **_face_status_payload(evaluator)}
+    return {"evaluator_id": str(evaluator.id), "evaluator_code": evaluator.evaluator_code, "evaluator_name": evaluator.display_name, **_face_status_payload(evaluator)}
 
 
 @transaction.atomic
@@ -280,14 +289,16 @@ def enroll_face_template(*, tenant_id, actor_id, evaluator_id, capture):
             "model_version": normalised["model_version"],
             "threshold": threshold,
             "quality_score": normalised["quality_score"],
-            "liveness_reference": {"face_count": normalised["face_count"], "quality": normalised["quality"], "liveness_passed": normalised["liveness_passed"]},
+            "liveness_reference": {"face_count": normalised["face_count"], "quality": normalised["quality"], "liveness_passed": normalised["liveness_passed"], "face_aligned": normalised["face_aligned"], "posture_details": normalised["posture_details"]},
             "enrolled_by_id": actor_id,
             "status": EvaluatorFaceTemplate.Status.ACTIVE,
         },
     )
     if not created:
         template.version += 1
-        template.save(update_fields=["version", "updated_at"])
+        template.enrolled_at = timezone.now()
+        template.last_verified_at = None
+        template.save(update_fields=["version", "enrolled_at", "last_verified_at", "updated_at"])
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="evaluator.face.enrolled", aggregate="EvaluatorFaceTemplate", aggregate_id=template.id, payload={"evaluator_id": str(evaluator.id), "model_version": template.model_version, "quality_score": str(template.quality_score), "threshold": str(template.threshold), "reenrolled": not created})
     return template
 
@@ -339,7 +350,7 @@ def verify_face_template(*, tenant_id, actor_id, evaluator_id, capture, access_s
         probe_digest=normalised["digest"],
         device_fingerprint=normalised["device_fingerprint"],
         ip_address=ip_address,
-        evidence={"quality": normalised["quality"], "quality_score": str(normalised["quality_score"]), "face_count": normalised["face_count"], "template_model_version": template.model_version if template else ""},
+        evidence={"quality": normalised["quality"], "quality_score": str(normalised["quality_score"]), "face_count": normalised["face_count"], "template_model_version": template.model_version if template else "", "template_version": template.version if template else None},
         expires_at=now + _face_ttl() if verified and authorized else None,
         attempt_number=attempts,
     )
@@ -368,11 +379,12 @@ def require_recent_identity_verification(*, tenant_id, evaluator, assignment, ac
         evaluator=evaluator,
         assignment=assignment,
         access_session_id=getattr(access_session, "id", None),
-        access_granted=True,
-        expires_at__gt=now,
     ).order_by("-created_at").first()
-    if not item:
+    if not item or not item.access_granted or not item.expires_at or item.expires_at <= now:
         raise EvaluatorError("Identity verification is required before entering evaluation")
+    template = EvaluatorFaceTemplate.objects.filter(tenant_id=tenant_id, evaluator=evaluator, status=EvaluatorFaceTemplate.Status.ACTIVE).first()
+    if not template or item.evidence.get("template_version") != template.version or evaluator.status != Evaluator.Status.ACTIVE:
+        raise EvaluatorError("Face enrollment changed. Verify identity again")
     return item
 
 
@@ -407,6 +419,8 @@ def create_evaluator(*, tenant_id, actor_id, values):
         membership = Membership.objects.filter(user=user, institution__tenant_id=tenant_id).first()
         if membership and membership.role != Membership.Role.EVALUATOR:
             raise EvaluatorConflict("This email already belongs to a non-evaluator university account")
+        if Evaluator.objects.filter(tenant_id=tenant_id, user=user).exists():
+            raise EvaluatorConflict("This evaluator login is already linked to a profile")
         if not membership:
             Membership.objects.create(
                 user=user,

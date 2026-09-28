@@ -2,19 +2,19 @@
 
 import { Camera, Check, LockKeyhole, Monitor, RefreshCw, ShieldAlert, Video, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { csrfFetch } from "@/lib/api";
+import { csrfFetch, SESSION_EXPIRED_EVENT } from "@/lib/api";
 
 type Policy = { identity_verification_required?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
-type Preflight = { camera_ready: boolean; face_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
-type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; digest: string };
+type Preflight = { camera_ready: boolean; face_ready: boolean; headphones_detected: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
+type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; headphones_detected: boolean; headphone_devices: number; digest: string };
 type BufferedChunk = { blob: Blob; startedAt: Date; endedAt: Date };
 type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
 type FaceDetectorLike = { detect(source: CanvasImageSource): Promise<unknown[]> };
 type FaceDetectorConstructor = new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => FaceDetectorLike;
 type MonitoringStatus = { camera: "ok" | "error" | "required"; face: "detected" | "not_detected"; multipleFaces: "none" | "detected"; mobile: "not_detected" | "detected" };
 const modelVersion = "opencv-sface-v1";
-const identityPauseReasons = new Set(["identity_mismatch", "face_absent", "multiple_faces", "camera_obstructed", "camera_stopped"]);
+const identityPauseReasons = new Set(["identity_mismatch", "identity_verification_failed", "face_absent", "multiple_faces", "camera_obstructed", "camera_stopped"]);
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -34,7 +34,9 @@ async function digest(value: string | ArrayBuffer) {
 
 async function mediaInventory(): Promise<{ public: Inventory; rawDigest: string }> {
   const devices = await navigator.mediaDevices.enumerateDevices();
-  const normalized = devices.map((item) => `${item.kind}:${item.deviceId}:${item.groupId}`).sort().join("|");
+  const headphonePattern = /head(?:phone|set)s?|ear(?:phone|bud)s?|airpods?|galaxy buds|pixel buds|hands[- ]?free/i;
+  const headphoneDevices = devices.filter((item) => ["audioinput", "audiooutput"].includes(item.kind) && headphonePattern.test(item.label || ""));
+  const normalized = devices.map((item) => `${item.kind}:${item.deviceId}:${item.groupId}:${headphonePattern.test(item.label || "")}`).sort().join("|");
   const rawDigest = await digest(normalized);
   return {
     rawDigest,
@@ -42,9 +44,30 @@ async function mediaInventory(): Promise<{ public: Inventory; rawDigest: string 
       video_inputs: devices.filter((item) => item.kind === "videoinput").length,
       audio_inputs: devices.filter((item) => item.kind === "audioinput").length,
       audio_outputs: devices.filter((item) => item.kind === "audiooutput").length,
+      headphones_detected: headphoneDevices.length > 0,
+      headphone_devices: headphoneDevices.length,
       digest: rawDigest,
     },
   };
+}
+
+async function unlockAudioDeviceLabels() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputIds = devices
+    .filter((item) => item.kind === "audioinput" && item.deviceId && !["default", "communications"].includes(item.deviceId))
+    .map((item) => item.deviceId);
+  const attempts: MediaStreamConstraints[] = [
+    { video: false, audio: true },
+    ...inputIds.map((deviceId) => ({ video: false, audio: { deviceId: { exact: deviceId } } })),
+  ];
+  for (const constraints of attempts) {
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia(constraints);
+      probe.getTracks().forEach((track) => track.stop());
+      return true;
+    } catch { /* Try the next microphone. Camera evaluation must remain usable. */ }
+  }
+  return false;
 }
 
 async function availableScreens() {
@@ -180,6 +203,38 @@ async function captureIdentityPayload(stream: MediaStream, deviceSeed = "", trig
   };
 }
 
+function capturePresenceFrame(video: HTMLVideoElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 640;
+  canvas.height = 480;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Camera monitoring is unavailable");
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.82);
+}
+
+async function validateCameraFrame(stream: MediaStream) {
+  if (!cameraIsActive(stream)) throw new Error("Turn on the webcam before opening the paper");
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  try {
+    await video.play();
+    if (video.readyState < 2) await new Promise((resolve) => window.setTimeout(resolve, 300));
+    if (video.readyState < 2) throw new Error("Camera preview is not ready");
+    const result = await request("/api/v1/phase4/remote-security/camera-preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_base64: capturePresenceFrame(video) }),
+    }) as { camera_ready: boolean; face_ready: boolean; face_count: number; face_aligned?: boolean; phone_call_suspected?: boolean; posture_details?: Record<string, unknown> };
+    if (result.face_aligned === false) throw new Error("Face the webcam directly. Side angle or tilted face is not allowed.");
+    return result;
+  } finally {
+    video.srcObject = null;
+  }
+}
+
 export function useSecureEvaluationSession() {
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
@@ -201,9 +256,11 @@ export function useSecureEvaluationSession() {
   const sequenceRef = useRef(0);
   const closingRef = useRef(false);
   const eventInFlightRef = useRef(new Set<string>());
+  const cameraRecheckInFlightRef = useRef(false);
 
   const updateSession = useCallback((next: Session) => {
-    sessionRef.current = next; setSession(next);
+    sessionRef.current = next;
+    setSession((current) => current && current.id === next.id && current.status === next.status && current.pause_reason === next.pause_reason && current.violation_count === next.violation_count && current.version === next.version ? current : next);
     setPaused(next.status === "paused");
     setPauseReason(next.pause_reason || "security_policy");
   }, []);
@@ -240,15 +297,38 @@ export function useSecureEvaluationSession() {
 
   const pause = useCallback((category: string) => { setPaused(true); setPauseReason(category); setNeedsReauthentication(true); setChecking(true); evidenceReasonRef.current ||= category; }, []);
 
+  const forceSecurityLogout = useCallback(async (reason = "multiple_faces") => {
+    closingRef.current = true;
+    sessionStorage.removeItem("admiezo-secure-evaluation-id");
+    sessionStorage.removeItem("admiezo-secure-session-fingerprint");
+    recorderRef.current?.stop(); recorderRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop()); streamRef.current = null; setStream(null);
+    sessionRef.current = null; setSession(null); setPaused(false); setPauseReason(""); setPreflight(null); preflightRef.current = null; chunksRef.current = [];
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
+    const notice = reason === "phone_detected"
+      ? "Mobile phone detected. Evaluation access was terminated. Sign in again."
+      : reason === "headphones_detected"
+        ? "Headphones or a headset were detected. Evaluation access was terminated. Sign in again."
+        : reason === "external_media_device"
+          ? "A media device was connected or changed. Evaluation access was terminated. Sign in again."
+        : reason === "identity_mismatch"
+          ? "Your live face did not match the enrolled evaluator. Evaluation access was terminated. Sign in again."
+          : "Multiple people were detected. Evaluation access was terminated. Sign in again.";
+    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT, { detail: { notice, loginRole: "evaluator" } }));
+  }, []);
+
   const report = useCallback(async (category: string, severity: "low" | "medium" | "high" | "critical", details: Record<string, unknown> = {}) => {
     const current = sessionRef.current;
     if (!current || closingRef.current || eventInFlightRef.current.has(category)) return;
-    const shouldPause = severity === "critical" || ["viewer_hidden", "fullscreen_exited", "camera_stopped", "external_media_device", "multiple_screens", "multiple_faces", "camera_obstructed", "identity_mismatch"].includes(category);
+    const shouldPause = severity === "critical" || ["viewer_hidden", "fullscreen_exited", "camera_stopped", "external_media_device", "multiple_screens", "multiple_faces", "camera_obstructed", "identity_mismatch", "face_misaligned"].includes(category);
     if (shouldPause) pause(category);
     eventInFlightRef.current.add(category);
     try {
       const result = await request("/api/v1/phase4/remote-security/events", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: current.assignment_id, secure_session_id: current.id, category, severity, device_fingerprint: preflightRef.current?.inventory_digest || "0".repeat(64), session_fingerprint: sessionStorage.getItem("admiezo-secure-session-fingerprint") || "0".repeat(64), details }) });
-      if (result.session) updateSession(result.session);
+      if (result.session) {
+        updateSession(result.session);
+        if (result.session.status === "abandoned") { await forceSecurityLogout(category); return; }
+      }
       if (result.action === "pause") { setPaused(true); setPauseReason(category); }
     } catch {
       if (shouldPause) setError("The session remains paused until the security event is acknowledged by the server.");
@@ -256,7 +336,7 @@ export function useSecureEvaluationSession() {
       if (shouldPause) setChecking(false);
       window.setTimeout(() => eventInFlightRef.current.delete(category), 3000);
     }
-  }, [pause, updateSession]);
+  }, [forceSecurityLogout, pause, updateSession]);
 
   const verifyLiveIdentity = useCallback(async (assignmentId: string, trigger: string) => {
     const camera = streamRef.current;
@@ -278,28 +358,77 @@ export function useSecureEvaluationSession() {
     try {
       const currentPolicy = await request("/api/v1/phase4/remote-security/policy") as Policy;
       setPolicy(currentPolicy);
-      const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      const videoConstraints = { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } };
+      const camera = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
+      await unlockAudioDeviceLabels();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = camera; setStream(camera); setMonitoringStatus((current) => ({ ...current, camera: "ok" }));
-      const inventory = await mediaInventory();
       const cameraMessage = await cameraFrameCheck(camera);
-      const screens = await availableScreens();
+      const [cameraCheck, inventory, screens] = await Promise.all([
+        validateCameraFrame(camera),
+        mediaInventory(),
+        availableScreens(),
+      ]);
       inventoryRef.current = inventory.rawDigest;
-      let faceReady = false;
-      if (!cameraMessage && assignmentId) {
-        try { await verifyLiveIdentity(assignmentId, "preflight"); faceReady = true; }
-        catch (reason) { setError(reason instanceof Error ? reason.message : "A clear single face is required before secure evaluation can start."); }
+      let faceReady = cameraCheck.face_ready;
+      if (!cameraMessage && faceReady && assignmentId && currentPolicy.identity_verification_required !== false) {
+        try { await verifyLiveIdentity(assignmentId, "preflight"); }
+        catch (reason) { faceReady = false; setError(reason instanceof Error ? reason.message : "A clear single face is required before secure evaluation can start."); }
       }
-      const result = { camera_ready: cameraIsActive(camera) && !cameraMessage, face_ready: faceReady, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
+      const result = { camera_ready: cameraIsActive(camera) && cameraCheck.camera_ready && !cameraMessage, face_ready: faceReady, headphones_detected: inventory.public.headphones_detected, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
       preflightRef.current = result; setPreflight(result);
       if (cameraMessage) { setMonitoringStatus((current) => ({ ...current, camera: "error" })); setError(cameraMessage); }
+      if (result.headphones_detected) setError("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
       if (currentPolicy.single_screen_required && screens.count !== null && screens.count > 1) setError("Disconnect additional displays before starting evaluation.");
     } catch (reason) {
-      const message = reason instanceof Error && reason.name === "NotAllowedError" ? "Webcam permission is required for secure evaluation." : reason instanceof Error ? reason.message : "Security checks could not be completed";
+      const message = reason instanceof Error && reason.name === "NotAllowedError"
+        ? "Camera permission is required for secure evaluation. Allow camera access and run the checks again."
+        : reason instanceof Error && reason.name === "NotFoundError"
+          ? "No working webcam was found. Connect or enable a camera, then run the checks again."
+          : reason instanceof Error ? reason.message : "Security checks could not be completed";
       setMonitoringStatus((current) => ({ ...current, camera: "error" }));
       setError(message);
     } finally { setChecking(false); }
   }, [verifyLiveIdentity]);
+
+  const recheckCamera = useCallback(async () => {
+    if (cameraRecheckInFlightRef.current) return false;
+    const camera = streamRef.current;
+    if (!camera || !cameraIsActive(camera)) {
+      setError("Open the webcam shutter and keep your face clearly visible");
+      return false;
+    }
+    cameraRecheckInFlightRef.current = true;
+    try {
+      const [cameraCheck, inventory, screens] = await Promise.all([
+        validateCameraFrame(camera),
+        mediaInventory(),
+        availableScreens(),
+      ]);
+      inventoryRef.current = inventory.rawDigest;
+      const result = { camera_ready: cameraCheck.camera_ready, face_ready: cameraCheck.face_ready, headphones_detected: inventory.public.headphones_detected, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
+      preflightRef.current = result;
+      setPreflight(result);
+      if (result.headphones_detected) {
+        setError("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
+        return false;
+      }
+      if (policy?.single_screen_required && screens.count !== null && screens.count > 1) {
+        setError("Disconnect additional displays before starting evaluation.");
+        return false;
+      }
+      setMonitoringStatus((current) => ({ ...current, camera: "ok" }));
+      setError("");
+      return result.camera_ready && result.face_ready;
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "Camera security check failed";
+      setMonitoringStatus((current) => ({ ...current, camera: "error" }));
+      setError(message);
+      return false;
+    } finally {
+      cameraRecheckInFlightRef.current = false;
+    }
+  }, [policy]);
 
   const start = useCallback(async (assignmentId: string, consent: boolean) => {
     if (!policy || !preflightRef.current || !streamRef.current) throw new Error("Run the security checks first");
@@ -323,7 +452,8 @@ export function useSecureEvaluationSession() {
       if (policy.camera_required && inventory.public.video_inputs < 1) {
         throw new Error("A connected webcam is required before secure evaluation can start.");
       }
-      const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current), fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count };
+      if (inventory.public.headphones_detected) throw new Error("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
+      const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current), face_ready: Boolean(preflightRef.current.face_ready), headphones_detected: inventory.public.headphones_detected, fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count };
       const sessionFingerprint = await digest(`${crypto.randomUUID()}:${Date.now()}:${assignmentId}`);
       const deviceFingerprint = await digest([navigator.userAgent, screen.width, screen.height, Intl.DateTimeFormat().resolvedOptions().timeZone, inventoryRef.current].join("|"));
       const created = await request("/api/v1/phase4/remote-security/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, session_fingerprint: sessionFingerprint, device_fingerprint: deviceFingerprint, consent, preflight: currentPreflight, device_inventory: inventory.public }) }) as Session;
@@ -348,6 +478,7 @@ export function useSecureEvaluationSession() {
         const replacement = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         streamRef.current = replacement; setStream(replacement);
       }
+      await validateCameraFrame(streamRef.current as MediaStream);
       if (current.policy.fullscreen_required && !document.fullscreenElement) await document.documentElement.requestFullscreen();
       if (current.policy.identity_verification_required !== false && identityPauseReasons.has(current.pause_reason)) {
         try { await verifyLiveIdentity(current.assignment_id, "resume"); }
@@ -388,8 +519,8 @@ export function useSecureEvaluationSession() {
     let cancelled = false;
     let recorder: MediaRecorder | null = null;
     if (typeof MediaRecorder !== "undefined") {
-      const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"].find((type) => MediaRecorder.isTypeSupported(type)) || "";
-      recorder = new MediaRecorder(camera, mimeType ? { mimeType, videoBitsPerSecond: 600_000 } : undefined);
+      const mimeType = ["video/webm;codecs=vp8", "video/webm", "video/mp4", "video/webm;codecs=vp9"].find((type) => MediaRecorder.isTypeSupported(type)) || "";
+      recorder = new MediaRecorder(camera, mimeType ? { mimeType, videoBitsPerSecond: 350_000 } : undefined);
       recorderRef.current = recorder;
       let chunkStarted = new Date();
       recorder.ondataavailable = (event) => {
@@ -416,13 +547,20 @@ export function useSecureEvaluationSession() {
       setMonitoringStatus((current) => ({ ...current, camera: "error" }));
       setPreflight((current) => current ? { ...current, camera_ready: false } : current);
       preflightRef.current = preflightRef.current ? { ...preflightRef.current, camera_ready: false } : null;
+      pause("camera_stopped");
       void report("camera_stopped", "critical");
     };
     camera.getVideoTracks().forEach((track) => { track.addEventListener("ended", trackStopped); track.addEventListener("mute", trackStopped); });
-    const deviceChange = async () => { const inventory = await mediaInventory(); if (inventory.rawDigest !== inventoryRef.current) void report("external_media_device", "critical", { previous_inventory: inventoryRef.current, current_inventory: inventory.public }); };
+    const deviceChange = async () => {
+      const inventory = await mediaInventory();
+      if (inventory.public.headphones_detected) void report("headphones_detected", "critical", { headphone_devices: inventory.public.headphone_devices });
+      else if (inventory.rawDigest !== inventoryRef.current) void report("external_media_device", "critical", { previous_inventory: inventoryRef.current, current_inventory: inventory.public, connected_or_changed: true });
+    };
     document.addEventListener("visibilitychange", visibility);
     document.addEventListener("fullscreenchange", fullscreen);
     navigator.mediaDevices.addEventListener("devicechange", deviceChange);
+
+    const cameraWatch = window.setInterval(() => { if (!closingRef.current && !paused && !cameraIsActive(camera)) trackStopped(); }, 500);
 
     let failedHeartbeats = 0;
     const heartbeat = window.setInterval(async () => {
@@ -438,9 +576,7 @@ export function useSecureEvaluationSession() {
     const analysisVideo = document.createElement("video"); analysisVideo.muted = true; analysisVideo.playsInline = true; analysisVideo.srcObject = camera; void analysisVideo.play();
     const canvas = document.createElement("canvas"); canvas.width = 64; canvas.height = 48;
     const context = canvas.getContext("2d", { willReadFrequently: true });
-    const Detector = (window as typeof window & { FaceDetector?: FaceDetectorConstructor }).FaceDetector;
-    const detector = Detector ? new Detector({ fastMode: true, maxDetectedFaces: 3 }) : null;
-    let obstructedFrames = 0; let noFaceChecks = 0; let multipleFaceChecks = 0; let noFaceWarned = false; let identityCheckInFlight = false; let lastIdentityCheckAt = Date.now();
+    let obstructedFrames = 0; let noFaceChecks = 0; let faceMisalignedChecks = 0; let noFaceWarned = false; let identityCheckInFlight = false; let presenceCheckInFlight = false; let lastIdentityCheckAt = Date.now();
     const identityCheckIntervalMs = Math.max(30_000, current.policy.heartbeat_seconds * 3 * 1000);
     const verifySessionIdentity = async (trigger: string) => {
       if (identityCheckInFlight || closingRef.current || paused) return;
@@ -449,51 +585,96 @@ export function useSecureEvaluationSession() {
         await verifyLiveIdentity(current.assignment_id, trigger);
       } catch (reason) {
         const message = reason instanceof Error ? reason.message : "Evaluator identity could not be verified";
-        setError("The live evaluator face no longer matches the enrolled face template.");
-        void report("identity_mismatch", "critical", { trigger, reason: message });
+        const confirmedMismatch = reason instanceof ApiError && reason.status === 409 && message.toLowerCase().includes("face_mismatch");
+        if (!confirmedMismatch) {
+          setError("Live identity could not be verified. The paper is hidden until verification succeeds.");
+          await report("identity_verification_failed", "critical", { trigger, reason: message });
+          return;
+        }
+        pause("identity_mismatch");
+        setError("Checking the enrolled evaluator face again...");
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+        try {
+          await verifyLiveIdentity(current.assignment_id, `${trigger}_confirmation`);
+          setPaused(false); setPauseReason(""); setNeedsReauthentication(false); setChecking(false); setError("");
+        } catch (confirmationReason) {
+          const confirmationMessage = confirmationReason instanceof Error ? confirmationReason.message : "Evaluator identity could not be verified";
+          const secondMismatch = confirmationReason instanceof ApiError && confirmationReason.status === 409 && confirmationMessage.toLowerCase().includes("face_mismatch");
+          if (secondMismatch) {
+            setError("The live evaluator does not match the enrolled face. Access is being terminated.");
+            await report("identity_mismatch", "critical", { trigger, reason: confirmationMessage, consecutive_checks: 2 });
+          } else {
+            setError("Live identity could not be reconfirmed. The paper remains hidden.");
+            await report("identity_verification_failed", "critical", { trigger, reason: confirmationMessage });
+          }
+        }
       } finally {
         identityCheckInFlight = false;
       }
     };
     const analyze = window.setInterval(async () => {
       if (cancelled || analysisVideo.readyState < 2 || !context || paused) return;
+      if (!cameraIsActive(camera)) { trackStopped(); return; }
       context.drawImage(analysisVideo, 0, 0, canvas.width, canvas.height);
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
       let luminance = 0; for (let index = 0; index < pixels.length; index += 4) luminance += (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
       luminance /= pixels.length / 4;
       obstructedFrames = frameLooksObstructed(pixels) ? obstructedFrames + 1 : 0;
-      if (obstructedFrames >= 2) { obstructedFrames = 0; setError("The camera appears covered, disabled, or frozen. Enable the camera, keep the lens visible, and move slightly."); setMonitoringStatus((current) => ({ ...current, camera: "error" })); void report("camera_obstructed", "critical", { mean_luminance: Math.round(luminance) }); return; }
-      if (detector) {
+      if (obstructedFrames >= 2) { obstructedFrames = 0; setError("The camera appears covered, disabled, or frozen. Enable the camera, keep the lens visible, and move slightly."); setMonitoringStatus((current) => ({ ...current, camera: "error" })); pause("camera_obstructed"); void report("camera_obstructed", "critical", { mean_luminance: Math.round(luminance) }); return; }
+      if (!presenceCheckInFlight) {
+        presenceCheckInFlight = true;
         try {
-          const faces = await detector.detect(analysisVideo);
-          noFaceChecks = faces.length === 0 ? noFaceChecks + 1 : 0;
-          multipleFaceChecks = faces.length > 1 ? multipleFaceChecks + 1 : 0;
-          setMonitoringStatus((current) => ({ ...current, face: faces.length > 0 ? "detected" : "not_detected", multipleFaces: faces.length > 1 ? "detected" : "none" }));
-          if (faces.length > 0) noFaceWarned = false;
-          const warnChecks = Math.max(1, Math.floor(current.policy.no_face_seconds / 10));
-          const pauseChecks = Math.max(2, Math.ceil(current.policy.no_face_seconds / 5));
-          if (noFaceChecks >= warnChecks && !noFaceWarned) { noFaceWarned = true; void report("face_absent_warning", "medium", { duration_seconds: noFaceChecks * 5 }); }
-          if (noFaceChecks >= pauseChecks) { noFaceChecks = 0; setError("A clear single face is required. Keep your full face visible to the camera."); setMonitoringStatus((current) => ({ ...current, camera: "error", face: "not_detected" })); void report("face_absent", "critical", { duration_seconds: current.policy.no_face_seconds }); }
-          if (multipleFaceChecks >= 2) { multipleFaceChecks = 0; void report("multiple_faces", "critical", { sustained_seconds: 10 }); }
-        } catch { /* Native face detection is a progressive signal; camera continuity still applies. */ }
+          const result = await request(`/api/v1/phase4/remote-security/sessions/${current.id}/face-presence`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image_base64: capturePresenceFrame(analysisVideo) }),
+          }) as { face_count: number; terminated: boolean; termination_reason?: string; face_aligned?: boolean; phone_detected?: boolean; phone_call_suspected?: boolean; event_id?: string | null; session?: Session; posture_details?: Record<string, unknown> };
+          noFaceChecks = result.face_count === 0 ? noFaceChecks + 1 : 0;
+          const face = result.face_count > 0 ? "detected" : "not_detected";
+          const multipleFaces = result.face_count > 1 ? "detected" : "none";
+          const mobile = result.phone_detected || result.phone_call_suspected ? "detected" : "not_detected";
+          setMonitoringStatus((status) => status.face === face && status.multipleFaces === multipleFaces && status.mobile === mobile ? status : { ...status, face, multipleFaces, mobile });
+          if (result.terminated) { await forceSecurityLogout(result.termination_reason); return; }
+          if (mobile === "detected") {
+            noFaceChecks = 0; faceMisalignedChecks = 0; noFaceWarned = false;
+          } else {
+            if (result.face_count === 1 && result.face_aligned === false) { faceMisalignedChecks += 1; } else { faceMisalignedChecks = 0; }
+            if (result.face_count === 1 && result.face_aligned === false && faceMisalignedChecks >= 1) { faceMisalignedChecks = 0; pause("face_misaligned"); void report("face_misaligned", "critical", result.posture_details || {}); return; }
+            if (result.face_count > 0) noFaceWarned = false;
+            const warnChecks = 1;
+            const pauseChecks = 2;
+            if (noFaceChecks >= warnChecks && !noFaceWarned) { noFaceWarned = true; void report("face_absent_warning", "medium", { duration_seconds: noFaceChecks }); }
+            if (noFaceChecks >= pauseChecks) { noFaceChecks = 0; pause("face_absent"); void report("face_absent", "critical", { duration_seconds: pauseChecks }); }
+          }
+          if (result.event_id && mobile === "detected" && result.session?.status === "paused") {
+            evidenceReasonRef.current ||= "phone_detected";
+            setNeedsReauthentication(true);
+            updateSession(result.session);
+            return;
+          }
+        } catch (reason) {
+          if (reason instanceof ApiError && reason.status === 409) return;
+        } finally {
+          presenceCheckInFlight = false;
+        }
       }
       const now = Date.now();
       if (current.policy.identity_verification_required !== false && now - lastIdentityCheckAt >= identityCheckIntervalMs) {
         lastIdentityCheckAt = now;
         void verifySessionIdentity("periodic");
       }
-    }, 5000);
+    }, 1000);
 
     return () => {
-      cancelled = true; window.clearInterval(heartbeat); window.clearInterval(analyze);
+      cancelled = true; window.clearInterval(cameraWatch); window.clearInterval(heartbeat); window.clearInterval(analyze);
       document.removeEventListener("visibilitychange", visibility); document.removeEventListener("fullscreenchange", fullscreen); navigator.mediaDevices.removeEventListener("devicechange", deviceChange);
       camera.getVideoTracks().forEach((track) => { track.removeEventListener("ended", trackStopped); track.removeEventListener("mute", trackStopped); });
       analysisVideo.srcObject = null;
       if (recorder && recorder.state !== "inactive") recorder.stop();
     };
-  }, [paused, posture, report, session?.id, stream, updateSession, uploadEvidence, verifyLiveIdentity]);
+  }, [forceSecurityLogout, paused, posture, report, session?.id, stream, updateSession, uploadEvidence, verifyLiveIdentity]);
 
-  return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, monitoringStatus, prepare, start, resume, finish, report, pause };
+  return { policy, preflight, stream, session, paused, pauseReason, checking, error, needsReauthentication, monitoringStatus, prepare, recheckCamera, start, resume, finish, report, pause };
 }
 
 export function CameraPreview({ stream, compact = false }: { stream: MediaStream | null; compact?: boolean }) {
@@ -504,10 +685,32 @@ export function CameraPreview({ stream, compact = false }: { stream: MediaStream
 
 export function SecurePreflightDialog({ script, assignmentId, controller, onStart, onCancel }: { script: string; assignmentId: string; controller: ReturnType<typeof useSecureEvaluationSession>; onStart: (consent: boolean) => Promise<void>; onCancel: () => void }) {
   const [consent, setConsent] = useState(false);
+  const recoveredCameraRef = useRef(false);
+  const startingRef = useRef(false);
   const blockedByScreen = Boolean(controller.policy?.single_screen_required && controller.preflight?.screen_count && controller.preflight.screen_count > 1);
   const cameraReady = controller.preflight?.camera_ready === true && controller.monitoringStatus.camera === "ok";
   const faceReady = controller.preflight?.face_ready === true;
-  return <div className="modal-backdrop"><div className="modal-panel secure-preflight" role="dialog" aria-modal="true" aria-labelledby="secure-preflight-title"><header className="modal-header"><div><h2 id="secure-preflight-title">Secure evaluation check</h2><p>{script} · camera-monitored valuation session</p></div><button className="icon-button" title="Cancel" onClick={onCancel}><X /></button></header><div className="preflight-body"><CameraPreview stream={controller.stream}/><div className="preflight-checks"><div className={cameraReady ? "ready" : "pending"}>{cameraReady ? <Check /> : <Camera />}<span>Webcam</span><strong>{cameraReady ? "Ready" : "Required"}</strong></div><div className={!faceReady ? "pending" : "ready"}><ShieldAlert /><span>Face</span><strong>{faceReady ? "Verified" : "Required"}</strong></div><div className={blockedByScreen ? "blocked" : controller.preflight ? "ready" : "pending"}><Monitor /><span>Displays</span><strong>{controller.preflight?.screen_count === null ? "Browser-limited" : controller.preflight ? `${controller.preflight.screen_count} connected` : "Checking"}</strong></div><div className={controller.preflight ? "ready" : "pending"}><Video /><span>Evidence</span><strong>{controller.policy?.event_recording === false ? "Events only" : "Encrypted clips"}</strong></div></div><label className="security-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)}/><span>I understand that security events may preserve short encrypted webcam clips for authorized human review.</span></label>{controller.error && <div className="form-error" role="alert">{controller.error}</div>}</div><footer className="modal-footer"><button className="secondary-button" onClick={() => controller.prepare(assignmentId)} disabled={controller.checking}>{controller.checking ? <RefreshCw className="spin"/> : <Camera />}{controller.preflight ? "Run checks again" : "Run security checks"}</button><button className="primary-button" disabled={!cameraReady || !faceReady || !consent || blockedByScreen || controller.checking} onClick={() => onStart(consent)}><ShieldAlert />Begin secure evaluation</button></footer></div></div>;
+  const blockedByHeadphones = Boolean(controller.preflight?.headphones_detected);
+  const cameraNeedsRecovery = Boolean(controller.stream && controller.error && /camera|webcam|face|shutter|visible|aligned/i.test(controller.error));
+
+  useEffect(() => {
+    if (!cameraNeedsRecovery) return;
+    let disposed = false;
+    const check = async () => {
+      const ready = await controller.recheckCamera();
+      if (!disposed && ready) recoveredCameraRef.current = true;
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 1000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [cameraNeedsRecovery, controller.recheckCamera]);
+
+  useEffect(() => {
+    if (!recoveredCameraRef.current || startingRef.current || !consent || blockedByScreen || blockedByHeadphones || controller.checking || !controller.preflight?.camera_ready || !controller.preflight.face_ready) return;
+    startingRef.current = true;
+    void onStart(true).catch(() => { startingRef.current = false; });
+  }, [blockedByHeadphones, blockedByScreen, consent, controller.checking, controller.preflight?.camera_ready, controller.preflight?.face_ready, onStart]);
+  return <div className="modal-backdrop"><div className="modal-panel secure-preflight" role="dialog" aria-modal="true" aria-labelledby="secure-preflight-title"><header className="modal-header"><div><h2 id="secure-preflight-title">Secure evaluation check</h2><p>{script} · camera-monitored valuation session</p></div><button className="icon-button" title="Cancel" onClick={onCancel}><X /></button></header><div className="preflight-body"><CameraPreview stream={controller.stream}/><div className="preflight-checks"><div className={cameraReady ? "ready" : "pending"}>{cameraReady ? <Check /> : <Camera />}<span>Webcam</span><strong>{cameraReady ? "Ready" : "Required"}</strong></div><div className={faceReady ? "ready" : "pending"}><ShieldAlert /><span>Face</span><strong>{faceReady ? "Verified" : "Required"}</strong></div><div className={blockedByScreen ? "blocked" : controller.preflight ? "ready" : "pending"}><Monitor /><span>Displays</span><strong>{controller.preflight?.screen_count === null ? "Browser-limited" : controller.preflight ? `${controller.preflight.screen_count} connected` : "Checking"}</strong></div><div className={blockedByHeadphones ? "blocked" : controller.preflight ? "ready" : "pending"}><Video /><span>Headphones</span><strong>{blockedByHeadphones ? "Disconnect" : "None"}</strong></div><div className="pending"><LockKeyhole /><span>Fullscreen</span><strong>Enabled on start</strong></div></div><label className="security-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)}/><span>I understand that security events may preserve short encrypted webcam clips for authorized human review.</span></label>{controller.error && <div className="form-error" role="alert">{controller.error}</div>}</div><footer className="modal-footer"><button className="secondary-button" onClick={() => controller.prepare(assignmentId)} disabled={controller.checking}>{controller.checking ? <RefreshCw className="spin"/> : <Camera />}{controller.preflight ? "Run checks again" : "Run security checks"}</button><button className="primary-button" disabled={!cameraReady || !faceReady || !consent || blockedByScreen || blockedByHeadphones || controller.checking} onClick={() => onStart(consent)}><ShieldAlert />Begin secure evaluation</button></footer></div></div>;
 }
 
 export function SecurityPauseOverlay({ controller, onClose }: { controller: ReturnType<typeof useSecureEvaluationSession>; onClose: () => void }) {
