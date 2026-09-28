@@ -63,11 +63,15 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   const [bundlePage, setBundlePage] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [centreChecked, setCentreChecked] = useState(false);
+  const [centreError, setCentreError] = useState("");
   const [notice, setNotice] = useState("");
 
   function clearManualEntry() { setManualEntryRequired(false); setManualQr(""); setManualUsn(""); }
 
   const load = useCallback(async () => {
+    setError("");
+    if (stage === "receiving") setCentreChecked(false);
     try {
       if (stage === "receiving") {
         const [intakeResult, preparationResult] = await Promise.allSettled([api(`${root}/catalog`), api(`${root}/preparation`)]);
@@ -77,10 +81,12 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         setColleges(preparation.colleges || []);
         setPreparedPackets(preparation.packets || []);
         setCurrentCentre(preparation.centre || null);
+        setCentreChecked(true);
+        setCentreError(preparation.centre ? "" : preparation.centre_error || "Assign this user to an active centre in Access governance before continuing");
         setCollegeId((current) => current || preparation.colleges?.[0]?.id || "");
         if (intakeResult.status === "fulfilled") setBundles(intakeResult.value.bundles || []);
-        const setupError = preparation.centre_error || (intakeResult.status === "rejected" ? intakeResult.reason?.message : "");
-        setError(preparation.centre && centreAssignmentErrors.has(setupError) ? "" : setupError || "");
+        const intakeError = intakeResult.status === "rejected" ? intakeResult.reason?.message || "Intake could not be loaded" : "";
+        setError(centreAssignmentErrors.has(intakeError) ? "" : intakeError);
       } else {
         const intake = await api(`${root}/catalog`);
         if (stage !== "digitization") setBundles(intake.bundles || []);
@@ -242,6 +248,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   return <div className="config-workspace guided-desk">
     {currentCentre && <div className="intake-centre-band"><span>Operating centre</span><strong>{currentCentre.code} - {currentCentre.name}</strong></div>}
     {notice && <div className="success-banner"><Check />{notice}</div>}
+    {stage === "receiving" && centreChecked && !currentCentre && centreError && <div className="form-error" role="alert">{centreError}</div>}
     {error && <div className="form-error" role="alert">{error}</div>}
 
     {stage === "receiving" && <>
