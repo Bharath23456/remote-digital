@@ -488,6 +488,13 @@ def change_lifecycle(*, tenant_id, actor_id, evaluator_id, version, status=None,
     if status:
         if status not in STATUS_TRANSITIONS.get(evaluator.status, set()):
             raise EvaluatorConflict(f"Transition from {evaluator.status} to {status} is not allowed")
+        if status == Evaluator.Status.ACTIVE and not getattr(settings, "DEMO_SKIP_EVALUATOR_FACE_VERIFICATION", False):
+            if not EvaluatorFaceTemplate.objects.filter(
+                tenant_id=tenant_id,
+                evaluator=evaluator,
+                status=EvaluatorFaceTemplate.Status.ACTIVE,
+            ).exists():
+                raise EvaluatorConflict("Complete face enrollment before activating this evaluator")
         evaluator.status = status
     if grade:
         if grade not in {value for value, _ in Evaluator.Grade.choices}:

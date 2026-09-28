@@ -64,17 +64,26 @@ SECURE_PAUSE_CATEGORIES = {
     "multiple_faces",
     "multiple_screens",
     "viewer_hidden",
+    "session_timeout",
 }
 
 
 def security_policy_snapshot(tenant_id):
     policy = SecurityPolicy.objects.filter(tenant_id=tenant_id).first() or SecurityPolicy()
     return {
-        "identity_verification_required": not settings.DEMO_SKIP_EVALUATOR_FACE_VERIFICATION,
+        "identity_verification_required": not settings.DEMO_SKIP_EVALUATOR_FACE_VERIFICATION and policy.evaluation_identity_verification_required,
+        "strict_mode": policy.evaluation_strict_mode,
         "camera_required": policy.evaluation_camera_required,
         "fullscreen_required": policy.evaluation_fullscreen_required,
         "single_screen_required": policy.evaluation_single_screen_required,
+        "mobile_allowed": policy.evaluation_mobile_allowed,
         "event_recording": policy.evaluation_event_recording,
+        "pause_on_violation": policy.evaluation_pause_on_violation,
+        "require_resume_step_up": policy.evaluation_require_resume_step_up,
+        "allow_clipboard": policy.evaluation_allow_clipboard,
+        "allow_download": policy.evaluation_allow_download,
+        "allow_print": policy.evaluation_allow_print,
+        "session_timeout_minutes": policy.evaluation_session_timeout_minutes,
         "heartbeat_seconds": policy.evaluation_heartbeat_seconds,
         "no_face_seconds": policy.evaluation_no_face_seconds,
         "retention_days": policy.evaluation_retention_days,
@@ -863,6 +872,11 @@ def _security_action(category, severity):
 
 def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id, category, severity, device_fingerprint, session_fingerprint, details, secure_session=None):
     action = _security_action(category, severity)
+    if category == "session_timeout":
+        action = "pause"
+    if secure_session and not secure_session.policy_snapshot.get("pause_on_violation", True) and action == "pause":
+        if category != "session_timeout":
+            action = "warn"
     item = PresenceSecurityEvent.objects.create(
         tenant_id=tenant_id,
         assignment=assignment,
@@ -896,7 +910,7 @@ def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id
 
 
 @transaction.atomic
-def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluator, access_session, session_fingerprint, device_fingerprint, consent, preflight, device_inventory):
+def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluator, access_session, session_fingerprint, device_fingerprint, consent, preflight, device_inventory, user_agent=""):
     policy = security_policy_snapshot(tenant_id)
     if not consent:
         raise HttpError(422, "Security monitoring consent is required")
@@ -911,6 +925,9 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
     screen_count = preflight.get("screen_count")
     if policy["single_screen_required"] and isinstance(screen_count, int) and screen_count > 1:
         raise HttpError(409, "Disconnect additional displays before evaluation")
+    mobile_user_agent = any(token in (user_agent or "").casefold() for token in ("android", "iphone", "ipad", "ipod", "mobile"))
+    if not policy["mobile_allowed"] and (bool(device_inventory.get("mobile")) or mobile_user_agent):
+        raise HttpError(409, "Mobile devices are not allowed for this evaluation")
     if len(session_fingerprint) != 64 or len(device_fingerprint) != 64:
         raise HttpError(422, "Secure device fingerprints are invalid")
     if policy["identity_verification_required"]:
@@ -966,7 +983,12 @@ def heartbeat_secure_evaluation_session(*, tenant_id, actor_id, session_id, acce
     item = SecureEvaluationSession.objects.select_for_update().select_related("assignment").filter(id=session_id, tenant_id=tenant_id, access_session_id=access_session.id).first()
     if not item or item.status in {SecureEvaluationSession.Status.COMPLETED, SecureEvaluationSession.Status.ABANDONED}:
         raise HttpError(409, "Secure evaluation session is unavailable")
-    item.last_heartbeat_at = timezone.now()
+    now = timezone.now()
+    timeout_minutes = int(item.policy_snapshot.get("session_timeout_minutes") or 180)
+    if now >= item.started_at + timedelta(minutes=timeout_minutes):
+        event = _create_security_event(tenant_id=tenant_id, actor_id=actor_id, assignment=item.assignment, access_session_id=access_session.id, category="session_timeout", severity="high", device_fingerprint=item.device_fingerprint, session_fingerprint=item.session_fingerprint, details={"timeout_minutes": timeout_minutes}, secure_session=item)
+        return item, event
+    item.last_heartbeat_at = now
     item.save(update_fields=["last_heartbeat_at", "updated_at"])
     reason = _posture_violation(item, posture)
     event = None
@@ -983,7 +1005,7 @@ def resume_secure_evaluation_session(*, tenant_id, actor_id, session_id, access_
     reason = _posture_violation(item, posture)
     if reason:
         raise HttpError(409, f"Resolve the security condition before continuing: {reason.replace('_', ' ')}")
-    if item.violation_count >= 3 and not access_session.is_step_up_valid:
+    if item.policy_snapshot.get("require_resume_step_up", True) and item.violation_count >= 3 and not access_session.is_step_up_valid:
         raise HttpError(428, "Re-authentication is required after repeated security events")
     item.status = SecureEvaluationSession.Status.ACTIVE
     item.pause_reason = ""

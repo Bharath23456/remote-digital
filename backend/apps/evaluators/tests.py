@@ -36,7 +36,8 @@ class EvaluatorManagementTests(TestCase):
             "device_fingerprint": "f" * 64,
         }
 
-    def test_profile_expertise_availability_and_lifecycle(self):
+    @patch("apps.evaluators.services.extract_embedding", return_value=[1.0, 0.0, 0.0])
+    def test_profile_expertise_availability_and_lifecycle(self, _extract_embedding):
         response = self.post("/api/v1/evaluator-management", {
             "evaluator_code": "EV-NEW-01", "display_name": "Dr. Test Examiner",
             "email": "examiner@example.edu", "institution_name": "Northbridge University",
@@ -51,6 +52,8 @@ class EvaluatorManagementTests(TestCase):
         availability = self.post(f"/api/v1/evaluator-management/{evaluator['id']}/availability", {"starts_on": "2026-09-01", "ends_on": "2026-12-31", "daily_capacity": 20, "notes": "Weekdays"})
         self.assertEqual(availability.status_code, 200)
         version = availability.json()["evaluator_version"]
+        enrolled = self.post(f"/api/v1/evaluator-management/{evaluator['id']}/face/enroll", self.face_capture())
+        self.assertEqual(enrolled.status_code, 200)
         lifecycle = self.post(f"/api/v1/evaluator-management/{evaluator['id']}/lifecycle", {"version": version, "status": "active", "reason": "Verification complete"})
         self.assertEqual(lifecycle.status_code, 200)
         self.assertEqual(lifecycle.json()["status"], "active")

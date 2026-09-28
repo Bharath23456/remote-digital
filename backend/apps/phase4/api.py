@@ -866,6 +866,7 @@ def secure_evaluation_start(request, payload: SecureSessionIn):
         consent=payload.consent,
         preflight=payload.preflight,
         device_inventory=payload.device_inventory,
+        user_agent=request.headers.get("User-Agent", ""),
     )
     return _secure_session_data(item)
 

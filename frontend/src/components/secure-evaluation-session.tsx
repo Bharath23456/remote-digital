@@ -4,10 +4,10 @@ import { Camera, Check, LockKeyhole, Monitor, RefreshCw, ShieldAlert, Video, X }
 import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch } from "@/lib/api";
 
-type Policy = { identity_verification_required?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
+type Policy = { identity_verification_required?: boolean; strict_mode?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; mobile_allowed?: boolean; event_recording: boolean; pause_on_violation?: boolean; require_resume_step_up?: boolean; allow_clipboard?: boolean; allow_download?: boolean; allow_print?: boolean; session_timeout_minutes?: number; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
-type Preflight = { camera_ready: boolean; face_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
-type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; digest: string };
+type Preflight = { camera_ready: boolean; face_ready: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; mobile?: boolean; inventory_digest: string };
+type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; mobile: boolean; digest: string };
 type BufferedChunk = { blob: Blob; startedAt: Date; endedAt: Date };
 type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
 type FaceDetectorLike = { detect(source: CanvasImageSource): Promise<unknown[]> };
@@ -42,6 +42,7 @@ async function mediaInventory(): Promise<{ public: Inventory; rawDigest: string 
       video_inputs: devices.filter((item) => item.kind === "videoinput").length,
       audio_inputs: devices.filter((item) => item.kind === "audioinput").length,
       audio_outputs: devices.filter((item) => item.kind === "audiooutput").length,
+      mobile: /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent),
       digest: rawDigest,
     },
   };
@@ -290,10 +291,11 @@ export function useSecureEvaluationSession() {
         try { await verifyLiveIdentity(assignmentId, "preflight"); faceReady = true; }
         catch (reason) { setError(reason instanceof Error ? reason.message : "A clear single face is required before secure evaluation can start."); }
       }
-      const result = { camera_ready: cameraIsActive(camera) && !cameraMessage, face_ready: faceReady, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
+      const result = { camera_ready: cameraIsActive(camera) && !cameraMessage, face_ready: faceReady, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, mobile: inventory.public.mobile, inventory_digest: inventory.public.digest };
       preflightRef.current = result; setPreflight(result);
       if (cameraMessage) { setMonitoringStatus((current) => ({ ...current, camera: "error" })); setError(cameraMessage); }
       if (currentPolicy.single_screen_required && screens.count !== null && screens.count > 1) setError("Disconnect additional displays before starting evaluation.");
+      if (!currentPolicy.mobile_allowed && inventory.public.mobile) setError("Mobile devices are not allowed for this evaluation.");
     } catch (reason) {
       const message = reason instanceof Error && reason.name === "NotAllowedError" ? "Webcam permission is required for secure evaluation." : reason instanceof Error ? reason.message : "Security checks could not be completed";
       setMonitoringStatus((current) => ({ ...current, camera: "error" }));
@@ -323,6 +325,7 @@ export function useSecureEvaluationSession() {
       if (policy.camera_required && inventory.public.video_inputs < 1) {
         throw new Error("A connected webcam is required before secure evaluation can start.");
       }
+      if (!policy.mobile_allowed && inventory.public.mobile) throw new Error("Mobile devices are not allowed for this evaluation.");
       const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current), fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count };
       const sessionFingerprint = await digest(`${crypto.randomUUID()}:${Date.now()}:${assignmentId}`);
       const deviceFingerprint = await digest([navigator.userAgent, screen.width, screen.height, Intl.DateTimeFormat().resolvedOptions().timeZone, inventoryRef.current].join("|"));
