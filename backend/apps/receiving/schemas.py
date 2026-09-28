@@ -23,21 +23,21 @@ class GuidedPacketIn(Schema):
 
 
 class GuidedBundleIn(Schema):
-    barcode: str
+    barcode: str | None = None
     source_centre: str
     mode: str
     packets: list[GuidedPacketIn]
 
 
 class GuidedPreparedPacketIn(Schema):
-    barcode: str
+    barcode: str | None = None
     paper_id: str
     source_college_id: str
     script_barcodes: list[str]
 
 
 class GuidedPreparedBundleIn(Schema):
-    barcode: str
+    barcode: str | None = None
     source_college_id: str
     mode: str
     packet_ids: list[str]

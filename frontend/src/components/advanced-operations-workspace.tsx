@@ -30,13 +30,14 @@ type Catalog = Record<string, unknown> & {
   active_evaluations?: Row[];
   remote_support_sessions?: RemoteSupportSession[];
 };
-export type AdvancedSection = "assessment" | "operations" | "services" | "platform";
+export type AdvancedSection = "assessment" | "operations" | "services" | "platform" | "centres";
 
 const sections: Record<AdvancedSection, string[]> = {
   assessment: ["moderation", "revaluation", "completion"],
-  operations: ["security", "monitoring", "workload", "issues", "runtime", "notifications", "centres", "continuity"],
+  operations: ["security", "monitoring", "workload", "issues", "runtime", "notifications", "continuity"],
   services: ["remuneration", "student"],
   platform: ["audit", "integrations", "languages", "recovery"],
+  centres: ["centres"],
 };
 const advancedTabStorageKey = (section: AdvancedSection) => `admiezo-advanced-tab-${section}`;
 
