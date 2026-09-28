@@ -816,6 +816,9 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .evaluation-viewer.security-printscreen-lock::before { position: fixed; inset: 0; z-index: 10050; display: grid; place-items: center; background: rgba(10, 15, 12, .98); color: white; content: "Evaluation paused"; font-size: 22px; font-weight: 800; pointer-events: all; }
 
 .guided-desk { display: grid; gap: 14px; }
+.intake-centre-band { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 18px; border: 1px solid #b8d3c8; border-radius: 7px; background: var(--green-soft); padding: 10px 16px; }
+.intake-centre-band span { color: var(--muted); font-size: 11px; font-weight: 750; text-transform: uppercase; }
+.intake-centre-band strong { color: var(--green); font-size: 13px; }
 .intake-flow { display: grid; grid-template-columns: minmax(280px, 1fr) 28px minmax(280px, 1fr); align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 8px; }
 .intake-flow > svg { width: 18px; justify-self: center; color: var(--faint); }
 .intake-flow > button { display: grid; min-height: 60px; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 11px; border: 1px solid transparent; border-radius: 6px; background: transparent; padding: 8px 12px; color: var(--muted); cursor: pointer; text-align: left; }
@@ -835,6 +838,21 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .booklet-code-list strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; white-space: nowrap; }
 .booklet-code-list .icon-button { width: 28px; height: 28px; }
 .booklet-code-list .icon-button svg { width: 13px; }
+.generated-code-note { display: flex; min-height: 68px; align-items: center; gap: 12px; border: 1px dashed #9ebeb2; border-radius: 7px; background: #f8fbfa; padding: 12px 14px; }
+.generated-code-note > svg { width: 22px; color: var(--green); }
+.generated-code-note > div { display: grid; gap: 3px; }
+.generated-code-note strong { font-size: 12px; }
+.generated-code-note span { color: var(--muted); font-size: 10px; }
+.intake-label-modal { max-width: 520px; }
+.intake-label-print { display: grid; justify-items: center; gap: 14px; margin: 24px; border: 2px solid var(--ink); padding: 24px; color: #111; background: white; }
+.intake-label-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; border-bottom: 1px solid #111; padding-bottom: 10px; }
+.intake-label-heading strong { font-size: 20px; }
+.intake-label-heading span { font-size: 12px; font-weight: 800; }
+.intake-label-print > code { font-size: 16px; font-weight: 800; }
+.intake-label-print dl { display: grid; width: 100%; gap: 7px; margin: 0; }
+.intake-label-print dl > div { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 10px; border-top: 1px solid #ddd; padding-top: 7px; }
+.intake-label-print dt { color: #555; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.intake-label-print dd { margin: 0; font-size: 11px; font-weight: 650; }
 .empty-state.compact { min-height: 82px; }
 .packet-selection { border-top: 1px solid var(--line); }
 .packet-selection input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--green); }
@@ -997,6 +1015,11 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .guided-scan-form .primary-button, .guided-upload-form .primary-button { margin-bottom: 0; min-height: 43px; }
 @media (max-width: 900px) { .guided-upload-form, .guided-packet-scan { grid-template-columns: 1fr 1fr; } .guided-upload-form .primary-button, .guided-packet-scan .primary-button { grid-column: 1 / -1; } }
 @media (max-width: 600px) { .guided-scan-form, .guided-upload-form, .guided-packet-scan { grid-template-columns: 1fr; } .guided-upload-form .primary-button, .guided-packet-scan .primary-button { grid-column: auto; } }
+@media print {
+  body * { visibility: hidden !important; }
+  .intake-label-print, .intake-label-print * { visibility: visible !important; }
+  .intake-label-print { position: fixed; inset: 0; width: 100mm; height: auto; margin: 0; border: 2px solid #000; }
+}
 
 /* Reference-style Evaluation Desk shell */
 .evaluation-viewer { grid-template-rows: 72px 54px minmax(0, 1fr) 82px; background: #f7f5ef; color: #0f2a2c; }

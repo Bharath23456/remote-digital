@@ -1,15 +1,18 @@
 "use client";
 
-import { Boxes, Check, ChevronLeft, ChevronRight, CloudUpload, PackageCheck, PackagePlus, ScanLine, X } from "lucide-react";
+import { Boxes, Check, ChevronLeft, ChevronRight, CloudUpload, PackageCheck, PackagePlus, Printer, QrCode, ScanLine, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { csrfFetch } from "@/lib/api";
+import { QRCodeSVG } from "qrcode.react";
 
 type Stage = "receiving" | "custody" | "digitization";
 type Paper = { id: string; code: string; title: string };
 type College = { id: string; code: string; name: string };
-type PreparedPacket = { id: string; barcode: string; paper_id: string; subject: string; paper_title: string; source_college_id: string; source_college: string; expected_scripts: number; status: "ready" | "bundled"; version: number; created_at: string };
-type Packet = { id: string; barcode: string; subject: string; status: string; expected_scripts: number; scanned_scripts: number; missing_count: number; missing_references: string[]; manual_recognition_enabled?: boolean };
-type Bundle = { id: string; barcode: string; source_centre: string; source_college_id?: string | null; mode: string; status: string; expected_packets: number; received_packets: number; expected_scripts: number; scanned_scripts: number; packets: Packet[] };
+type Centre = { id: string; code: string; name: string };
+type PreparedPacket = { id: string; barcode: string; qr_value: string; paper_id: string; subject: string; paper_title: string; source_college_id: string; source_college: string; prepared_centre: Centre | null; expected_scripts: number; status: "ready" | "bundled"; version: number; created_at: string };
+type Packet = { id: string; barcode: string; qr_value?: string; subject: string; status: string; expected_scripts: number; scanned_scripts: number; missing_count: number; missing_references: string[]; received_centre?: Centre | null; manual_recognition_enabled?: boolean };
+type Bundle = { id: string; barcode: string; qr_value: string; source_centre: string; source_college_id?: string | null; prepared_centre: Centre | null; received_centre: Centre | null; mode: string; status: string; expected_packets: number; received_packets: number; expected_scripts: number; scanned_scripts: number; packets: Packet[] };
+type PrintableLabel = { kind: "Packet" | "Bundle"; code: string; college: string; centre: string; detail: string };
 
 const root = "/api/v1/receiving/guided";
 
@@ -32,13 +35,13 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   const [preparedPackets, setPreparedPackets] = useState<PreparedPacket[]>([]);
   const [bundles, setBundles] = useState<Bundle[]>([]);
   const [preparationStep, setPreparationStep] = useState<"packets" | "bundle">("packets");
+  const [currentCentre, setCurrentCentre] = useState<Centre | null>(null);
   const [collegeId, setCollegeId] = useState("");
-  const [packetBarcode, setPacketBarcode] = useState("");
   const [paperId, setPaperId] = useState("");
   const [bookletScan, setBookletScan] = useState("");
   const [bookletCodes, setBookletCodes] = useState<string[]>([]);
   const [selectedPacketIds, setSelectedPacketIds] = useState<string[]>([]);
-  const [bundleCode, setBundleCode] = useState("");
+  const [printableLabel, setPrintableLabel] = useState<PrintableLabel | null>(null);
   const [mode, setMode] = useState<"transfer" | "on_site">("transfer");
   const [arrivalCode, setArrivalCode] = useState("");
   const [activeBundleCode, setActiveBundleCode] = useState("");
@@ -62,15 +65,15 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
 
   const load = useCallback(async () => {
     try {
-      if (stage !== "digitization") {
-        const intake = await api(`${root}/catalog`);
-        setBundles(intake.bundles || []);
-      }
+      const intake = await api(`${root}/catalog`);
+      if (stage !== "digitization") setBundles(intake.bundles || []);
+      setCurrentCentre(intake.centre || null);
       if (stage === "receiving") {
         const preparation = await api(`${root}/preparation`);
         setPapers(preparation.papers || []);
         setColleges(preparation.colleges || []);
         setPreparedPackets(preparation.packets || []);
+        setCurrentCentre(preparation.centre || null);
         setCollegeId((current) => current || preparation.colleges?.[0]?.id || "");
       }
       if (stage === "custody" && activeBundleCode) setActiveBundle(await api(`${root}/lookup/bundles/${encodeURIComponent(activeBundleCode)}`));
@@ -90,11 +93,12 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
 
   async function savePreparedPacket(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!collegeId || !paperId || !packetBarcode.trim() || !bookletCodes.length) { setError("Choose a college and subject, then scan at least one booklet QR"); return; }
+    if (!collegeId || !paperId || !bookletCodes.length) { setError("Choose a college and subject, then scan at least one booklet QR"); return; }
     setBusy(true); setError(""); setNotice("");
     try {
-      const created = await post(`${root}/prepared-packets`, { barcode: packetBarcode, paper_id: paperId, source_college_id: collegeId, script_barcodes: bookletCodes });
-      setPacketBarcode(""); setPaperId(""); setBookletCodes([]); setBookletScan("");
+      const created = await post(`${root}/prepared-packets`, { paper_id: paperId, source_college_id: collegeId, script_barcodes: bookletCodes });
+      setPaperId(""); setBookletCodes([]); setBookletScan("");
+      setPrintableLabel({ kind: "Packet", code: created.qr_value, college: created.source_college, centre: created.prepared_centre?.name || currentCentre?.name || "", detail: `${created.subject} - ${created.expected_scripts} scripts` });
       setNotice(`${created.barcode} is ready with ${created.expected_scripts} expected scripts.`);
       await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Packet could not be prepared"); }
@@ -103,20 +107,20 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
 
   async function createBundle(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const code = bundleCode.trim().toUpperCase();
-    if (!collegeId || !code || !selectedPacketIds.length) { setError("Choose a college and at least one ready packet"); return; }
+    if (!collegeId || !selectedPacketIds.length) { setError("Choose a college and at least one ready packet"); return; }
     setBusy(true); setError(""); setNotice("");
-    let created = false;
+    let code = "";
     try {
-      await post(`${root}/bundles/from-packets`, { barcode: code, source_college_id: collegeId, mode, packet_ids: selectedPacketIds });
-      created = true;
+      const created = await post(`${root}/bundles/from-packets`, { source_college_id: collegeId, mode, packet_ids: selectedPacketIds });
+      code = created.barcode;
       await post(`${root}/bundles/start`, { barcode: code });
-      setBundleCode(""); setSelectedPacketIds([]);
+      setSelectedPacketIds([]);
+      setPrintableLabel({ kind: "Bundle", code: created.qr_value, college: colleges.find((college) => college.id === collegeId)?.name || "", centre: created.centre?.name || currentCentre?.name || "", detail: `${selectedPacketIds.length} packets - ${selectedScriptCount} scripts` });
       setNotice(mode === "transfer" ? `Bundle ${code} dispatched to the university.` : `Bundle ${code} opened for on-site scanning.`);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Bundle could not be prepared");
-      if (created) setNotice(`Bundle ${code} was created. Use Start in Recent bundles to continue.`);
+      if (code) setNotice(`Bundle ${code} was created. Use Start in Recent bundles to continue.`);
     } finally { setBusy(false); }
   }
 
@@ -164,6 +168,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
     try {
       const match = await api(`${root}/lookup/packets/${encodeURIComponent(code)}`);
       setSelectedPacket(match.id); setSelectedPacketBarcode(code); setActivePacket(match); setPacketLookup(""); clearManualEntry();
+      setCurrentCentre(match.received_centre || null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Packet could not be opened"); }
     finally { setBusy(false); }
   }
@@ -225,6 +230,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
   const selectedScriptCount = selectedPackets.reduce((total, packet) => total + packet.expected_scripts, 0);
   const pageCount = Math.max(1, Math.ceil(bundles.length / 10));
   return <div className="config-workspace guided-desk">
+    {currentCentre && <div className="intake-centre-band"><span>Operating centre</span><strong>{currentCentre.code} - {currentCentre.name}</strong></div>}
     {notice && <div className="success-banner"><Check />{notice}</div>}
     {error && <div className="form-error" role="alert">{error}</div>}
 
@@ -242,7 +248,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
           <form onSubmit={savePreparedPacket}>
             <div className="form-grid guided-form-body">
               <label className="field"><span>College</span><select value={collegeId} onChange={(event) => { setCollegeId(event.target.value); setSelectedPacketIds([]); }} required disabled={!colleges.length}><option value="">Select college</option>{colleges.map((college) => <option key={college.id} value={college.id}>{college.code} - {college.name}</option>)}</select></label>
-              <label className="field"><span>Packet barcode</span><input value={packetBarcode} onChange={(event) => setPacketBarcode(event.target.value.toUpperCase())} required placeholder="PKT-2026-001" autoComplete="off" /></label>
+              <div className="generated-code-note"><QrCode /><div><strong>Packet QR generated automatically</strong><span>A printable label opens after the packet is saved.</span></div></div>
               <label className="field full-field"><span>Subject / paper</span><select value={paperId} onChange={(event) => setPaperId(event.target.value)} required><option value="">Select subject</option>{papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.code} - {paper.title}</option>)}</select></label>
             </div>
             <div className="booklet-scan-area">
@@ -252,11 +258,11 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
               </div>
               {bookletCodes.length ? <div className="booklet-code-list">{bookletCodes.map((code, index) => <div key={code}><span>{index + 1}</span><strong>{code}</strong><button type="button" className="icon-button" title={`Remove ${code}`} onClick={() => setBookletCodes((current) => current.filter((item) => item !== code))}><X /></button></div>)}</div> : <div className="empty-state compact">No booklet QR codes scanned for this packet.</div>}
             </div>
-            <footer className="modal-footer"><button type="submit" className="primary-button" disabled={busy || !colleges.length}>{busy ? "Saving packet..." : "Save ready packet"}<PackagePlus /></button></footer>
+            <footer className="modal-footer"><button type="submit" className="primary-button" disabled={busy || !colleges.length}>{busy ? "Generating packet..." : "Create packet and QR"}<PackagePlus /></button></footer>
           </form>
         </section>
         <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Ready packets</h2><p className="panel-subtitle">Saved packets can be grouped into a bundle in the next step.</p></div><button type="button" className="secondary-button" disabled={!readyPackets.length} onClick={() => setPreparationStep("bundle")}>Create bundle<ChevronRight /></button></header>
-          <div className="table-wrap"><table><thead><tr><th>Packet</th><th>College</th><th>Subject</th><th>Booklets</th><th>Status</th></tr></thead><tbody>{preparedPackets.slice(0, 30).map((packet) => <tr key={packet.id}><td><strong>{packet.barcode}</strong></td><td>{packet.source_college}</td><td>{packet.subject} - {packet.paper_title}</td><td>{packet.expected_scripts}</td><td>{packet.status === "ready" ? "Ready" : "Bundled"}</td></tr>)}</tbody></table></div>
+          <div className="table-wrap"><table><thead><tr><th>Packet</th><th>College</th><th>Subject</th><th>Booklets</th><th>Status</th><th>Label</th></tr></thead><tbody>{preparedPackets.slice(0, 30).map((packet) => <tr key={packet.id}><td><strong>{packet.barcode}</strong></td><td>{packet.source_college}</td><td>{packet.subject} - {packet.paper_title}</td><td>{packet.expected_scripts}</td><td>{packet.status === "ready" ? "Ready" : "Bundled"}</td><td><button type="button" className="icon-button" title={`Show QR for ${packet.barcode}`} onClick={() => setPrintableLabel({ kind: "Packet", code: packet.qr_value || packet.barcode, college: packet.source_college, centre: packet.prepared_centre?.name || currentCentre?.name || "", detail: `${packet.subject} - ${packet.expected_scripts} scripts` })}><QrCode /></button></td></tr>)}</tbody></table></div>
           {!preparedPackets.length && <div className="empty-state">No packets prepared yet.</div>}
         </section>
       </>}
@@ -265,16 +271,16 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         <form onSubmit={createBundle}>
           <div className="form-grid guided-form-body">
             <label className="field"><span>College</span><select value={collegeId} onChange={(event) => { setCollegeId(event.target.value); setSelectedPacketIds([]); }} required disabled={!colleges.length}><option value="">Select college</option>{colleges.map((college) => <option key={college.id} value={college.id}>{college.code} - {college.name}</option>)}</select></label>
-            <label className="field"><span>Bundle barcode</span><input value={bundleCode} onChange={(event) => setBundleCode(event.target.value.toUpperCase())} required placeholder="BND-2026-001" autoComplete="off" /></label>
+            <div className="generated-code-note"><QrCode /><div><strong>Bundle QR generated automatically</strong><span>A printable label opens after creation.</span></div></div>
             <label className="field full-field"><span>Route</span><select value={mode} onChange={(event) => setMode(event.target.value as "transfer" | "on_site")}><option value="transfer">Dispatch to university</option><option value="on_site">Scan at this college</option></select></label>
           </div>
           <div className="packet-selection"><div className="table-wrap"><table><thead><tr><th aria-label="Select packet"></th><th>Packet</th><th>Subject</th><th>Booklets</th><th>Prepared</th></tr></thead><tbody>{collegeReadyPackets.map((packet) => <tr key={packet.id}><td><input type="checkbox" aria-label={`Select ${packet.barcode}`} checked={selectedPacketIds.includes(packet.id)} onChange={(event) => setSelectedPacketIds((current) => event.target.checked ? [...current, packet.id] : current.filter((id) => id !== packet.id))} /></td><td><strong>{packet.barcode}</strong></td><td>{packet.subject} - {packet.paper_title}</td><td>{packet.expected_scripts}</td><td>{new Date(packet.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>{!collegeReadyPackets.length && <div className="empty-state">No ready packets exist for this college. Prepare a packet first.</div>}</div>
-          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setPreparationStep("packets")}><ChevronLeft />Prepare packets</button><button type="submit" className="primary-button" disabled={busy || !selectedPacketIds.length}>{busy ? "Creating bundle..." : mode === "transfer" ? "Create and dispatch" : "Create on-site bundle"}<Boxes /></button></footer>
+          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setPreparationStep("packets")}><ChevronLeft />Prepare packets</button><button type="submit" className="primary-button" disabled={busy || !selectedPacketIds.length}>{busy ? "Generating bundle..." : mode === "transfer" ? "Create QR and dispatch" : "Create on-site bundle QR"}<Boxes /></button></footer>
         </form>
       </section>}
 
       <section className="panel"><header className="panel-header"><div><h2 className="panel-title">Recent bundles</h2><p className="panel-subtitle">Showing {bundles.length} most recent</p></div></header>
-        <div className="table-wrap"><table><thead><tr><th>Bundle</th><th>Source</th><th>Route</th><th>Packets</th><th>Status</th><th>Action</th></tr></thead><tbody>{bundles.slice((bundlePage - 1) * 10, bundlePage * 10).map((bundle) => <tr key={bundle.id}><td><strong>{bundle.barcode}</strong></td><td>{bundle.source_centre}</td><td>{bundle.mode === "on_site" ? "On site" : "Transfer"}</td><td>{bundle.expected_packets}</td><td>{bundle.status.replaceAll("_", " ")}</td><td>{bundle.status === "registered" && <button className="text-button" disabled={busy} onClick={() => void startBundle(bundle)}>Start</button>}</td></tr>)}</tbody></table></div>
+        <div className="table-wrap"><table><thead><tr><th>Bundle</th><th>Source</th><th>Route</th><th>Packets</th><th>Status</th><th>Action</th></tr></thead><tbody>{bundles.slice((bundlePage - 1) * 10, bundlePage * 10).map((bundle) => <tr key={bundle.id}><td><strong>{bundle.barcode}</strong></td><td>{bundle.source_centre}</td><td>{bundle.mode === "on_site" ? "On site" : "Transfer"}</td><td>{bundle.expected_packets}</td><td>{bundle.status.replaceAll("_", " ")}</td><td><div className="row-actions"><button type="button" className="icon-button" title={`Show QR for ${bundle.barcode}`} onClick={() => setPrintableLabel({ kind: "Bundle", code: bundle.qr_value || bundle.barcode, college: bundle.source_centre, centre: bundle.prepared_centre?.name || currentCentre?.name || "", detail: `${bundle.expected_packets} packets - ${bundle.expected_scripts} scripts` })}><QrCode /></button>{bundle.status === "registered" && <button className="text-button" disabled={busy} onClick={() => void startBundle(bundle)}>Start</button>}</div></td></tr>)}</tbody></table></div>
         {!bundles.length && <div className="empty-state">No bundles prepared yet.</div>}
         {pageCount > 1 && <div className="guided-pagination"><button className="icon-button" title="Previous page" disabled={bundlePage <= 1} onClick={() => setBundlePage(bundlePage - 1)}><ChevronLeft /></button><span>{bundlePage} / {pageCount}</span><button className="icon-button" title="Next page" disabled={bundlePage >= pageCount} onClick={() => setBundlePage(bundlePage + 1)}><ChevronRight /></button></div>}
       </section>
@@ -300,5 +306,7 @@ export function GuidedIntakeWorkspace({ stage }: { stage: Stage }) {
         {activePacket.status === "complete" ? <div className="success-banner"><Check />Packet complete. All expected scripts are scanned.</div> : <form className={`guided-upload-form ${manualEntryRequired ? "manual-recognition" : ""}`} onSubmit={upload}><label className="field"><span>Front page</span><input type="file" accept="image/jpeg,image/png,image/webp" required onChange={(event) => { setCoverFile(event.target.files?.[0] || null); clearManualEntry(); }} /></label><label className="field"><span>Answer pages</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => setAnswerFiles(Array.from(event.target.files || []).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })))} /></label>{manualEntryRequired && <><label className="field"><span>Booklet QR code</span><input value={manualQr} onChange={(event) => setManualQr(event.target.value)} required autoComplete="off" spellCheck={false} maxLength={64} /></label><label className="field"><span>USN from front page</span><input value={manualUsn} onChange={(event) => setManualUsn(event.target.value.toUpperCase())} required autoComplete="off" spellCheck={false} maxLength={20} /></label></>}<button type="submit" className="primary-button" disabled={busy || !coverFile || (manualEntryRequired && (!manualQr.trim() || !manualUsn.trim()))}><CloudUpload />{busy ? "Recognizing and uploading..." : manualEntryRequired ? "Confirm details and upload" : "Upload script"}</button></form>}
       </section>}
     </>}
+
+    {printableLabel && <div className="modal-backdrop"><section className="modal-panel compact intake-label-modal" role="dialog" aria-modal="true" aria-label={`${printableLabel.kind} QR label`}><header className="modal-header no-print"><div><h2>{printableLabel.kind} QR ready</h2><p>Print and attach this label before handover.</p></div><button type="button" className="icon-button" title="Close" onClick={() => setPrintableLabel(null)}><X /></button></header><div className="intake-label-print"><div className="intake-label-heading"><strong>ADMIEZO</strong><span>{printableLabel.kind.toUpperCase()}</span></div><QRCodeSVG value={printableLabel.code} size={220} level="M" includeMargin /><code>{printableLabel.code}</code><dl><div><dt>College</dt><dd>{printableLabel.college}</dd></div><div><dt>Centre</dt><dd>{printableLabel.centre}</dd></div><div><dt>Contents</dt><dd>{printableLabel.detail}</dd></div></dl></div><footer className="modal-footer no-print"><button type="button" className="secondary-button" onClick={() => setPrintableLabel(null)}>Close</button><button type="button" className="primary-button" onClick={() => window.print()}><Printer />Print label</button></footer></section></div>}
   </div>;
 }

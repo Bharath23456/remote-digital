@@ -1,5 +1,6 @@
 from datetime import timedelta
 import secrets
+from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -14,6 +15,7 @@ from apps.core.authz import ROLE_MODULES, allowed_modules_for_role, membership_f
 from apps.core.services import record_event
 from apps.identity_auth.models import AccessSession, AuthenticationMethod, DeviceAuthorization, OidcProvider
 from apps.identity_auth.services import active_session_for_request, policy_for
+from apps.phase4.models import CentreProfile
 from apps.security.crypto import encrypt_secret
 from apps.tenancy.custom_fields import validate_custom_values
 from apps.tenancy.models import Membership, TenantAccount
@@ -33,6 +35,16 @@ from .services import decide_privileged_request, grant_emergency_access, update_
 
 
 router = Router(tags=["Data security and access governance"])
+OPERATIONAL_CENTRE_ROLES = {
+    Membership.Role.BUNDLE_PREPARER,
+    Membership.Role.INTAKE_RECEIVER,
+    Membership.Role.SCAN_OPERATOR,
+    Membership.Role.OPERATIONS_SUPERVISOR,
+    Membership.Role.RECEIVING_OFFICER,
+    Membership.Role.SCRIPT_RECEIVER,
+    Membership.Role.SCANNER_OPERATOR,
+    Membership.Role.CUSTODY_OFFICER,
+}
 
 
 def _policy_data(policy):
@@ -73,6 +85,22 @@ def _policy_data(policy):
     }
 
 
+def _validated_operational_centre(tenant_id, role, centre_id, is_active=True):
+    required = is_active and role in OPERATIONAL_CENTRE_ROLES
+    if not centre_id:
+        if required:
+            raise HttpError(422, "Select an active centre for this operational role")
+        return None
+    try:
+        value = UUID(str(centre_id))
+    except (TypeError, ValueError) as exc:
+        raise HttpError(422, "Select a valid operational centre") from exc
+    centre = CentreProfile.objects.filter(tenant_id=tenant_id, id=value, status=CentreProfile.Status.ACTIVE).first()
+    if not centre:
+        raise HttpError(422, "Select an active centre in this university")
+    return centre
+
+
 @router.get("/catalog")
 def security_catalog(request):
     membership = require_roles(
@@ -97,6 +125,8 @@ def security_catalog(request):
     ).values_list("user_id", flat=True))
     account = TenantAccount.objects.filter(root_institution__tenant_id=tenant_id).first()
     providers = OidcProvider.objects.filter(tenant_id=tenant_id).order_by("name")
+    centres = list(CentreProfile.objects.filter(tenant_id=tenant_id).order_by("name"))
+    centre_by_id = {item.id: item for item in centres}
     devices = DeviceAuthorization.objects.filter(tenant_id=tenant_id).select_related("device__user", "approved_by").order_by("-created_at")[:100]
     keys = EncryptionKeyMetadata.objects.order_by("purpose")
     from apps.ai_evaluation.services import provider_status
@@ -186,6 +216,11 @@ def security_catalog(request):
                 "permissions": item.permissions,
                 "enabled_modules": allowed_modules_for_role(item.role, item.enabled_modules or (account.enabled_modules if account else [])),
                 "custom_fields": item.custom_fields,
+                "operational_centre_id": str(item.operational_centre_id) if item.operational_centre_id else None,
+                "operational_centre": (
+                    {"id": str(centre_by_id[item.operational_centre_id].id), "code": centre_by_id[item.operational_centre_id].code, "name": centre_by_id[item.operational_centre_id].name}
+                    if item.operational_centre_id in centre_by_id else None
+                ),
                 "is_active": item.is_active,
             }
             for item in members
@@ -201,6 +236,16 @@ def security_catalog(request):
                 "is_active": item.is_active,
             }
             for item in providers
+        ],
+        "centres": [
+            {
+                "id": str(item.id),
+                "code": item.code,
+                "name": item.name,
+                "location": item.location,
+                "status": item.status,
+            }
+            for item in centres
         ],
         "key_inventory": [
             {
@@ -273,6 +318,11 @@ def create_membership(request, payload: MembershipCreateIn):
     except ValidationError as exc:
         raise HttpError(422, "Enter a valid email address") from exc
     modules = _validate_membership_access(actor_membership, payload.role, payload.enabled_modules)
+    centre = _validated_operational_centre(
+        actor_membership.institution.tenant_id,
+        payload.role,
+        payload.operational_centre_id,
+    )
     if payload.role == Membership.Role.OPERATIONS_SUPERVISOR and payload.permissions:
         raise HttpError(422, "Operations supervisors cannot receive additional permissions")
     custom_fields = validate_custom_values(
@@ -299,6 +349,7 @@ def create_membership(request, payload: MembershipCreateIn):
             permissions=sorted(set(payload.permissions)),
             enabled_modules=modules,
             custom_fields=custom_fields,
+            operational_centre_id=centre.id if centre else None,
             must_change_password=bool(temporary_password),
         )
         record_event(
@@ -307,7 +358,7 @@ def create_membership(request, payload: MembershipCreateIn):
             action="security.membership.created",
             aggregate="Membership",
             aggregate_id=membership.id,
-            payload={"user_id": user.id, "role": membership.role, "enabled_modules": modules, "existing_identity": not created},
+            payload={"user_id": user.id, "role": membership.role, "enabled_modules": modules, "operational_centre_id": str(centre.id) if centre else None, "existing_identity": not created},
         )
     return {
         "id": str(membership.id),
@@ -317,6 +368,7 @@ def create_membership(request, payload: MembershipCreateIn):
         "existing_identity": not created,
         "role": membership.role,
         "enabled_modules": membership.enabled_modules,
+        "operational_centre_id": str(membership.operational_centre_id) if membership.operational_centre_id else None,
     }
 
 
@@ -529,6 +581,12 @@ def update_membership_access(request, membership_id: str, payload: MembershipAcc
     actor_membership = require_roles(request, Membership.Role.PLATFORM_ADMIN, Membership.Role.UNIVERSITY_ADMIN)
     require_step_up(request)
     modules = _validate_membership_access(actor_membership, payload.role, payload.enabled_modules)
+    centre = _validated_operational_centre(
+        actor_membership.institution.tenant_id,
+        payload.role,
+        payload.operational_centre_id,
+        payload.is_active,
+    )
     if payload.role == Membership.Role.OPERATIONS_SUPERVISOR and payload.permissions:
         raise HttpError(422, "Operations supervisors cannot receive additional permissions")
     with transaction.atomic():
@@ -539,21 +597,22 @@ def update_membership_access(request, membership_id: str, payload: MembershipAcc
             raise HttpError(404, "Membership not found")
         if target.user_id == request.auth.id and not payload.is_active:
             raise HttpError(409, "You cannot deactivate your own membership")
-        previous = {"role": target.role, "permissions": target.permissions, "enabled_modules": target.enabled_modules, "is_active": target.is_active}
+        previous = {"role": target.role, "permissions": target.permissions, "enabled_modules": target.enabled_modules, "operational_centre_id": str(target.operational_centre_id) if target.operational_centre_id else None, "is_active": target.is_active}
         target.role = payload.role
         target.permissions = sorted(set(payload.permissions))
         target.enabled_modules = modules
+        target.operational_centre_id = centre.id if centre else None
         target.is_active = payload.is_active
-        target.save(update_fields=["role", "permissions", "enabled_modules", "is_active", "updated_at"])
+        target.save(update_fields=["role", "permissions", "enabled_modules", "operational_centre_id", "is_active", "updated_at"])
         record_event(
             tenant_id=actor_membership.institution.tenant_id,
             actor_id=request.auth.id,
             action="security.membership.updated",
             aggregate="Membership",
             aggregate_id=target.id,
-            payload={"before": previous, "role": target.role, "permissions": target.permissions, "enabled_modules": target.enabled_modules, "is_active": target.is_active},
+            payload={"before": previous, "role": target.role, "permissions": target.permissions, "enabled_modules": target.enabled_modules, "operational_centre_id": str(target.operational_centre_id) if target.operational_centre_id else None, "is_active": target.is_active},
         )
-    return {"id": str(target.id), "role": target.role, "permissions": target.permissions, "enabled_modules": target.enabled_modules, "is_active": target.is_active}
+    return {"id": str(target.id), "role": target.role, "permissions": target.permissions, "enabled_modules": target.enabled_modules, "operational_centre_id": str(target.operational_centre_id) if target.operational_centre_id else None, "is_active": target.is_active}
 
 
 @router.post("/oidc-providers")
