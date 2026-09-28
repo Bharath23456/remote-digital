@@ -111,7 +111,7 @@ class TenantEntitlementMiddleware:
         ("/api/v1/phase4/runtime/", "operations"),
         ("/api/v1/phase4/issues", "operations"),
         ("/api/v1/phase4/notifications", "operations"),
-        ("/api/v1/phase4/centres", "operations"),
+        ("/api/v1/phase4/centres", "security"),
         ("/api/v1/phase4/remuneration/", "services"),
         ("/api/v1/phase4/student/", "services"),
     )
@@ -145,7 +145,7 @@ class TenantEntitlementMiddleware:
 
     def _module_for(self, request):
         if request.path == "/api/v1/phase4/catalog":
-            return {"assessment": "assessment", "operations": "operations", "services": "services"}.get(request.GET.get("section", ""))
+            return {"assessment": "assessment", "operations": "operations", "services": "services", "centres": "security"}.get(request.GET.get("section", ""))
         if request.path == "/api/v1/receiving/guided/catalog":
             return None
         if re.fullmatch(r"/api/v1/receiving/guided/lookup/bundles/[^/]+", request.path):

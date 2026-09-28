@@ -32,6 +32,8 @@ class Dispatch(TenantModel):
         on_delete=models.PROTECT,
         related_name="intake_dispatches",
     )
+    prepared_centre_id = models.UUIDField(null=True, blank=True, db_index=True)
+    received_centre_id = models.UUIDField(null=True, blank=True, db_index=True)
     expected_packets = models.PositiveIntegerField()
     expected_scripts = models.PositiveIntegerField()
     received_packets = models.PositiveIntegerField(default=0)
@@ -65,6 +67,7 @@ class Packet(TenantModel):
     seal_number = models.CharField(max_length=80, blank=True)
     handed_over_by = models.CharField(max_length=120, blank=True)
     received_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="packets_received")
+    received_centre_id = models.UUIDField(null=True, blank=True, db_index=True)
     received_at = models.DateTimeField(null=True, blank=True)
     version = models.PositiveIntegerField(default=1)
 
@@ -77,6 +80,7 @@ class PreparedPacket(TenantModel):
     barcode = models.CharField(max_length=64, unique=True)
     paper = models.ForeignKey(Paper, on_delete=models.PROTECT, related_name="prepared_intake_packets")
     source_college = models.ForeignKey(Institution, on_delete=models.PROTECT, related_name="prepared_intake_packets")
+    prepared_centre_id = models.UUIDField(null=True, blank=True, db_index=True)
     script_manifest = models.JSONField(default=list)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.READY)
     prepared_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="prepared_intake_packets")

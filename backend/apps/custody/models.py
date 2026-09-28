@@ -35,6 +35,7 @@ class Script(TenantModel):
     version = models.PositiveIntegerField(default=1)
     bundle_barcode = models.CharField(max_length=64, blank=True)
     centre_barcode = models.CharField(max_length=64, blank=True)
+    digitized_centre_id = models.UUIDField(null=True, blank=True, db_index=True)
     last_location = models.CharField(max_length=120, blank=True)
     removed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     removed_by_id = models.PositiveBigIntegerField(null=True, blank=True)

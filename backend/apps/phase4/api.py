@@ -630,6 +630,7 @@ def catalog(request, section: str = ""):
     section_fields = {
         "assessment": {"moderation_policies", "moderation_cases", "revaluations", "completions", "authorizations"},
         "operations": {"monitoring", "productivity", "active_evaluations", "presence_events", "secure_sessions", "remote_support_sessions", "proctoring_reviews", "attendance", "workload_actions", "runtime_incidents", "issues", "knowledge", "notifications", "centres", "readiness", "camps"},
+        "centres": {"centres", "readiness", "camps"},
         "services": {"remuneration_rules", "statements", "student_requests"},
         "platform": {"evidence_packages", "integrations", "university_api_keys", "handovers", "recovery_plans", "recovery_drills"},
     }
