@@ -25,7 +25,10 @@ const endpoints: Record<EntityKey, string> = {
 
 const titleCase = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const id = (row: Record<string, unknown>) => String(row.id);
-const oneDecimal = (value: unknown) => Number(value).toFixed(1);
+const markInputValue = (value: unknown) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : "";
+};
 const localDateTime = (value: unknown) => {
   if (!value) return undefined;
   const date = new Date(String(value));
@@ -331,7 +334,7 @@ export function ConfigurationWorkspace() {
 
 function PaperFields({ paper }: { paper: Record<string, unknown> }) {
   const rules = paper.rules as { critical_change?: boolean; second_valuation_mark_threshold?: string | null } | undefined;
-  return <div className="form-grid"><label className="field full-field"><span>Paper title</span><input name="title" defaultValue={String(paper.title)} required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0.1" step="0.1" defaultValue={oneDecimal(paper.max_marks)} required /></label><label className="field"><span>Passing marks</span><input name="pass_marks" type="number" min="0" step="0.1" defaultValue={oneDecimal(paper.pass_marks)} required /></label><label className="field"><span>Valuation rounds</span><input name="valuation_rounds" type="number" min="1" max="3" defaultValue={String(paper.valuation_rounds)} required /></label><label className="field"><span>Round 2 if score exceeds (one-round papers only)</span><input name="second_valuation_mark_threshold" type="number" min="0" step="0.01" defaultValue={rules?.second_valuation_mark_threshold == null ? "" : String(rules.second_valuation_mark_threshold)} /></label><label className="field"><span>Difference threshold between rounds</span><input name="discrepancy_threshold" type="number" min="0" step="0.01" defaultValue={String(paper.discrepancy_threshold)} required /></label><label className="field check-field"><input name="moderation_required" type="checkbox" defaultChecked={Boolean(paper.moderation_required)} /><span>Moderation required</span></label><label className="field check-field"><input name="critical_change" type="checkbox" defaultChecked={Boolean(rules?.critical_change)} /><span>Critical changes need dual approval</span></label></div>;
+  return <div className="form-grid"><label className="field full-field"><span>Paper title</span><input name="title" defaultValue={String(paper.title)} required /></label><label className="field"><span>Maximum marks</span><input name="max_marks" type="number" min="0.1" step="0.1" defaultValue={markInputValue(paper.max_marks)} required /></label><label className="field"><span>Passing marks</span><input name="pass_marks" type="number" min="0" step="0.1" defaultValue={markInputValue(paper.pass_marks)} required /></label><label className="field"><span>Valuation rounds</span><input name="valuation_rounds" type="number" min="1" max="3" defaultValue={String(paper.valuation_rounds)} required /></label><label className="field"><span>Round 2 if score exceeds (one-round papers only)</span><input name="second_valuation_mark_threshold" type="number" min="0" step="0.01" defaultValue={rules?.second_valuation_mark_threshold == null ? "" : String(rules.second_valuation_mark_threshold)} /></label><label className="field"><span>Difference threshold between rounds</span><input name="discrepancy_threshold" type="number" min="0" step="0.01" defaultValue={String(paper.discrepancy_threshold)} required /></label><label className="field check-field"><input name="moderation_required" type="checkbox" defaultChecked={Boolean(paper.moderation_required)} /><span>Moderation required</span></label><label className="field check-field"><input name="critical_change" type="checkbox" defaultChecked={Boolean(rules?.critical_change)} /><span>Critical changes need dual approval</span></label></div>;
 }
 
 type PaperAction = "submit" | "approve" | "freeze";

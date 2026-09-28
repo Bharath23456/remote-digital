@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
+from django.core import signing
 from django.db import transaction
 from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
@@ -57,6 +58,10 @@ from .models import (
 )
 
 
+SECURE_PREFLIGHT_SALT = "admiezo.secure-evaluation.preflight"
+SECURE_PREFLIGHT_MAX_AGE_SECONDS = 120
+
+
 SECURE_PAUSE_CATEGORIES = {
     "camera_obstructed",
     "camera_stopped",
@@ -71,17 +76,26 @@ SECURE_PAUSE_CATEGORIES = {
     "multiple_faces",
     "multiple_screens",
     "viewer_hidden",
+    "session_timeout",
 }
 
 
 def security_policy_snapshot(tenant_id):
     policy = SecurityPolicy.objects.filter(tenant_id=tenant_id).first() or SecurityPolicy()
     return {
-        "identity_verification_required": not settings.DEMO_SKIP_EVALUATOR_FACE_VERIFICATION,
+        "identity_verification_required": not settings.DEMO_SKIP_EVALUATOR_FACE_VERIFICATION and policy.evaluation_identity_verification_required,
+        "strict_mode": policy.evaluation_strict_mode,
         "camera_required": policy.evaluation_camera_required,
         "fullscreen_required": policy.evaluation_fullscreen_required,
         "single_screen_required": policy.evaluation_single_screen_required,
+        "mobile_allowed": policy.evaluation_mobile_allowed,
         "event_recording": policy.evaluation_event_recording,
+        "pause_on_violation": policy.evaluation_pause_on_violation,
+        "require_resume_step_up": policy.evaluation_require_resume_step_up,
+        "allow_clipboard": policy.evaluation_allow_clipboard,
+        "allow_download": policy.evaluation_allow_download,
+        "allow_print": policy.evaluation_allow_print,
+        "session_timeout_minutes": policy.evaluation_session_timeout_minutes,
         "heartbeat_seconds": policy.evaluation_heartbeat_seconds,
         "no_face_seconds": policy.evaluation_no_face_seconds,
         "retention_days": policy.evaluation_retention_days,
@@ -870,12 +884,17 @@ def _security_action(category, severity):
 
 def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id, category, severity, device_fingerprint, session_fingerprint, details, secure_session=None):
     action = _security_action(category, severity)
+    if category == "session_timeout":
+        action = "pause"
+    if secure_session and not secure_session.policy_snapshot.get("pause_on_violation", True) and action == "pause":
+        if category != "session_timeout":
+            action = "warn"
     checks = int(details.get("consecutive_checks") or 0)
-    terminal = (
+    terminal = action == "pause" and (
         (category == "multiple_faces" and checks >= 3)
         or (category == "phone_detected" and checks >= 2)
         or (category == "identity_mismatch" and checks >= 2)
-        or category in {"headphones_detected", "external_media_device"}
+        or category in {"headphones_detected", "external_media_device", "session_timeout"}
     )
     now = timezone.now()
     item = PresenceSecurityEvent.objects.create(
@@ -903,10 +922,12 @@ def _create_security_event(*, tenant_id, actor_id, assignment, access_session_id
                 "identity_mismatch": "identity_mismatch",
                 "multiple_faces": "multiple_faces_detected",
             }
-            AccessSession.objects.filter(id=access_session_id, tenant_id=tenant_id, revoked_at__isnull=True).update(
-                revoked_at=now,
-                revoked_reason=revoked_reasons[category],
-            )
+            revoked_reason = revoked_reasons.get(category)
+            if revoked_reason:
+                AccessSession.objects.filter(id=access_session_id, tenant_id=tenant_id, revoked_at__isnull=True).update(
+                    revoked_at=now,
+                    revoked_reason=revoked_reason,
+                )
         elif action == "pause":
             secure_session.status = SecureEvaluationSession.Status.PAUSED
             secure_session.pause_reason = category
@@ -945,6 +966,8 @@ def monitor_face_presence(*, tenant_id, actor_id, secure_session, access_session
     now = timezone.now()
     inventory = dict(secure_session.device_inventory or {})
     monitor = dict(inventory.get("face_monitor") or {})
+    monitor["last_presence_at"] = now.isoformat()
+    monitor.pop("presence_timeout_reported_at", None)
     previous_at = monitor.get("last_multiple_faces_at")
     previous_time = None
     if previous_at:
@@ -1018,11 +1041,61 @@ def monitor_face_presence(*, tenant_id, actor_id, secure_session, access_session
     return secure_session, face_count, consecutive, event, posture
 
 
+def issue_secure_preflight_token(*, tenant_id, evaluator_id, assignment_id, access_session_id, camera_ready, face_ready):
+    return signing.dumps(
+        {
+            "tenant_id": str(tenant_id),
+            "evaluator_id": str(evaluator_id),
+            "assignment_id": str(assignment_id),
+            "access_session_id": str(access_session_id),
+            "camera_ready": bool(camera_ready),
+            "face_ready": bool(face_ready),
+        },
+        salt=SECURE_PREFLIGHT_SALT,
+        compress=True,
+    )
+
+
+def verify_secure_preflight_token(*, token, tenant_id, evaluator_id, assignment_id, access_session_id):
+    try:
+        claims = signing.loads(
+            token,
+            salt=SECURE_PREFLIGHT_SALT,
+            max_age=SECURE_PREFLIGHT_MAX_AGE_SECONDS,
+        )
+    except signing.SignatureExpired as exc:
+        raise HttpError(409, "Camera security check expired; run the checks again") from exc
+    except signing.BadSignature as exc:
+        raise HttpError(409, "Run the camera security check before evaluation") from exc
+    expected = {
+        "tenant_id": str(tenant_id),
+        "evaluator_id": str(evaluator_id),
+        "assignment_id": str(assignment_id),
+        "access_session_id": str(access_session_id),
+    }
+    if any(str(claims.get(key, "")) != value for key, value in expected.items()):
+        raise HttpError(409, "Camera security check does not match this evaluation")
+    return claims
+
+
 @transaction.atomic
-def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluator, access_session, session_fingerprint, device_fingerprint, consent, preflight, device_inventory):
+def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluator, access_session, session_fingerprint, device_fingerprint, consent, preflight, device_inventory, preflight_token="", user_agent=""):
     policy = security_policy_snapshot(tenant_id)
     if not consent:
         raise HttpError(422, "Security monitoring consent is required")
+    verified_preflight = verify_secure_preflight_token(
+        token=preflight_token,
+        tenant_id=tenant_id,
+        evaluator_id=evaluator.id,
+        assignment_id=assignment.id,
+        access_session_id=access_session.id,
+    ) if policy["camera_required"] or policy["identity_verification_required"] else {}
+    if verified_preflight:
+        preflight = {
+            **preflight,
+            "camera_ready": bool(verified_preflight.get("camera_ready")),
+            "face_ready": bool(verified_preflight.get("face_ready")),
+        }
     if policy["camera_required"] and (
         not preflight.get("camera_ready")
         or not isinstance(device_inventory.get("video_inputs"), int)
@@ -1038,6 +1111,9 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
         raise HttpError(409, "Disconnect additional displays before evaluation")
     if device_inventory.get("headphones_detected"):
         raise HttpError(409, "Disconnect headphones, headsets, earbuds, and AirPods before evaluation")
+    mobile_user_agent = any(token in (user_agent or "").casefold() for token in ("android", "iphone", "ipad", "ipod", "mobile"))
+    if not policy["mobile_allowed"] and (bool(device_inventory.get("mobile")) or mobile_user_agent):
+        raise HttpError(409, "Mobile devices are not allowed for this evaluation")
     if len(session_fingerprint) != 64 or len(device_fingerprint) != 64:
         raise HttpError(422, "Secure device fingerprints are invalid")
     if policy["identity_verification_required"]:
@@ -1048,6 +1124,11 @@ def start_secure_evaluation_session(*, tenant_id, actor_id, assignment, evaluato
         except EvaluatorError as exc:
             raise HttpError(428, str(exc)) from exc
     now = timezone.now()
+    if policy["camera_required"]:
+        device_inventory = dict(device_inventory or {})
+        face_monitor = dict(device_inventory.get("face_monitor") or {})
+        face_monitor["last_presence_at"] = now.isoformat()
+        device_inventory["face_monitor"] = face_monitor
     for previous in SecureEvaluationSession.objects.select_for_update().filter(
         tenant_id=tenant_id,
         evaluator=evaluator,
@@ -1088,12 +1169,82 @@ def _posture_violation(item, posture):
     return ""
 
 
+def secure_evaluation_session_timed_out(item, now=None):
+    timeout_minutes = int(item.policy_snapshot.get("session_timeout_minutes") or 180)
+    return (now or timezone.now()) >= item.started_at + timedelta(minutes=timeout_minutes)
+
+
+@transaction.atomic
+def expire_secure_evaluation_session(*, tenant_id, actor_id, session_id, access_session_id):
+    item = SecureEvaluationSession.objects.select_for_update().select_related("assignment").filter(
+        id=session_id,
+        tenant_id=tenant_id,
+        access_session_id=access_session_id,
+    ).first()
+    if not item or item.status in {SecureEvaluationSession.Status.COMPLETED, SecureEvaluationSession.Status.ABANDONED}:
+        return item, None
+    if not secure_evaluation_session_timed_out(item):
+        return item, None
+    if item.pause_reason == "session_timeout":
+        return item, None
+    timeout_minutes = int(item.policy_snapshot.get("session_timeout_minutes") or 180)
+    event = _create_security_event(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        assignment=item.assignment,
+        access_session_id=access_session_id,
+        category="session_timeout",
+        severity="high",
+        device_fingerprint=item.device_fingerprint,
+        session_fingerprint=item.session_fingerprint,
+        details={"timeout_minutes": timeout_minutes},
+        secure_session=item,
+    )
+    return item, event
+
+
 @transaction.atomic
 def heartbeat_secure_evaluation_session(*, tenant_id, actor_id, session_id, access_session, posture):
     item = SecureEvaluationSession.objects.select_for_update().select_related("assignment").filter(id=session_id, tenant_id=tenant_id, access_session_id=access_session.id).first()
     if not item or item.status in {SecureEvaluationSession.Status.COMPLETED, SecureEvaluationSession.Status.ABANDONED}:
         raise HttpError(409, "Secure evaluation session is unavailable")
-    item.last_heartbeat_at = timezone.now()
+    now = timezone.now()
+    if secure_evaluation_session_timed_out(item, now):
+        timeout_minutes = int(item.policy_snapshot.get("session_timeout_minutes") or 180)
+        event = _create_security_event(tenant_id=tenant_id, actor_id=actor_id, assignment=item.assignment, access_session_id=access_session.id, category="session_timeout", severity="high", device_fingerprint=item.device_fingerprint, session_fingerprint=item.session_fingerprint, details={"timeout_minutes": timeout_minutes}, secure_session=item)
+        return item, event
+    item.last_heartbeat_at = now
+    inventory = dict(item.device_inventory or {})
+    face_monitor = dict(inventory.get("face_monitor") or {})
+    presence_timeout = max(15, int(item.policy_snapshot.get("no_face_seconds") or 5) * 2)
+    last_presence = None
+    try:
+        last_presence = datetime.fromisoformat(face_monitor.get("last_presence_at", ""))
+    except (TypeError, ValueError):
+        pass
+    presence_stale = (
+        item.policy_snapshot.get("camera_required")
+        and item.status == SecureEvaluationSession.Status.ACTIVE
+        and (not last_presence or now - last_presence > timedelta(seconds=presence_timeout))
+    )
+    if presence_stale and not face_monitor.get("presence_timeout_reported_at"):
+        face_monitor["presence_timeout_reported_at"] = now.isoformat()
+        inventory["face_monitor"] = face_monitor
+        item.device_inventory = inventory
+        item.save(update_fields=["last_heartbeat_at", "device_inventory", "updated_at"])
+        event = _create_security_event(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            assignment=item.assignment,
+            access_session_id=access_session.id,
+            category="camera_stopped",
+            severity="critical",
+            device_fingerprint=item.device_fingerprint,
+            session_fingerprint=item.session_fingerprint,
+            details={"reason": "server_face_presence_timeout", "timeout_seconds": presence_timeout},
+            secure_session=item,
+        )
+        return item, event
     item.save(update_fields=["last_heartbeat_at", "updated_at"])
     reason = _posture_violation(item, posture)
     event = None
@@ -1103,19 +1254,40 @@ def heartbeat_secure_evaluation_session(*, tenant_id, actor_id, session_id, acce
 
 
 @transaction.atomic
-def resume_secure_evaluation_session(*, tenant_id, actor_id, session_id, access_session, posture):
-    item = SecureEvaluationSession.objects.select_for_update().filter(id=session_id, tenant_id=tenant_id, access_session_id=access_session.id).first()
+def resume_secure_evaluation_session(*, tenant_id, actor_id, session_id, access_session, posture, preflight_token=""):
+    item = SecureEvaluationSession.objects.select_for_update().select_related("assignment", "evaluator").filter(id=session_id, tenant_id=tenant_id, access_session_id=access_session.id).first()
     if not item or item.status != SecureEvaluationSession.Status.PAUSED:
         raise HttpError(409, "Secure evaluation session is not paused")
+    if secure_evaluation_session_timed_out(item):
+        if item.pause_reason != "session_timeout":
+            timeout_minutes = int(item.policy_snapshot.get("session_timeout_minutes") or 180)
+            _create_security_event(tenant_id=tenant_id, actor_id=actor_id, assignment=item.assignment, access_session_id=access_session.id, category="session_timeout", severity="high", device_fingerprint=item.device_fingerprint, session_fingerprint=item.session_fingerprint, details={"timeout_minutes": timeout_minutes}, secure_session=item)
+        raise HttpError(409, "Secure evaluation session has expired")
     reason = _posture_violation(item, posture)
     if reason:
         raise HttpError(409, f"Resolve the security condition before continuing: {reason.replace('_', ' ')}")
-    if item.violation_count >= 3 and not access_session.is_step_up_valid:
+    if item.policy_snapshot.get("camera_required"):
+        claims = verify_secure_preflight_token(
+            token=preflight_token,
+            tenant_id=tenant_id,
+            evaluator_id=item.evaluator_id,
+            assignment_id=item.assignment_id,
+            access_session_id=access_session.id,
+        )
+        if not claims.get("camera_ready") or not claims.get("face_ready"):
+            raise HttpError(409, "Open the webcam shutter and keep your face clearly visible")
+    if item.policy_snapshot.get("require_resume_step_up", True) and item.violation_count >= 3 and not access_session.is_step_up_valid:
         raise HttpError(428, "Re-authentication is required after repeated security events")
     item.status = SecureEvaluationSession.Status.ACTIVE
     item.pause_reason = ""
     item.paused_at = None
     item.last_heartbeat_at = timezone.now()
+    inventory = dict(item.device_inventory or {})
+    face_monitor = dict(inventory.get("face_monitor") or {})
+    face_monitor["last_presence_at"] = item.last_heartbeat_at.isoformat()
+    face_monitor.pop("presence_timeout_reported_at", None)
+    inventory["face_monitor"] = face_monitor
+    item.device_inventory = inventory
     item.version += 1
     item.save()
     record_event(tenant_id=tenant_id, actor_id=actor_id, action="remote_security.session.resumed", aggregate="SecureEvaluationSession", aggregate_id=item.id, payload={"assignment_id": str(item.assignment_id), "violations": item.violation_count})
@@ -1367,12 +1539,22 @@ def request_evaluator_help(*, tenant_id, actor_id, evaluator, assignment_id, que
                 Membership.Role.EXAM_CONTROLLER,
             ],
             is_active=True,
+            user__is_active=True,
         ).values_list("user_id", flat=True)
     )
     if not recipient_ids:
         raise HttpError(409, "No live operations recipient is available")
 
     title = f"SOS from {evaluator.display_name} · {assignment.script.script_code}"[:180]
+    recent = list(NotificationDelivery.objects.filter(
+        tenant_id=tenant_id,
+        category="evaluator_help",
+        title=title,
+        status__in=[NotificationDelivery.Status.QUEUED, NotificationDelivery.Status.SENT, NotificationDelivery.Status.DELIVERED, NotificationDelivery.Status.ESCALATED],
+        created_at__gte=timezone.now() - timedelta(minutes=1),
+    ).order_by("user_id"))
+    if recent:
+        return recent
     body = (
         f"{query}\n\nPaper {assignment.script.paper.code}. "
         "Open Live monitoring and choose Request help for this evaluator."

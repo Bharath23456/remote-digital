@@ -17,10 +17,19 @@ class SecurityPolicyIn(Schema):
     vpn_risk_threshold: int
     alert_risk_threshold: int
     dlp_enabled: bool
+    evaluation_strict_mode: bool = True
+    evaluation_identity_verification_required: bool = True
     evaluation_camera_required: bool = True
     evaluation_fullscreen_required: bool = True
     evaluation_single_screen_required: bool = True
+    evaluation_mobile_allowed: bool = False
     evaluation_event_recording: bool = True
+    evaluation_pause_on_violation: bool = True
+    evaluation_require_resume_step_up: bool = True
+    evaluation_allow_clipboard: bool = False
+    evaluation_allow_download: bool = False
+    evaluation_allow_print: bool = False
+    evaluation_session_timeout_minutes: int = 180
     evaluation_heartbeat_seconds: int = 15
     evaluation_no_face_seconds: int = 30
     evaluation_retention_days: int = 30

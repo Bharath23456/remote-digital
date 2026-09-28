@@ -15,6 +15,7 @@ from apps.custody.models import Script
 from apps.custody.services import transition_script
 from apps.eligibility.models import EligibilityRecord
 from apps.evaluators.models import Evaluator, EvaluatorAvailability, Expertise
+from apps.phase4.models import NotificationDelivery
 from apps.phase4.services import create_notification, notification_action
 from apps.tenancy.models import Membership
 from apps.valuation.services import required_valuation_rounds
@@ -416,6 +417,14 @@ def request_more_allocation(*, tenant_id, actor_id, evaluator_id):
             evaluator_loads[backup.id] += 1
 
     if created:
+        NotificationDelivery.objects.filter(
+            tenant_id=tenant_id,
+            category="allocation_request",
+            body__contains=f"({evaluator.evaluator_code})",
+        ).exclude(status=NotificationDelivery.Status.ACKNOWLEDGED).update(
+            status=NotificationDelivery.Status.ACKNOWLEDGED,
+            acknowledged_at=timezone.now(),
+        )
         record_event(
             tenant_id=tenant_id,
             actor_id=actor_id,

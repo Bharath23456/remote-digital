@@ -82,7 +82,7 @@ def allocation_catalog(request):
         tenant_id=tenant_id,
         user_id=request.auth.id,
         category="allocation_request",
-    ).order_by("-created_at")[:50]
+    ).exclude(status=NotificationDelivery.Status.ACKNOWLEDGED).order_by("-created_at")[:50]
     scripts = Script.objects.filter(tenant_id=tenant_id, state__in=[Script.State.STORED, Script.State.ASSIGNED, Script.State.SUBMITTED]).select_related("paper").prefetch_related("assignments", "valuation_results", "final_mark").order_by("script_code")[:1000]
     return {"assignments": [assignment_data(item) for item in assignments.order_by("-priority", "due_at")[:1000]], "scripts": [{"id": str(item.id), "script_code": item.script_code, "paper_id": str(item.paper_id), "paper": item.paper.code, "state": item.state, "version": item.version, "assigned_rounds": [assignment.valuation_round for assignment in item.assignments.all()], "next_round": next_valuation_round(item)} for item in scripts], "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "subject_code": item.subject.code, "subject_name": item.subject.name, "valuation_rounds": item.valuation_rounds, "second_valuation_mark_threshold": item.rules.get("second_valuation_mark_threshold"), "stored_scripts": item.stored_count, "status": item.status} for item in papers], "evaluators": [{"id": str(item.id), "code": item.evaluator_code, "name": item.display_name, "status": item.status, "daily_capacity": item.daily_capacity, "active_load": item.active_load} for item in evaluators.order_by("display_name")], "policies": [{"id": str(item.id), "paper_id": str(item.paper_id), "paper": item.paper.code, "algorithm": item.algorithm, "minimum_experience_years": item.minimum_experience_years, "minimum_expertise_level": item.minimum_expertise_level, "maximum_active_assignments": item.maximum_active_assignments, "assignment_due_hours": item.assignment_due_hours, "backup_required": item.backup_required, "allow_same_institution": item.allow_same_institution, "weights": item.weights, "version": item.version} for item in policies], "runs": [{"id": str(item.id), "paper": item.paper.code, "mode": item.mode, "algorithm": item.algorithm, "status": item.status, "requested_scripts": item.requested_scripts, "planned_scripts": item.planned_scripts, "allocated_scripts": item.allocated_scripts, "unallocated_scripts": item.unallocated_scripts, "average_quality_score": float(item.average_quality_score), "forecast": item.forecast, "created_at": item.created_at.isoformat()} for item in runs], "allocation_requests": [{"id": str(item.id), "title": item.title, "body": item.body, "severity": item.severity, "status": item.status, "created_at": item.created_at.isoformat()} for item in allocation_requests]}
 
@@ -207,7 +207,7 @@ def _authorized_assignment(request, assignment_id):
     assignment = Assignment.objects.select_related("script__paper", "evaluator", "backup_evaluator").filter(id=assignment_id, tenant_id=membership.institution.tenant_id).first()
     if not assignment:
         raise HttpError(404, "Assignment not found")
-    if membership.role == Membership.Role.EVALUATOR and assignment.evaluator.email.lower() != request.auth.email.lower():
+    if membership.role == Membership.Role.EVALUATOR and assignment.evaluator.user_id != request.auth.id:
         raise HttpError(403, "This assignment belongs to another evaluator")
     return membership, assignment
 

@@ -32,6 +32,8 @@ def validate_policy(payload):
         raise HttpError(422, "No-face pause must be between 10 and 300 seconds")
     if not 1 <= payload.evaluation_retention_days <= 365:
         raise HttpError(422, "Evidence retention must be between 1 and 365 days")
+    if not 15 <= payload.evaluation_session_timeout_minutes <= 720:
+        raise HttpError(422, "Evaluation session timeout must be between 15 and 720 minutes")
     if payload.ai_evaluation_mode not in SecurityPolicy.AIEvaluationMode.values:
         raise HttpError(422, "Unsupported AI evaluation mode")
     if not 1 <= payload.ai_confidence_threshold <= 100:
@@ -70,15 +72,36 @@ def update_policy(*, tenant_id, actor_id, payload):
             "vpn_risk_threshold",
             "alert_risk_threshold",
             "dlp_enabled",
+            "evaluation_strict_mode",
+            "evaluation_identity_verification_required",
             "evaluation_camera_required",
             "evaluation_fullscreen_required",
             "evaluation_single_screen_required",
+            "evaluation_mobile_allowed",
             "evaluation_event_recording",
+            "evaluation_pause_on_violation",
+            "evaluation_require_resume_step_up",
+            "evaluation_allow_clipboard",
+            "evaluation_allow_download",
+            "evaluation_allow_print",
+            "evaluation_session_timeout_minutes",
             "evaluation_heartbeat_seconds",
             "evaluation_no_face_seconds",
             "evaluation_retention_days",
         ):
             setattr(policy, field, getattr(payload, field))
+        if policy.evaluation_strict_mode:
+            policy.evaluation_camera_required = True
+            policy.evaluation_identity_verification_required = True
+            policy.evaluation_fullscreen_required = True
+            policy.evaluation_single_screen_required = True
+            policy.evaluation_mobile_allowed = False
+            policy.evaluation_event_recording = True
+            policy.evaluation_pause_on_violation = True
+            policy.evaluation_require_resume_step_up = True
+            policy.evaluation_allow_clipboard = False
+            policy.evaluation_allow_download = False
+            policy.evaluation_allow_print = False
         policy.ai_model_name = policy.ai_model_name.strip()
         policy.allowed_countries = [item.upper() for item in policy.allowed_countries]
         policy.version = policy.version + 1 if policy.pk else 1

@@ -447,7 +447,7 @@ def create_evaluator(*, tenant_id, actor_id, values):
     try:
         evaluator = Evaluator.objects.create(tenant_id=tenant_id, **values)
     except IntegrityError as exc:
-        raise EvaluatorConflict("Evaluator code already exists") from exc
+        raise EvaluatorConflict("Evaluator code or login is already linked to a profile") from exc
     Expertise.objects.bulk_create([
         Expertise(tenant_id=tenant_id, evaluator=evaluator, subject=subject, level=3, years_experience=evaluator.years_experience)
         for subject in subjects
@@ -502,6 +502,13 @@ def change_lifecycle(*, tenant_id, actor_id, evaluator_id, version, status=None,
     if status:
         if status not in STATUS_TRANSITIONS.get(evaluator.status, set()):
             raise EvaluatorConflict(f"Transition from {evaluator.status} to {status} is not allowed")
+        if status == Evaluator.Status.ACTIVE and not getattr(settings, "DEMO_SKIP_EVALUATOR_FACE_VERIFICATION", False):
+            if not EvaluatorFaceTemplate.objects.filter(
+                tenant_id=tenant_id,
+                evaluator=evaluator,
+                status=EvaluatorFaceTemplate.Status.ACTIVE,
+            ).exists():
+                raise EvaluatorConflict("Complete face enrollment before activating this evaluator")
         evaluator.status = status
     if grade:
         if grade not in {value for value, _ in Evaluator.Grade.choices}:

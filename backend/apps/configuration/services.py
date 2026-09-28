@@ -803,6 +803,10 @@ def _validate_snapshot(snapshot):
     maximum = Decimal(str(snapshot["max_marks"]))
     passing = Decimal(str(snapshot["pass_marks"]))
     discrepancy = Decimal(str(snapshot["discrepancy_threshold"]))
+    if not maximum.is_finite() or not passing.is_finite() or not discrepancy.is_finite():
+        raise ConfigurationError("Paper marks must be finite numbers")
+    if maximum != maximum.quantize(Decimal("0.1")) or passing != passing.quantize(Decimal("0.1")):
+        raise ConfigurationError("Maximum and passing marks support one decimal place")
     if maximum <= 0:
         raise ConfigurationError("Maximum marks must be greater than zero")
     if passing < 0 or passing > maximum:

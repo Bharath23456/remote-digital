@@ -53,6 +53,21 @@ class ConfigurationWorkflowTests(TestCase):
         invalid_score = self.post("/api/v1/configuration/papers", {**payload, "code": "SCORE-TRIGGER-103", "rules": {"second_valuation_mark_threshold": "100.00"}})
         self.assertEqual(invalid_score.status_code, 422)
 
+    def test_paper_maximum_and_passing_marks_allow_one_decimal_place(self):
+        session = ExamSession.objects.first()
+        subject = Subject.objects.first()
+        payload = {
+            "session_id": str(session.id),
+            "subject_id": str(subject.id),
+            "code": "PRECISION-101",
+            "title": "Mark precision",
+            "max_marks": "100.25",
+            "pass_marks": "40.00",
+        }
+        response = self.post("/api/v1/configuration/papers", payload)
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("one decimal", response.json()["detail"])
+
     def test_complete_paper_configuration_lifecycle(self):
         session = ExamSession.objects.first()
         subject = Subject.objects.first()

@@ -107,7 +107,7 @@ def create_extension(request, workflow_id: str, payload: ExtensionIn):
     workflow = EvaluationWorkflow.objects.filter(id=workflow_id, tenant_id=tenant_id).select_related("assignment__evaluator").first()
     if not workflow:
         raise HttpError(404, "Workflow not found")
-    if membership.role == Membership.Role.EVALUATOR and workflow.assignment.evaluator.email.lower() != request.auth.email.lower():
+    if membership.role == Membership.Role.EVALUATOR and workflow.assignment.evaluator.user_id != request.auth.id:
         raise HttpError(404, "Workflow not found")
     item = request_extension(tenant_id=tenant_id, actor_id=request.auth.id, workflow=workflow, requested_until=payload.requested_until, reason=payload.reason)
     return {"id": str(item.id), "status": item.status, "version": item.version}

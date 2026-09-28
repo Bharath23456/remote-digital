@@ -4,10 +4,10 @@ import { Camera, Check, LockKeyhole, Monitor, RefreshCw, ShieldAlert, Video, X }
 import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch, SESSION_EXPIRED_EVENT } from "@/lib/api";
 
-type Policy = { identity_verification_required?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; event_recording: boolean; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
+type Policy = { identity_verification_required?: boolean; strict_mode?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; mobile_allowed?: boolean; event_recording: boolean; pause_on_violation?: boolean; require_resume_step_up?: boolean; allow_clipboard?: boolean; allow_download?: boolean; allow_print?: boolean; session_timeout_minutes?: number; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
-type Preflight = { camera_ready: boolean; face_ready: boolean; headphones_detected: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; inventory_digest: string };
-type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; headphones_detected: boolean; headphone_devices: number; digest: string };
+type Preflight = { camera_ready: boolean; face_ready: boolean; headphones_detected: boolean; fullscreen_active: boolean; screen_count: number | null; screen_check_supported: boolean; video_inputs: number; audio_inputs: number; mobile?: boolean; inventory_digest: string; preflight_token: string };
+type Inventory = { video_inputs: number; audio_inputs: number; audio_outputs: number; headphones_detected: boolean; headphone_devices: number; mobile: boolean; digest: string };
 type BufferedChunk = { blob: Blob; startedAt: Date; endedAt: Date };
 type FacePayload = { image_base64: string; liveness_passed: boolean; face_count: number; quality: Record<string, unknown>; model_version: string; device_fingerprint: string };
 type FaceDetectorLike = { detect(source: CanvasImageSource): Promise<unknown[]> };
@@ -46,6 +46,7 @@ async function mediaInventory(): Promise<{ public: Inventory; rawDigest: string 
       audio_outputs: devices.filter((item) => item.kind === "audiooutput").length,
       headphones_detected: headphoneDevices.length > 0,
       headphone_devices: headphoneDevices.length,
+      mobile: /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent),
       digest: rawDigest,
     },
   };
@@ -213,7 +214,7 @@ function capturePresenceFrame(video: HTMLVideoElement) {
   return canvas.toDataURL("image/jpeg", 0.82);
 }
 
-async function validateCameraFrame(stream: MediaStream) {
+async function validateCameraFrame(stream: MediaStream, assignmentId: string) {
   if (!cameraIsActive(stream)) throw new Error("Turn on the webcam before opening the paper");
   const video = document.createElement("video");
   video.muted = true;
@@ -226,8 +227,8 @@ async function validateCameraFrame(stream: MediaStream) {
     const result = await request("/api/v1/phase4/remote-security/camera-preflight", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image_base64: capturePresenceFrame(video) }),
-    }) as { camera_ready: boolean; face_ready: boolean; face_count: number; face_aligned?: boolean; phone_call_suspected?: boolean; posture_details?: Record<string, unknown> };
+      body: JSON.stringify({ assignment_id: assignmentId, image_base64: capturePresenceFrame(video) }),
+    }) as { camera_ready: boolean; face_ready: boolean; face_count: number; face_aligned?: boolean; phone_call_suspected?: boolean; posture_details?: Record<string, unknown>; preflight_token: string };
     if (result.face_aligned === false) throw new Error("Face the webcam directly. Side angle or tilted face is not allowed.");
     return result;
   } finally {
@@ -257,6 +258,7 @@ export function useSecureEvaluationSession() {
   const closingRef = useRef(false);
   const eventInFlightRef = useRef(new Set<string>());
   const cameraRecheckInFlightRef = useRef(false);
+  const assignmentRef = useRef("");
 
   const updateSession = useCallback((next: Session) => {
     sessionRef.current = next;
@@ -356,6 +358,8 @@ export function useSecureEvaluationSession() {
   const prepare = useCallback(async (assignmentId?: string) => {
     setChecking(true); setError(""); setPreflight(null);
     try {
+      if (!assignmentId) throw new Error("Select an assignment before running security checks");
+      assignmentRef.current = assignmentId;
       const currentPolicy = await request("/api/v1/phase4/remote-security/policy") as Policy;
       setPolicy(currentPolicy);
       const videoConstraints = { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } };
@@ -365,21 +369,22 @@ export function useSecureEvaluationSession() {
       streamRef.current = camera; setStream(camera); setMonitoringStatus((current) => ({ ...current, camera: "ok" }));
       const cameraMessage = await cameraFrameCheck(camera);
       const [cameraCheck, inventory, screens] = await Promise.all([
-        validateCameraFrame(camera),
+        validateCameraFrame(camera, assignmentId),
         mediaInventory(),
         availableScreens(),
       ]);
       inventoryRef.current = inventory.rawDigest;
-      let faceReady = cameraCheck.face_ready;
+      let faceReady = currentPolicy.identity_verification_required === false || cameraCheck.face_ready;
       if (!cameraMessage && faceReady && assignmentId && currentPolicy.identity_verification_required !== false) {
         try { await verifyLiveIdentity(assignmentId, "preflight"); }
         catch (reason) { faceReady = false; setError(reason instanceof Error ? reason.message : "A clear single face is required before secure evaluation can start."); }
       }
-      const result = { camera_ready: cameraIsActive(camera) && cameraCheck.camera_ready && !cameraMessage, face_ready: faceReady, headphones_detected: inventory.public.headphones_detected, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
+      const result = { camera_ready: cameraIsActive(camera) && cameraCheck.camera_ready && !cameraMessage, face_ready: faceReady, headphones_detected: inventory.public.headphones_detected, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, mobile: inventory.public.mobile, inventory_digest: inventory.public.digest, preflight_token: cameraCheck.preflight_token };
       preflightRef.current = result; setPreflight(result);
       if (cameraMessage) { setMonitoringStatus((current) => ({ ...current, camera: "error" })); setError(cameraMessage); }
       if (result.headphones_detected) setError("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
       if (currentPolicy.single_screen_required && screens.count !== null && screens.count > 1) setError("Disconnect additional displays before starting evaluation.");
+      if (!currentPolicy.mobile_allowed && inventory.public.mobile) setError("Mobile devices are not allowed for this evaluation.");
     } catch (reason) {
       const message = reason instanceof Error && reason.name === "NotAllowedError"
         ? "Camera permission is required for secure evaluation. Allow camera access and run the checks again."
@@ -401,16 +406,20 @@ export function useSecureEvaluationSession() {
     cameraRecheckInFlightRef.current = true;
     try {
       const [cameraCheck, inventory, screens] = await Promise.all([
-        validateCameraFrame(camera),
+        validateCameraFrame(camera, assignmentRef.current),
         mediaInventory(),
         availableScreens(),
       ]);
       inventoryRef.current = inventory.rawDigest;
-      const result = { camera_ready: cameraCheck.camera_ready, face_ready: cameraCheck.face_ready, headphones_detected: inventory.public.headphones_detected, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, inventory_digest: inventory.public.digest };
+      const result = { camera_ready: cameraCheck.camera_ready, face_ready: policy?.identity_verification_required === false || cameraCheck.face_ready, headphones_detected: inventory.public.headphones_detected, fullscreen_active: false, screen_count: screens.count, screen_check_supported: screens.supported, video_inputs: inventory.public.video_inputs, audio_inputs: inventory.public.audio_inputs, mobile: inventory.public.mobile, inventory_digest: inventory.public.digest, preflight_token: cameraCheck.preflight_token };
       preflightRef.current = result;
       setPreflight(result);
       if (result.headphones_detected) {
         setError("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
+        return false;
+      }
+      if (!policy?.mobile_allowed && result.mobile) {
+        setError("Mobile devices are not allowed for this evaluation.");
         return false;
       }
       if (policy?.single_screen_required && screens.count !== null && screens.count > 1) {
@@ -445,6 +454,7 @@ export function useSecureEvaluationSession() {
         preflightRef.current = { ...preflightRef.current, camera_ready: false };
         throw new Error(cameraMessage);
       }
+      const verifiedFrame = await validateCameraFrame(streamRef.current, assignmentId);
       if (policy.identity_verification_required !== false) await verifyLiveIdentity(assignmentId, "secure_start");
       if (policy.fullscreen_required && !document.fullscreenElement) await document.documentElement.requestFullscreen();
       const screens = await availableScreens();
@@ -453,10 +463,11 @@ export function useSecureEvaluationSession() {
         throw new Error("A connected webcam is required before secure evaluation can start.");
       }
       if (inventory.public.headphones_detected) throw new Error("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
-      const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current), face_ready: Boolean(preflightRef.current.face_ready), headphones_detected: inventory.public.headphones_detected, fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count };
+      if (!policy.mobile_allowed && inventory.public.mobile) throw new Error("Mobile devices are not allowed for this evaluation.");
+      const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current) && verifiedFrame.camera_ready, face_ready: policy.identity_verification_required === false || verifiedFrame.face_ready, headphones_detected: inventory.public.headphones_detected, fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count, mobile: inventory.public.mobile, preflight_token: verifiedFrame.preflight_token };
       const sessionFingerprint = await digest(`${crypto.randomUUID()}:${Date.now()}:${assignmentId}`);
       const deviceFingerprint = await digest([navigator.userAgent, screen.width, screen.height, Intl.DateTimeFormat().resolvedOptions().timeZone, inventoryRef.current].join("|"));
-      const created = await request("/api/v1/phase4/remote-security/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, session_fingerprint: sessionFingerprint, device_fingerprint: deviceFingerprint, consent, preflight: currentPreflight, device_inventory: inventory.public }) }) as Session;
+      const created = await request("/api/v1/phase4/remote-security/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, session_fingerprint: sessionFingerprint, device_fingerprint: deviceFingerprint, consent, preflight_token: verifiedFrame.preflight_token, preflight: currentPreflight, device_inventory: inventory.public }) }) as Session;
       sessionStorage.setItem("admiezo-secure-session-fingerprint", sessionFingerprint);
       sessionStorage.setItem("admiezo-secure-evaluation-id", created.id);
       preflightRef.current = { ...currentPreflight, inventory_digest: deviceFingerprint };
@@ -478,7 +489,7 @@ export function useSecureEvaluationSession() {
         const replacement = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         streamRef.current = replacement; setStream(replacement);
       }
-      await validateCameraFrame(streamRef.current as MediaStream);
+      const verifiedFrame = await validateCameraFrame(streamRef.current as MediaStream, current.assignment_id);
       if (current.policy.fullscreen_required && !document.fullscreenElement) await document.documentElement.requestFullscreen();
       if (current.policy.identity_verification_required !== false && identityPauseReasons.has(current.pause_reason)) {
         try { await verifyLiveIdentity(current.assignment_id, "resume"); }
@@ -489,7 +500,7 @@ export function useSecureEvaluationSession() {
         }
       }
       if (password) await request("/api/v1/auth/step-up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password, code: "" }) });
-      const next = await request(`/api/v1/phase4/remote-security/sessions/${current.id}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ posture: await posture(false) }) }) as Session;
+      const next = await request(`/api/v1/phase4/remote-security/sessions/${current.id}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ posture: await posture(false), preflight_token: verifiedFrame.preflight_token }) }) as Session;
       updateSession(next); setNeedsReauthentication(false); return true;
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 428) setNeedsReauthentication(true);
@@ -716,5 +727,6 @@ export function SecurePreflightDialog({ script, assignmentId, controller, onStar
 export function SecurityPauseOverlay({ controller, onClose }: { controller: ReturnType<typeof useSecureEvaluationSession>; onClose: () => void }) {
   const [password, setPassword] = useState("");
   const reason = controller.pauseReason.replaceAll("_", " ");
-  return <div className="security-pause" role="alertdialog" aria-modal="true"><div><ShieldAlert /><h2>Evaluation paused</h2><p>{reason.charAt(0).toUpperCase() + reason.slice(1)} was detected. The script and marking controls remain locked until security checks pass.</p><CameraPreview stream={controller.stream} compact/><label><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{controller.error && <div className="viewer-error-inline">{controller.error}</div>}<div className="pause-actions"><button className="secondary-button" onClick={onClose}>Close script</button><button className="primary-button" disabled={controller.checking || !password} onClick={() => controller.resume(password)}><LockKeyhole />Run checks and resume</button></div></div></div>;
+  const passwordRequired = controller.session?.policy.require_resume_step_up !== false && (controller.session?.violation_count || 0) >= 3;
+  return <div className="security-pause" role="alertdialog" aria-modal="true"><div><ShieldAlert /><h2>Evaluation paused</h2><p>{reason.charAt(0).toUpperCase() + reason.slice(1)} was detected. The script and marking controls remain locked until security checks pass.</p><CameraPreview stream={controller.stream} compact/>{passwordRequired && <label><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>}{controller.error && <div className="viewer-error-inline">{controller.error}</div>}<div className="pause-actions"><button className="secondary-button" onClick={onClose}>Close script</button><button className="primary-button" disabled={controller.checking || (passwordRequired && !password)} onClick={() => controller.resume(passwordRequired ? password : "")}><LockKeyhole />Run checks and resume</button></div></div></div>;
 }

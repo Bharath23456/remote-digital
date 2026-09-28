@@ -46,7 +46,10 @@ class Evaluator(TenantModel):
     version = models.PositiveIntegerField(default=1)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["tenant_id", "evaluator_code"], name="unique_evaluator_code")]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant_id", "evaluator_code"], name="unique_evaluator_code"),
+            models.UniqueConstraint(fields=["tenant_id", "user"], condition=models.Q(user__isnull=False), name="unique_evaluator_login"),
+        ]
 
 
 class EvaluatorFaceTemplate(TenantModel):

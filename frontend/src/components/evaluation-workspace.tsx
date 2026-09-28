@@ -310,6 +310,9 @@ function useCopyProtection({
   report,
   onSecurityPause,
   onSoftAlert,
+  allowClipboard,
+  allowDownload,
+  allowPrint,
 }: {
   active: boolean;
   containerRef: { current: HTMLElement | null };
@@ -319,6 +322,9 @@ function useCopyProtection({
   report: SecurityReport;
   onSecurityPause: (category: string) => void;
   onSoftAlert: (message: string, durationMs?: number) => void;
+  allowClipboard: boolean;
+  allowDownload: boolean;
+  allowPrint: boolean;
 }) {
   useEffect(() => {
     if (!active) return;
@@ -395,6 +401,7 @@ function useCopyProtection({
     };
     const blockClipboard = (event: ClipboardEvent) => {
       try {
+        if (allowClipboard) return;
         if (!protectEvent(event.target)) return;
         event.preventDefault();
         if (event.type !== "paste")
@@ -469,7 +476,9 @@ function useCopyProtection({
         }
         if (
           (event.ctrlKey || event.metaKey) &&
-          ["p", "s", "c", "x", "v"].includes(key)
+          ((["c", "x", "v"].includes(key) && !allowClipboard) ||
+            (key === "s" && !allowDownload) ||
+            (key === "p" && !allowPrint))
         ) {
           event.preventDefault();
           showWarning(
@@ -612,6 +621,9 @@ function useCopyProtection({
     containerRef,
     onSecurityPause,
     onSoftAlert,
+    allowClipboard,
+    allowDownload,
+    allowPrint,
     pageNumber,
     report,
     sessionId,
@@ -1458,6 +1470,9 @@ export function EvaluationWorkspace({
     report: security.report,
     onSecurityPause: security.pause,
     onSoftAlert: showSecurityNotice,
+    allowClipboard: security.policy?.allow_clipboard === true,
+    allowDownload: security.policy?.allow_download === true,
+    allowPrint: security.policy?.allow_print === true,
   });
 
   async function requestAIAnalysis() {

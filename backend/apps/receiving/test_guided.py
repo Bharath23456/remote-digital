@@ -374,15 +374,17 @@ class GuidedIntakeTests(TestCase):
         for path in ("/api/v1/operations/overview", "/api/v1/receiving/catalog", "/api/v1/security/catalog", "/api/v1/phase4/catalog?section=operations"):
             self.assertEqual(supervisor.get(path).status_code, 403, path)
 
-    def test_operational_user_without_active_centre_is_blocked(self):
+    def test_operational_user_without_active_centre_gets_setup_options_only(self):
         institution = Membership.objects.get(user__email="admin@admiezo.local").institution
         user = User.objects.create_user(username="unassigned.preparer@example.test", email="unassigned.preparer@example.test", password="ChangeMe123!")
         Membership.objects.create(user=user, institution=institution, role=Membership.Role.BUNDLE_PREPARER, enabled_modules=["receiving"])
         client = Client()
         self.assertEqual(client.post("/api/v1/auth/login", data=json.dumps({"email": user.email, "password": "ChangeMe123!", "device_id": "unassigned-centre"}), content_type="application/json").status_code, 200)
         response = client.get("/api/v1/receiving/guided/preparation")
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("active centre", response.json()["detail"])
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["centre"])
+        self.assertIn("active centre", response.json()["centre_error"])
+        self.assertEqual(response.json()["packets"], [])
 
 
 class OMRReaderTests(TestCase):

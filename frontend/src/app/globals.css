@@ -333,6 +333,7 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .danger-text { color: var(--red) !important; }
 .policy-grid { padding-top: 14px; }
 .policy-section-title { grid-column: 1 / -1; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 16px; color: var(--ink); font-family: var(--font-display), sans-serif; font-size: 13px; font-weight: 800; }
+.policy-section-help { grid-column: 1 / -1; margin: -6px 0 2px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .policy-toggles { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 8px; align-items: center; border-top: 1px solid var(--line); margin-top: 8px; padding-top: 10px; }
 .policy-toggles .check-field { min-width: 180px; flex: 1; margin-top: 0; }
 .inline-form-footer { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); padding: 14px 20px; }
