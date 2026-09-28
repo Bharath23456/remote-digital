@@ -14,11 +14,12 @@ from apps.assignment.models import AssignmentLock
 from apps.repository.models import ScriptAsset
 from apps.repository.storage import signed_object_url
 from apps.core.services import record_event
+from apps.phase4.models import NotificationDelivery
 from apps.tenancy.models import Membership
 
 from .models import AllocationPolicy, AllocationProposal, AllocationRun, Assignment
 from .schemas import AssignmentActionIn, AssignmentFlagIn, PolicyIn, RedistributionIn, SimulationIn
-from .services import build_plan, execute_plan, next_valuation_round, redistribute_assignment, save_policy
+from .services import build_plan, evaluator_allocation_more_status, execute_plan, next_valuation_round, redistribute_assignment, request_more_allocation, save_policy
 
 
 router = Router(tags=["Evaluator assignment and allocation"])
@@ -60,11 +61,13 @@ def allocation_catalog(request):
             released_at__isnull=True,
             expires_at__gt=timezone.now(),
         ).exclude(access_session_id=request.access_session.id)
-        assignments = assignments.filter(evaluator__email__iexact=request.auth.email).annotate(
+        assignments = assignments.filter(evaluator__user_id=request.auth.id).annotate(
             locked_elsewhere=Exists(active_other_locks),
         )
+        evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id).first()
         return {
             "assignments": [evaluator_assignment_data(item) for item in assignments.order_by("-priority", "due_at")[:1000]],
+            "allocation_more": evaluator_allocation_more_status(tenant_id=tenant_id, evaluator=evaluator) if evaluator else {"eligible": False, "reason": "Evaluator profile not found.", "total": 0, "submitted": 0},
             "scripts": [],
             "papers": [],
             "evaluators": [],
@@ -75,8 +78,13 @@ def allocation_catalog(request):
     evaluators = Evaluator.objects.filter(tenant_id=tenant_id).annotate(active_load=Count("assignments", filter=Q(assignments__status__in=[Assignment.Status.ASSIGNED, Assignment.Status.ACCEPTED, Assignment.Status.IN_PROGRESS])))
     policies = AllocationPolicy.objects.filter(tenant_id=tenant_id).select_related("paper")
     runs = AllocationRun.objects.filter(tenant_id=tenant_id).select_related("paper").order_by("-created_at")[:100]
+    allocation_requests = NotificationDelivery.objects.filter(
+        tenant_id=tenant_id,
+        user_id=request.auth.id,
+        category="allocation_request",
+    ).order_by("-created_at")[:50]
     scripts = Script.objects.filter(tenant_id=tenant_id, state__in=[Script.State.STORED, Script.State.ASSIGNED, Script.State.SUBMITTED]).select_related("paper").prefetch_related("assignments", "valuation_results", "final_mark").order_by("script_code")[:1000]
-    return {"assignments": [assignment_data(item) for item in assignments.order_by("-priority", "due_at")[:1000]], "scripts": [{"id": str(item.id), "script_code": item.script_code, "paper_id": str(item.paper_id), "paper": item.paper.code, "state": item.state, "version": item.version, "assigned_rounds": [assignment.valuation_round for assignment in item.assignments.all()], "next_round": next_valuation_round(item)} for item in scripts], "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "subject_code": item.subject.code, "subject_name": item.subject.name, "valuation_rounds": item.valuation_rounds, "second_valuation_mark_threshold": item.rules.get("second_valuation_mark_threshold"), "stored_scripts": item.stored_count, "status": item.status} for item in papers], "evaluators": [{"id": str(item.id), "code": item.evaluator_code, "name": item.display_name, "status": item.status, "daily_capacity": item.daily_capacity, "active_load": item.active_load} for item in evaluators.order_by("display_name")], "policies": [{"id": str(item.id), "paper_id": str(item.paper_id), "paper": item.paper.code, "algorithm": item.algorithm, "minimum_experience_years": item.minimum_experience_years, "minimum_expertise_level": item.minimum_expertise_level, "maximum_active_assignments": item.maximum_active_assignments, "assignment_due_hours": item.assignment_due_hours, "backup_required": item.backup_required, "allow_same_institution": item.allow_same_institution, "weights": item.weights, "version": item.version} for item in policies], "runs": [{"id": str(item.id), "paper": item.paper.code, "mode": item.mode, "algorithm": item.algorithm, "status": item.status, "requested_scripts": item.requested_scripts, "planned_scripts": item.planned_scripts, "allocated_scripts": item.allocated_scripts, "unallocated_scripts": item.unallocated_scripts, "average_quality_score": float(item.average_quality_score), "forecast": item.forecast, "created_at": item.created_at.isoformat()} for item in runs]}
+    return {"assignments": [assignment_data(item) for item in assignments.order_by("-priority", "due_at")[:1000]], "scripts": [{"id": str(item.id), "script_code": item.script_code, "paper_id": str(item.paper_id), "paper": item.paper.code, "state": item.state, "version": item.version, "assigned_rounds": [assignment.valuation_round for assignment in item.assignments.all()], "next_round": next_valuation_round(item)} for item in scripts], "papers": [{"id": str(item.id), "code": item.code, "title": item.title, "subject_code": item.subject.code, "subject_name": item.subject.name, "valuation_rounds": item.valuation_rounds, "second_valuation_mark_threshold": item.rules.get("second_valuation_mark_threshold"), "stored_scripts": item.stored_count, "status": item.status} for item in papers], "evaluators": [{"id": str(item.id), "code": item.evaluator_code, "name": item.display_name, "status": item.status, "daily_capacity": item.daily_capacity, "active_load": item.active_load} for item in evaluators.order_by("display_name")], "policies": [{"id": str(item.id), "paper_id": str(item.paper_id), "paper": item.paper.code, "algorithm": item.algorithm, "minimum_experience_years": item.minimum_experience_years, "minimum_expertise_level": item.minimum_expertise_level, "maximum_active_assignments": item.maximum_active_assignments, "assignment_due_hours": item.assignment_due_hours, "backup_required": item.backup_required, "allow_same_institution": item.allow_same_institution, "weights": item.weights, "version": item.version} for item in policies], "runs": [{"id": str(item.id), "paper": item.paper.code, "mode": item.mode, "algorithm": item.algorithm, "status": item.status, "requested_scripts": item.requested_scripts, "planned_scripts": item.planned_scripts, "allocated_scripts": item.allocated_scripts, "unallocated_scripts": item.unallocated_scripts, "average_quality_score": float(item.average_quality_score), "forecast": item.forecast, "created_at": item.created_at.isoformat()} for item in runs], "allocation_requests": [{"id": str(item.id), "title": item.title, "body": item.body, "severity": item.severity, "status": item.status, "created_at": item.created_at.isoformat()} for item in allocation_requests]}
 
 
 @router.post("/policies")
@@ -93,6 +101,37 @@ def update_policy(request, payload: PolicyIn):
 def manual_assignment(request):
     require_roles(request, *ADMIN_ROLES)
     raise HttpError(410, "Manual allocation is disabled; simulate and commit an eligible run")
+
+
+@router.post("/allocate-more")
+def allocate_more(request):
+    membership = require_roles(request, Membership.Role.EVALUATOR)
+    evaluator = Evaluator.objects.filter(
+        tenant_id=membership.institution.tenant_id,
+        user_id=request.auth.id,
+        status=Evaluator.Status.ACTIVE,
+        is_system_ai=False,
+    ).first()
+    if not evaluator:
+        raise HttpError(404, "Active evaluator profile not found")
+    outcome = request_more_allocation(
+        tenant_id=membership.institution.tenant_id,
+        actor_id=request.auth.id,
+        evaluator_id=evaluator.id,
+    )
+    assignments = outcome["assignments"]
+    if assignments:
+        return {
+            "status": "allocated",
+            "allocated": len(assignments),
+            "assignments": [evaluator_assignment_data(item) for item in assignments],
+            "message": f"{len(assignments)} additional script{' was' if len(assignments) == 1 else 's were'} allocated.",
+        }
+    return {
+        "status": "requested",
+        "recipient_count": len(outcome["notifications"]),
+        "message": "Self-allocation is still unavailable; your Allocation Engine request remains pending." if outcome.get("already_pending") else "Self-allocation was not possible, so the Allocation Engine has been notified.",
+    }
 
 
 @router.get("/history")

@@ -17,7 +17,7 @@ function seenNotificationIds() {
   }
 }
 
-export function NotificationCenter({ onOpenEvaluations }: { onOpenEvaluations: () => void }) {
+export function NotificationCenter({ onOpenEvaluations, onOpenLiveOperations, onOpenAllocation }: { onOpenEvaluations: () => void; onOpenLiveOperations: () => void; onOpenAllocation: () => void }) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[]>([]);
@@ -53,6 +53,8 @@ export function NotificationCenter({ onOpenEvaluations }: { onOpenEvaluations: (
     await load();
     setHeadsUp((current) => current?.id === item.id ? null : current);
     if (item.category === "assignment") { setOpen(false); onOpenEvaluations(); }
+    if (item.category === "evaluator_help") { setOpen(false); onOpenLiveOperations(); }
+    if (item.category === "allocation_request") { setOpen(false); onOpenAllocation(); }
   }
 
   return <div className="notification-center">

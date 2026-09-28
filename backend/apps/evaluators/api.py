@@ -91,7 +91,7 @@ def availability(request, evaluator_id: str, payload: AvailabilityIn):
 @router.get("/face/status")
 def self_face_status(request):
     membership = require_roles(request, Membership.Role.EVALUATOR)
-    evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, email__iexact=request.auth.email).first()
+    evaluator = Evaluator.objects.filter(tenant_id=membership.institution.tenant_id, user=request.auth).first()
     if not evaluator:
         raise HttpError(404, "Evaluator was not found")
     return _run(services.face_status, tenant_id=membership.institution.tenant_id, evaluator_id=evaluator.id)
@@ -101,7 +101,7 @@ def self_face_status(request):
 def verify_access(request, payload: FaceAccessIn):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user=request.auth, status=Evaluator.Status.ACTIVE).first()
     assignment = Assignment.objects.filter(id=payload.assignment_id, tenant_id=tenant_id, evaluator=evaluator).first() if evaluator else None
     if not evaluator or not assignment:
         raise HttpError(404, "Evaluator assignment was not found")
@@ -117,6 +117,10 @@ def verify_access(request, payload: FaceAccessIn):
     )
     return {
         "id": str(item.id),
+        "evaluator_id": str(evaluator.id),
+        "evaluator_code": evaluator.evaluator_code,
+        "evaluator_name": evaluator.display_name,
+        "assignment_id": str(assignment.id),
         "verified": item.verified,
         "liveness_verified": item.liveness_verified,
         "authorized": item.authorized,
@@ -153,7 +157,7 @@ def enroll_face(request, evaluator_id: str, payload: FaceCaptureIn):
 def verify_face(request, evaluator_id: str, payload: FaceCaptureIn):
     membership = membership_for(request)
     if membership.role == Membership.Role.EVALUATOR:
-        evaluator = Evaluator.objects.filter(id=evaluator_id, tenant_id=membership.institution.tenant_id, email__iexact=request.auth.email).first()
+        evaluator = Evaluator.objects.filter(id=evaluator_id, tenant_id=membership.institution.tenant_id, user=request.auth).first()
         if not evaluator:
             raise HttpError(403, "Evaluators can verify only their own identity")
     elif membership.role not in (*WRITE_ROLES, Membership.Role.AUDITOR) and membership.role != Membership.Role.PLATFORM_ADMIN:

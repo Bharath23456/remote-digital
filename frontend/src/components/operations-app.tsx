@@ -197,9 +197,10 @@ function formatValue(value: unknown) {
   return titleCase(text);
 }
 
-function Login({ onSuccess, notice }: { onSuccess: () => void; notice?: string }) {
-  const [email, setEmail] = useState("admin@admiezo.local");
-  const [password, setPassword] = useState("ChangeMe123!");
+function Login({ onSuccess, notice, loginRole, initialEmail }: { onSuccess: () => void; notice?: string; loginRole?: string; initialEmail?: string }) {
+  const evaluatorLogin = loginRole === "evaluator";
+  const [email, setEmail] = useState(initialEmail || (evaluatorLogin ? "" : "admin@admiezo.local"));
+  const [password, setPassword] = useState(evaluatorLogin ? "" : "ChangeMe123!");
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -212,7 +213,7 @@ function Login({ onSuccess, notice }: { onSuccess: () => void; notice?: string }
   useEffect(() => {
     csrfFetch("/api/v1/enterprise/domain-context").then((response) => response.ok ? response.json() : null).then((value: DomainContext | null) => {
       setDomain(value);
-      if (value?.scope === "university" && !loginEdited.current) { setEmail(""); setPassword(""); }
+      if (value?.scope === "university" && !loginEdited.current && !initialEmail) { setEmail(""); setPassword(""); }
     }).catch(() => setDomain(null));
     csrfFetch("/api/v1/auth/sso/providers")
       .then((response) => response.ok ? response.json() : [])
@@ -290,7 +291,7 @@ function Login({ onSuccess, notice }: { onSuccess: () => void; notice?: string }
       <div className="login-foot">{domain?.hostname || "Secure institutional access"} · Session monitoring enabled</div>
     </section>
     <section className="login-form-wrap"><form className="login-form" onSubmit={mfaEnrollment ? enrollMfa : mfaRequired ? verifyMfa : submit}>
-      <h2>{mfaEnrollment ? "Set up authenticator" : mfaRequired ? "Verify it’s you" : "Welcome back"}</h2><p>{mfaEnrollment ? "Scan this QR code with your authenticator app, then enter its six-digit code." : mfaRequired ? "Enter the six-digit code from your authenticator." : "Sign in to the evaluation control room."}</p>
+      <h2>{mfaEnrollment ? "Set up authenticator" : mfaRequired ? "Verify it’s you" : evaluatorLogin ? "Evaluator sign in" : "Welcome back"}</h2><p>{mfaEnrollment ? "Scan this QR code with your authenticator app, then enter its six-digit code." : mfaRequired ? "Enter the six-digit code from your authenticator." : evaluatorLogin ? "Sign in again to return to your evaluation desk." : "Sign in to the evaluation control room."}</p>
       {!mfaRequired && !mfaEnrollment && <><label className="field"><span>Email address</span><input type="email" autoComplete="username" value={email} onChange={(event) => { loginEdited.current = true; setEmail(event.target.value); }} required /></label>
         <label className="field"><span>Password</span><div style={{ position: "relative" }}><input type={showPassword ? "text" : "password"} autoComplete="current-password" value={password} onChange={(event) => { loginEdited.current = true; setPassword(event.target.value); }} required style={{ paddingRight: "2.75rem" }} /><button type="button" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? "Hide password" : "Show password"} title={showPassword ? "Hide password" : "Show password"} style={{ position: "absolute", right: "0.75rem", top: "50%", transform: "translateY(-50%)", border: "none", background: "transparent", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label></>}
       {mfaRequired && <label className="field"><span>Authenticator code</span><input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} minLength={6} maxLength={6} required autoFocus /></label>}
@@ -384,6 +385,8 @@ export function OperationsApp() {
   const [accountOpen, setAccountOpen] = useState(false);
   const [globalError, setGlobalError] = useState("");
   const [loginNotice, setLoginNotice] = useState("");
+  const [loginRole, setLoginRole] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
   const [platformMode, setPlatformMode] = useState(true);
   const [auditRefreshToken, setAuditRefreshToken] = useState(0);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
@@ -443,10 +446,17 @@ export function OperationsApp() {
     return () => window.clearTimeout(timer);
   }, [load]);
   useEffect(() => {
-    const onExpired = () => { if (!endingSession.current) endSession("Your session has ended. Sign in again."); };
+    const onExpired = (event: Event) => {
+      const detail = (event as CustomEvent<{ notice?: string; loginRole?: string; email?: string }>).detail;
+      const notice = detail?.notice;
+      if (endingSession.current) return;
+      setLoginRole(detail?.loginRole || context?.role || "");
+      setLoginEmail(detail?.email || context?.user.email || "");
+      endSession(notice || "Your session has ended. Sign in again.");
+    };
     window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
-  }, [endSession]);
+  }, [context?.role, context?.user.email, endSession]);
   useEffect(() => {
     if (!context?.session) return;
     const key = `admiezo-last-activity-${context.session.id}`;
@@ -519,7 +529,7 @@ export function OperationsApp() {
     setView(next); setMenuOpen(false); setToast("");
   }
   if (checking) return <div className="loading-state"><div className="spinner" aria-label="Loading ADMIEZO" /></div>;
-  if (!context || !overview) return <Login onSuccess={() => { endingSession.current = false; setLoginNotice(""); void load(); }} notice={loginNotice} />;
+  if (!context || !overview) return <Login onSuccess={() => { endingSession.current = false; setLoginNotice(""); setLoginRole(""); setLoginEmail(""); void load(); }} notice={loginNotice} loginRole={loginRole} initialEmail={loginEmail} />;
   if (context.must_change_password) return <PasswordSetup branding={context.branding} onComplete={async () => { setChecking(true); await load(); }} onSignOut={signOut} />;
   const role = context.role;
   const visibleNavigation = navigationFor(role, platformMode, context.enabled_modules, context.ai_evaluation.available);
@@ -552,7 +562,7 @@ export function OperationsApp() {
   }
   return <div className="app-shell" style={themeStyles[branding.theme]}><FullPageLocalization />{role === "evaluator" && <RemoteSupportReceiver />}
     <aside className={`sidebar ${menuOpen ? "open" : ""}`}><div className="brand"><BrandIdentity branding={branding} label={platformMode && isPlatformAdmin ? "Platform control" : t("shell.brandLabel")} /></div><nav className="nav-scroll" aria-label={t("shell.navigation")}>{visibleNavigation.map((group) => <div className="nav-group" key={group.label}><div className="nav-label">{t(`navigation.groups.${group.label.toLowerCase()}`, { defaultValue: group.label })}</div>{group.items.map((item) => <button className={`nav-item ${activeView === item.key ? "active" : ""}`} onClick={() => navigate(item.key)} key={item.key}><item.icon /><span>{t(`navigation.items.${item.label === "Back to control plane" ? "backToControlPlane" : item.key}`, { defaultValue: item.label })}</span></button>)}</div>)}</nav><div className="sidebar-footer"><div className="environment"><span className="environment-dot" />{t("shell.healthy")}</div></div></aside>
-    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? t("shell.closeNavigation") : t("shell.openNavigation")} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <><div className="tenant-name">{context.tenant.name}</div><div className="session-name">{role === "operations_supervisor" ? "Intake workflow" : overview.session?.name || t("shell.noSession")}</div></>}</div><div className="top-actions"><LanguageSelector />{!(platformMode && context.role === "platform_admin") && context.ai_evaluation.available && <button className="icon-button ai-status-indicator" title={`ADMIEZO AI Assistant enabled · ${context.ai_evaluation.mode === "autonomous" ? "Autonomous" : "Assisted"} · ${context.ai_evaluation.confidence_threshold}% confidence threshold`} aria-label="ADMIEZO AI Assistant enabled" onClick={() => navigate("aiEvaluation")}><BrainCircuit /><span className="ai-status-dot" /></button>}{!(platformMode && context.role === "platform_admin") && !intakeDeskViews[role] && role !== "operations_supervisor" && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} />}<button className="icon-button" title={t("shell.signOut")} onClick={signOut}><LogOut /></button><button className="avatar" title={t("shell.accountSettings")} aria-label={t("shell.accountSettings")} onClick={() => setAccountOpen(true)}>{initials}</button></div></header>
+    <div className="main-shell"><header className="topbar"><button className="icon-button mobile-menu" title={menuOpen ? t("shell.closeNavigation") : t("shell.openNavigation")} onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button><div className="tenant-switch">{platformMode && context.role === "platform_admin" ? <><div className="tenant-name">ADMIEZO Platform</div><div className="session-name">Super administrator control plane</div></> : <><div className="tenant-name">{context.tenant.name}</div><div className="session-name">{role === "operations_supervisor" ? "Intake workflow" : overview.session?.name || t("shell.noSession")}</div></>}</div><div className="top-actions"><LanguageSelector />{!(platformMode && context.role === "platform_admin") && context.ai_evaluation.available && <button className="icon-button ai-status-indicator" title={`ADMIEZO AI Assistant enabled · ${context.ai_evaluation.mode === "autonomous" ? "Autonomous" : "Assisted"} · ${context.ai_evaluation.confidence_threshold}% confidence threshold`} aria-label="ADMIEZO AI Assistant enabled" onClick={() => navigate("aiEvaluation")}><BrainCircuit /><span className="ai-status-dot" /></button>}{!(platformMode && context.role === "platform_admin") && !intakeDeskViews[role] && role !== "operations_supervisor" && <NotificationCenter onOpenEvaluations={() => navigate("evaluation")} onOpenLiveOperations={() => { localStorage.setItem("admiezo-advanced-tab-operations", "notifications"); navigate("liveControl"); }} onOpenAllocation={() => navigate("allocation")} />}<button className="icon-button" title={t("shell.signOut")} onClick={signOut}><LogOut /></button><button className="avatar" title={t("shell.accountSettings")} aria-label={t("shell.accountSettings")} onClick={() => setAccountOpen(true)}>{initials}</button></div></header>
       <main className="content"><header className="page-heading"><div>{!/^Modules?\s+\d/.test(meta.eyebrow) && <p className="eyebrow">{t(`views.${activeView}.eyebrow`, { defaultValue: meta.eyebrow })}</p>}<h1>{t(`views.${activeView}.title`, { defaultValue: meta.title })}</h1><p className="heading-note">{t(`views.${activeView}.description`, { defaultValue: meta.description })}</p></div>{activeView !== "valuation" && <button className="secondary-button" onClick={refreshCurrentView} disabled={refreshing}><RefreshCw className={refreshing ? "spin" : undefined} />{refreshing ? t("actions.refreshing") : t("actions.refresh")}</button>}</header>{toast && <div className="toast-stack" aria-live="polite"><div className="app-toast"><Check />{toast}</div></div>}{globalError && <div className="form-error" role="alert">{globalError}</div>}{activeView === "platformAdmin" ? <PlatformAdminWorkspace key={`platform-admin-${workspaceRefreshToken}`} /> : activeView === "audit" && platformMode && isPlatformAdmin ? <PlatformAuditWorkspace refreshToken={auditRefreshToken} /> : activeView === "dashboard" ? (role === "operations_supervisor" ? <IntakeOperationsDashboard key={workspaceRefreshToken} onNavigate={navigate} /> : <Dashboard overview={overview} navigate={navigate} />) : activeView === "configuration" ? <ConfigurationWorkspace /> : activeView === "evaluators" ? <EvaluatorWorkspace /> : activeView === "receiving" ? <GuidedIntakeWorkspace key={`receiving-${workspaceRefreshToken}`} stage="receiving" /> : activeView === "custody" ? <GuidedIntakeWorkspace key={`custody-${workspaceRefreshToken}`} stage="custody" /> : activeView === "digitization" ? <GuidedIntakeWorkspace key={`digitization-${workspaceRefreshToken}`} stage="digitization" /> : activeView === "anonymisation" ? <GuidedMaskingWorkspace key={`anonymisation-${workspaceRefreshToken}`} /> : activeView === "repository" ? <RepositoryWorkspace /> : activeView === "allocation" ? <AllocationWorkspace key={`allocation-${workspaceRefreshToken}`} /> : activeView === "aiEvaluation" && context.ai_evaluation.available ? <AIEvaluationWorkspace /> : activeView === "rubrics" ? <RubricWorkspace /> : activeView === "assignmentGovernance" ? <GovernanceWorkspace key={`allocation-history-${workspaceRefreshToken}`} /> : activeView === "evaluation" ? <EvaluationWorkspace role={role} user={context.user} /> : activeView === "valuation" ? <ValuationWorkspace /> : activeView === "revaluation" ? <AdvancedOperationsWorkspace key={`revaluation-${workspaceRefreshToken}`} section="assessment" initialTab="revaluation" visibleTabs={["revaluation"]} /> : activeView === "assessmentControl" ? <AdvancedOperationsWorkspace key={`assessment-${workspaceRefreshToken}`} section="assessment" initialTab="moderation" visibleTabs={["moderation", "completion"]} /> : activeView === "liveControl" ? <AdvancedOperationsWorkspace section="operations" /> : activeView === "serviceControl" ? <AdvancedOperationsWorkspace section="services" visibleTabs={["remuneration"]} /> : activeView === "photocopyRequests" ? <AdvancedOperationsWorkspace key={`photocopy-${workspaceRefreshToken}`} section="services" initialTab="student" visibleTabs={["student"]} /> : activeView === "platformControl" ? <AdvancedOperationsWorkspace key={`platform-control-${workspaceRefreshToken}`} section="platform" /> : activeView === "security" ? <SecurityWorkspace /> : activeView === "tenancy" ? <EnterpriseWorkspace role={role} onTenantChange={async () => { await load(); }} /> : <ModuleWorkspace key={activeView} view={activeView} overview={overview} />}</main>
       {accountOpen && <AccountSettings email={context.user.email} onClose={() => setAccountOpen(false)} />}
     </div>

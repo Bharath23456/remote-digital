@@ -491,11 +491,22 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .assignment-callout svg { width: 18px; color: var(--green); }
 .assignment-callout div { display: grid; gap: 3px; }
 .assignment-callout span { color: var(--muted); font-size: 11px; }
+.allocation-request-panel { border-left: 4px solid var(--green); }
+.allocation-request-panel .panel-title { display: flex; align-items: center; gap: 8px; }
+.allocation-request-panel .panel-title svg { width: 18px; color: var(--green); }
+.allocation-request-list { display: grid; gap: 10px; padding: 16px 20px 20px; }
+.allocation-request-list .assignment-callout { align-items: flex-start; }
+.allocation-request-list .assignment-callout div { flex: 1; }
+.allocation-request-list .assignment-callout small { color: var(--muted); font-size: 10px; }
 .run-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--line); background: var(--line); }
 .run-metrics > div { display: grid; gap: 4px; background: white; padding: 15px 20px; }
 .run-metrics span { color: var(--muted); font-size: 11px; }
 .run-metrics strong { font-size: 20px; }
 .evaluation-tabs { max-width: 100%; }
+.evaluation-queue-actions { flex: none; }
+.allocate-more-button { min-width: 142px; }
+.allocate-more-button:not(:disabled) { border-color: #73a994; background: #f2f8f5; color: var(--green); }
+.allocate-more-button:not(:disabled):hover { border-color: var(--green); background: var(--green-soft); }
 .desk-progress { display: grid; min-width: 120px; gap: 4px; }
 .desk-progress > div, .viewer-progress > div { height: 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
 .desk-progress > div span, .viewer-progress > div span { display: block; height: 100%; background: var(--green); }
@@ -1125,15 +1136,43 @@ td svg { width: 14px; height: 14px; vertical-align: middle; }
 .security-watermark { color: rgba(15, 114, 92, .05); }
 
 /* Compact dark Evaluation Desk header/dashboard refinements */
-.evaluation-desk-header { grid-template-columns: 42px minmax(240px, 1.4fr) minmax(160px, .8fr) 72px 126px 130px 110px 42px 42px 42px; gap: 10px; overflow: hidden; white-space: nowrap; border-bottom: 1px solid #303a35; background: #151b18; color: #f7faf8; box-shadow: none; padding: 0 14px; }
+.evaluation-desk-header { grid-template-columns: minmax(230px, 1fr) minmax(180px, 370px) auto; gap: 22px; overflow: hidden; white-space: nowrap; border-bottom: 1px solid #303a35; background: #151b18; color: #f7faf8; box-shadow: none; padding: 0 18px; }
+.evaluation-desk-header .viewer-identity { display: flex; min-width: 0; align-items: center; gap: 16px; }
 .evaluation-desk-header .viewer-title { min-width: 0; }
 .evaluation-desk-header .viewer-title strong, .evaluation-desk-header .viewer-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .evaluation-desk-header .viewer-title span { color: #b8c4bf; font-size: 12px; }
 .evaluation-desk-header .viewer-progress { min-width: 0; color: #dce6e2; }
-.evaluation-desk-header .camera-preview.compact { width: 64px; }
+.evaluation-desk-header .viewer-header-actions { min-width: 0; gap: 10px; }
+.evaluation-desk-header .camera-preview.compact { width: 78px; height: 42px; flex: 0 0 auto; overflow: hidden; border: 1px solid #384640; border-radius: 8px; }
 .evaluation-desk-header .viewer-network, .evaluation-desk-header .viewer-secure, .evaluation-desk-header .viewer-timer { display: inline-flex; min-width: 0; align-items: center; justify-content: center; gap: 7px; overflow: hidden; border: 1px solid #384640; border-radius: 8px; background: #202823; padding: 9px 10px; color: #f7faf8; font-size: 12px; font-weight: 800; text-overflow: ellipsis; }
 .evaluation-desk-header .viewer-network svg, .evaluation-desk-header .viewer-secure svg, .evaluation-desk-header .viewer-timer svg { width: 15px; height: 15px; color: #8ee0be; }
 .evaluation-desk-header .icon-button { border-color: #384640; background: #202823; color: #f7faf8; }
+.evaluation-desk-header .ai-assist-button { min-height: 38px; border-color: #397b65; background: #1d3b31; color: #b9ead7; }
+.viewer-navigation { display: flex; align-items: center; gap: 6px; border-left: 1px solid #334039; padding-left: 10px; }
+.sos-help-button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; border: 1px solid #a94b4b; border-radius: 8px; background: #392120; padding: 0 13px; color: #ffb8b4; cursor: pointer; font-size: 11px; font-weight: 850; letter-spacing: .01em; white-space: nowrap; box-shadow: inset 0 0 0 1px rgba(255,255,255,.025); }
+.sos-help-button:hover { border-color: #d66b67; background: #4a2725; color: #ffd0cd; }
+.sos-help-button svg { width: 16px; height: 16px; }
+.evaluator-help-modal { color: var(--ink); }
+.evaluator-help-body { display: grid; gap: 16px; padding: 20px; }
+.evaluator-help-context { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--subtle); padding: 11px 13px; }
+.evaluator-help-context span, .evaluator-help-body .field small { color: var(--muted); font-size: 11px; }
+.evaluator-help-body .field { display: grid; gap: 7px; }
+.evaluator-help-body .field textarea { min-height: 130px; }
+.evaluator-help-body .field small { text-align: right; }
+.evaluator-help-success { display: flex; align-items: flex-start; gap: 12px; margin: 20px; border: 1px solid #9fd1bd; border-radius: 8px; background: #eef8f4; padding: 16px; color: #154e3a; }
+.evaluator-help-success svg { width: 20px; flex: 0 0 auto; }
+.evaluator-help-success p { margin: 5px 0 0; color: #4f6f63; font-size: 12px; line-height: 1.5; }
+.notification-body-cell { display: block; min-width: 260px; white-space: pre-line; line-height: 1.45; }
+@media (max-width: 1500px) {
+  .evaluation-desk-header { grid-template-columns: minmax(210px, 1fr) minmax(150px, 280px) auto; gap: 14px; }
+  .evaluation-desk-header .camera-preview.compact, .evaluation-desk-header .viewer-secure { display: none; }
+}
+@media (max-width: 1100px) {
+  .evaluation-desk-header { grid-template-columns: minmax(190px, 1fr) auto; }
+  .evaluation-desk-header .viewer-progress, .evaluation-desk-header .viewer-timer { display: none; }
+  .sos-help-button span { display: none; }
+  .sos-help-button { width: 40px; padding: 0; }
+}
 .evaluation-dashboard-panel { position: relative; min-width: 320px; max-width: min(520px, 40vw); width: 100%; min-height: 0; box-sizing: border-box; overflow: hidden; }
 .dashboard-resize-handle { position: absolute; z-index: 4; inset: 0 auto 0 -5px; width: 10px; cursor: col-resize; touch-action: none; }
 .dashboard-resize-handle::after { content: ""; position: absolute; top: 46%; bottom: 46%; left: 4px; width: 2px; border-radius: 999px; background: rgba(15, 114, 92, .35); }

@@ -45,7 +45,7 @@ def catalog(request):
 def finalize(request, evaluation_id: str):
     membership = require_roles(request, Membership.Role.EVALUATOR)
     tenant_id = membership.institution.tenant_id
-    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, email__iexact=request.auth.email, status=Evaluator.Status.ACTIVE).first()
+    evaluator = Evaluator.objects.filter(tenant_id=tenant_id, user_id=request.auth.id, status=Evaluator.Status.ACTIVE).first()
     evaluation = Evaluation.objects.filter(id=evaluation_id, tenant_id=tenant_id, assignment__evaluator=evaluator).select_related("assignment").first() if evaluator else None
     if not evaluation:
         raise HttpError(404, "Evaluation not found")
