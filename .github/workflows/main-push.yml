@@ -1,0 +1,121 @@
+name: Push Notification & CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  notify-push:
+    name: Push Event & Audit Details
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Display Push Info in Action Logs
+        run: |
+          echo "=========================================================="
+          echo "🚀 NEW COMMIT PUSHED TO MAIN BRANCH"
+          echo "=========================================================="
+          echo "Pushed by   : ${{ github.actor }}"
+          echo "Author      : ${{ github.event.head_commit.author.name }} <${{ github.event.head_commit.author.email }}>"
+          echo "Commit SHA  : ${{ github.sha }}"
+          echo "Branch      : ${{ github.ref_name }}"
+          echo "Commit Msg  : ${{ github.event.head_commit.message }}"
+          echo "Timestamp   : ${{ github.event.head_commit.timestamp }}"
+          echo "Commit URL  : ${{ github.event.head_commit.url }}"
+          echo "=========================================================="
+          echo "Changed files in this commit:"
+          git diff-tree --no-commit-id --name-status -r ${{ github.sha }}
+          echo "=========================================================="
+
+      - name: Generate GitHub Actions Step Summary (UI Dashboard)
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          # 🚀 New Code Pushed to `main`
+
+          ### 👤 Commit & Developer Details
+          | Attribute | Details |
+          |---|---|
+          | **Developer** | **@${{ github.actor }}** |
+          | **Author** | `${{ github.event.head_commit.author.name }} <${{ github.event.head_commit.author.email }}>` |
+          | **Commit Message** | `${{ github.event.head_commit.message }}` |
+          | **Commit SHA** | [`${{ github.sha }}`](${{ github.event.head_commit.url }}) |
+          | **Branch** | `${{ github.ref_name }}` |
+          | **Pushed At** | `${{ github.event.head_commit.timestamp }}` |
+
+          ### 📁 Files Changed in This Push
+          ```text
+          EOF
+          git diff-tree --no-commit-id --name-status -r ${{ github.sha }} >> $GITHUB_STEP_SUMMARY
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ```
+
+          ---
+          > 🔔 *Automated DevOps pipeline triggered by push to `main` branch.*
+          EOF
+
+  validate-build:
+    name: Build & Sanity Check
+    needs: notify-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          docker compose config --quiet
+          echo "Docker compose configuration is valid."
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend Build Verification
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          DJANGO_API_URL: http://127.0.0.1:8000
+          STORAGE_GATEWAY_URL: http://127.0.0.1:9000
+          IDENTITY_SERVICE_URL: http://127.0.0.1:8100
+
+      - name: Update Step Summary with Build Status
+        if: success()
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ### ✅ Build & Validation Status
+          - **Frontend Build**: Verified successfully (`Next.js 16` compiled without errors)
+          - **Docker Config**: Compose schema and service definitions valid
+          EOF
+
+  deploy-local:
+    name: Deploy to Local WiFi Live Server
+    needs: validate-build
+    runs-on: self-hosted
+    steps:
+      - name: Pull Latest Changes and Restart Stack
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host "🚀 DEPLOYING LATEST COMMIT TO LOCAL SERVER"
+          Write-Host "=========================================="
+          Set-Location -Path "c:\Users\91895\Digital-Evaluation"
+          git pull origin main
+          docker compose up --build -d
+          docker compose exec -T backend python manage.py migrate --noinput
+          Write-Host "=========================================="
+          Write-Host "✅ Live Wi-Fi Server successfully updated!"
+          Write-Host "=========================================="

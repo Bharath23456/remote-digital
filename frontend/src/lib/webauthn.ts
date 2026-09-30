@@ -11,11 +11,13 @@ function encodeBase64Url(value: ArrayBuffer) {
   return window.btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
+import { safeRandomUUID } from "./crypto-compat";
+
 export function deviceContext() {
   const key = "admiezo-device-id";
   let deviceId = window.localStorage.getItem(key);
   if (!deviceId) {
-    deviceId = window.crypto.randomUUID();
+    deviceId = safeRandomUUID();
     window.localStorage.setItem(key, deviceId);
   }
   return {

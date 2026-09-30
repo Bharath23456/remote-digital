@@ -1,0 +1,13 @@
+{
+    admin off
+}
+
+:7383 {
+    tls /certs/cert.pem /certs/key.pem
+    reverse_proxy frontend:3000 {
+        header_up Host {host}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Port 7383
+        header_up X-Forwarded-Proto https
+    }
+}

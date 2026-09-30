@@ -3,6 +3,7 @@
 import { Camera, Check, RefreshCw, ScanFace, ShieldCheck, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch } from "@/lib/api";
+import { safeDigest } from "@/lib/crypto-compat";
 
 type FaceStatus = { enrolled?: boolean; status?: string; evaluator_id?: string; evaluator_name?: string; evaluator_code?: string };
 type IdentityEvaluator = { id: string; display_name: string; evaluator_code?: string; is_system_ai?: boolean; face_status?: string; face_enrolled?: boolean };
@@ -68,8 +69,7 @@ async function request(path: string, options?: RequestInit) {
 }
 
 async function digest(value: string | ArrayBuffer) {
-  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return safeDigest(value);
 }
 
 function stopStream(stream: MediaStream | null) {

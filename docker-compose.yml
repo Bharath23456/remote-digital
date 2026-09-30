@@ -242,9 +242,25 @@ services:
       retries: 10
     restart: unless-stopped
 
+  https-proxy:
+    image: caddy:2-alpine
+    ports:
+      - "7383:7383"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   script_storage:
   script_replica:
   script_backup:
   identity_data:
+  caddy_data:
+  caddy_config:

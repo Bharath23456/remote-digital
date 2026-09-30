@@ -7,6 +7,9 @@ const allowedDevOrigins = [
   "localhost",
   "*.localhost",
   "127.0.0.1",
+  "*.sslip.io",
+  "*.nip.io",
+  "192.168.1.*",
   ...(process.env.NGROK_DOMAIN ? [process.env.NGROK_DOMAIN] : []),
 ];
 

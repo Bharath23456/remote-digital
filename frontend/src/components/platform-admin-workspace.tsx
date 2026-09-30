@@ -64,7 +64,7 @@ export function PlatformAdminWorkspace() {
   function openUniversityWorkspace(university: University) {
     const domain = university.domains.find((item) => item.is_primary && item.status === "active") || university.domains.find((item) => item.status === "active");
     if (!domain) { setError("This university does not have an active domain"); return; }
-    const localPort = domain.hostname.endsWith(".localhost") && window.location.port ? `:${window.location.port}` : "";
+    const localPort = window.location.port ? `:${window.location.port}` : "";
     window.location.assign(`${window.location.protocol}//${domain.hostname}${localPort}`);
   }
 

@@ -3,6 +3,7 @@
 import { Camera, Check, LockKeyhole, Monitor, RefreshCw, ShieldAlert, Video, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { csrfFetch, SESSION_EXPIRED_EVENT } from "@/lib/api";
+import { safeDigest, safeRandomUUID } from "@/lib/crypto-compat";
 
 type Policy = { identity_verification_required?: boolean; strict_mode?: boolean; camera_required: boolean; fullscreen_required: boolean; single_screen_required: boolean; mobile_allowed?: boolean; event_recording: boolean; pause_on_violation?: boolean; require_resume_step_up?: boolean; allow_clipboard?: boolean; allow_download?: boolean; allow_print?: boolean; session_timeout_minutes?: number; heartbeat_seconds: number; no_face_seconds: number; retention_days: number };
 type Session = { id: string; assignment_id: string; status: string; pause_reason: string; violation_count: number; policy: Policy; version: number };
@@ -28,8 +29,7 @@ async function request(path: string, options?: RequestInit) {
 }
 
 async function digest(value: string | ArrayBuffer) {
-  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return safeDigest(value);
 }
 
 async function mediaInventory(): Promise<{ public: Inventory; rawDigest: string }> {
@@ -465,7 +465,7 @@ export function useSecureEvaluationSession() {
       if (inventory.public.headphones_detected) throw new Error("Disconnect headphones, headsets, earbuds, and AirPods before starting evaluation.");
       if (!policy.mobile_allowed && inventory.public.mobile) throw new Error("Mobile devices are not allowed for this evaluation.");
       const currentPreflight = { ...preflightRef.current, camera_ready: cameraIsActive(streamRef.current) && verifiedFrame.camera_ready, face_ready: policy.identity_verification_required === false || verifiedFrame.face_ready, headphones_detected: inventory.public.headphones_detected, fullscreen_active: Boolean(document.fullscreenElement), screen_count: screens.count, mobile: inventory.public.mobile, preflight_token: verifiedFrame.preflight_token };
-      const sessionFingerprint = await digest(`${crypto.randomUUID()}:${Date.now()}:${assignmentId}`);
+      const sessionFingerprint = await digest(`${safeRandomUUID()}:${Date.now()}:${assignmentId}`);
       const deviceFingerprint = await digest([navigator.userAgent, screen.width, screen.height, Intl.DateTimeFormat().resolvedOptions().timeZone, inventoryRef.current].join("|"));
       const created = await request("/api/v1/phase4/remote-security/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignment_id: assignmentId, session_fingerprint: sessionFingerprint, device_fingerprint: deviceFingerprint, consent, preflight_token: verifiedFrame.preflight_token, preflight: currentPreflight, device_inventory: inventory.public }) }) as Session;
       sessionStorage.setItem("admiezo-secure-session-fingerprint", sessionFingerprint);

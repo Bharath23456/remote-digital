@@ -1,4 +1,5 @@
 export const SESSION_EXPIRED_EVENT = "admiezo:session-expired";
+import { safeRandomUUID } from "./crypto-compat";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 function sessionExpired(response: Response, url: string) {
@@ -32,7 +33,7 @@ export async function csrfFetch(input: RequestInfo | URL, init: RequestInit = {}
     headers.set("X-CSRFToken", tokenBody.csrf_token);
     const normalized = new URL(url, window.location.origin).pathname;
     if ((normalized.endsWith("/submit") || normalized.endsWith("/finalize") || normalized.endsWith("/lock")) && !headers.has("Idempotency-Key")) {
-      headers.set("Idempotency-Key", crypto.randomUUID());
+      headers.set("Idempotency-Key", safeRandomUUID());
     }
   }
   const response = await fetchWithTimeout(input, { ...init, headers, credentials: init.credentials || "same-origin" });

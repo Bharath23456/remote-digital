@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Manrope, Source_Sans_3 } from "next/font/google";
 import "./globals.css";
+import "@/lib/crypto-compat";
 
 const display = Manrope({ subsets: ["latin"], variable: "--font-display" });
 const body = Source_Sans_3({ subsets: ["latin"], variable: "--font-body" });
