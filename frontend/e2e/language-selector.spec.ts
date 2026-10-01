@@ -37,11 +37,11 @@ test("language menu translates the dashboard and persists the choice", async ({ 
       : path.endsWith("/operations/overview") ? overview
         : path.endsWith("/evaluator-management") ? [evaluator]
           : path.endsWith("/allocation/catalog") ? { assignments: [assignment] }
-          : path.endsWith("/eligibility") ? { verifications: [], eligibility: [], history: [] }
-            : path.endsWith("/configuration/catalog") ? { subjects: [] }
-              : path.endsWith("/enterprise/form-fields") ? { fields: [] }
-        : path.endsWith("/auth/notifications") ? []
-          : [];
+            : path.endsWith("/eligibility") ? { verifications: [], eligibility: [], history: [] }
+              : path.endsWith("/configuration/catalog") ? { subjects: [] }
+                : path.endsWith("/enterprise/form-fields") ? { fields: [] }
+                  : path.endsWith("/auth/notifications") ? []
+                    : [];
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
@@ -49,7 +49,7 @@ test("language menu translates the dashboard and persists the choice", async ({ 
   await expect(page.getByRole("button", { name: /Select language/ })).toContainText("Language");
   await page.getByRole("button", { name: /Select language/ }).click();
   await expect(page.getByRole("menuitemradio")).toHaveCount(6);
-  await page.getByRole("menuitemradio", { name: /ಕನ್ನಡ/ }).click();
+  await page.getByRole("menuitemradio", { name: /english/ }).click();
 
   await expect(page.locator("html")).toHaveAttribute("lang", "kn");
   await expect(page.getByText("ಕಾರ್ಯಾಚರಣೆಗಳು", { exact: true })).toBeVisible();
