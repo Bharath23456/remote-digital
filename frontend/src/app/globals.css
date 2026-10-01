@@ -105,7 +105,40 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .login-form-wrap { display: grid; place-items: center; padding: 42px; } .login-form { width: 100%; max-width: 390px; } .login-form h2 { margin: 0; font-size: 25px; } .login-form > p { margin: 8px 0 27px; color: var(--muted); }
 .login-domain-note { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 11px; line-height: 1.5; text-align: center; }
 .field { display: block; margin-top: 17px; } .field span { display: block; margin-bottom: 7px; color: #415048; font-size: 12px; font-weight: 750; } .field input { width: 100%; height: 43px; border: 1px solid var(--line-strong); border-radius: 6px; outline: none; padding: 0 12px; background: white; }
-.field input:focus { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); } .login-submit { width: 100%; height: 43px; margin-top: 23px; } .login-submit:disabled { cursor: wait; opacity: .65; }
+.field input:focus { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+.primary-button.login-submit,
+.primary-button.signup-button,
+.login-submit,
+.signup-button {
+  width: 100%;
+  height: 43px;
+  margin-top: 23px;
+  background: #facc15;
+  border: 1px solid #eab308;
+  color: #17231e;
+  font-weight: 700;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.primary-button.login-submit:hover:not(:disabled),
+.primary-button.signup-button:hover:not(:disabled),
+.login-submit:hover:not(:disabled),
+.signup-button:hover:not(:disabled) {
+  background: #eab308;
+  border-color: #ca8a04;
+  color: #17231e;
+}
+.primary-button.login-submit:focus-visible,
+.primary-button.signup-button:focus-visible,
+.login-submit:focus-visible,
+.signup-button:focus-visible {
+  outline: 2px solid #ca8a04;
+  outline-offset: 2px;
+}
+.login-submit:disabled,
+.signup-button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
 .form-error { margin: 15px 0; border-left: 3px solid var(--red); background: var(--red-soft); padding: 10px 12px; color: var(--red); font-size: 12px; } .demo-note { margin-top: 18px; color: var(--faint); font-size: 11px; text-align: center; }
 .config-workspace { position: relative; }
 .config-readiness { display: grid; grid-template-columns: minmax(220px, 1fr) 120px 120px; overflow: hidden; margin-bottom: 14px; border: 1px solid var(--line); border-left: 4px solid var(--gold); border-radius: 7px; background: var(--line); gap: 1px; }
