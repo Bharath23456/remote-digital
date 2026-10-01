@@ -49,7 +49,7 @@ test("language menu translates the dashboard and persists the choice", async ({ 
   await expect(page.getByRole("button", { name: /Select language/ })).toContainText("Language");
   await page.getByRole("button", { name: /Select language/ }).click();
   await expect(page.getByRole("menuitemradio")).toHaveCount(6);
-  await page.getByRole("menuitemradio", { name: /english/ }).click();
+  await page.getByRole("menuitemradio", { name: /ಕನ್ನಡ/ }).click();
 
   await expect(page.locator("html")).toHaveAttribute("lang", "kn");
   await expect(page.getByText("ಕಾರ್ಯಾಚರಣೆಗಳು", { exact: true })).toBeVisible();
