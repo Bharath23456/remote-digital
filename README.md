@@ -540,3 +540,4 @@ Local defaults are intentionally rejected when `DJANGO_DEBUG=false`. Before a sh
 7. Put TLS termination and the frontend behind the chosen reverse proxy. Keep evaluation-core, identity-service, PostgreSQL, and storage private.
 
 The storage gateway provides local encrypted redundancy for development. On the server, mount primary, replica, and backup paths on independent durable volumes or replace the gateway implementation with object storage while preserving its signed URL contract.
+12345
