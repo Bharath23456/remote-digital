@@ -113,9 +113,10 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
   width: 100%;
   height: 43px;
   margin-top: 23px;
-  background: #facc15;
-  border: 1px solid #eab308;
-  color: #17231e;
+  background: #dc2626 !important;
+  background-color: #dc2626 !important;
+  border: 1px solid #b91c1c !important;
+  color: #ffffff !important;
   font-weight: 700;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
@@ -123,15 +124,16 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .primary-button.signup-button:hover:not(:disabled),
 .login-submit:hover:not(:disabled),
 .signup-button:hover:not(:disabled) {
-  background: #eab308;
-  border-color: #ca8a04;
-  color: #17231e;
+  background: #b91c1c !important;
+  background-color: #b91c1c !important;
+  border-color: #991b1b !important;
+  color: #ffffff !important;
 }
 .primary-button.login-submit:focus-visible,
 .primary-button.signup-button:focus-visible,
 .login-submit:focus-visible,
 .signup-button:focus-visible {
-  outline: 2px solid #ca8a04;
+  outline: 2px solid #dc2626 !important;
   outline-offset: 2px;
 }
 .login-submit:disabled,
