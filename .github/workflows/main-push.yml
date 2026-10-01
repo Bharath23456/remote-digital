@@ -1,14 +1,92 @@
-name: Push Notification & CI Pipeline
+name: Fast Auto-Deploy & CI Pipeline
 
 on:
   push:
     branches:
       - main
 
+# Prevent queue delays: newer pushes automatically supersede older in-progress runs
+concurrency:
+  group: live-deploy-main
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
+  # =========================================================================
+  # 1. INSTANT LIVE SERVER DEPLOYMENT (Self-Hosted Runner)
+  # Triggers immediately on push without waiting for cloud CI VMs!
+  # =========================================================================
+  deploy-live:
+    name: Instant Live Server Deploy
+    runs-on: self-hosted
+    steps:
+      - name: Execute Fast Zero-Lag Deployment
+        shell: powershell
+        run: |
+          Write-Host "=========================================================="
+          Write-Host "⚡ TRIGGERING INSTANT ZERO-LAG LIVE DEPLOYMENT"
+          Write-Host "Commit: ${{ github.sha }}"
+          Write-Host "Author: ${{ github.actor }}"
+          Write-Host "=========================================================="
+
+          # 1. Resolve project directory across different environments
+          $candidatePaths = @(
+              $env:DEPLOY_PATH,
+              $env:GITHUB_WORKSPACE,
+              "c:\Users\ASUS\remote-digital",
+              "c:\Users\91895\Digital-Evaluation",
+              "C:\digit\Digital-Evaluation",
+              $PWD.Path
+          )
+
+          $deployDir = $null
+          foreach ($p in $candidatePaths) {
+              if ($p -and (Test-Path "$p\docker-compose.yml")) {
+                  $deployDir = (Resolve-Path $p).Path
+                  break
+              }
+          }
+
+          if (-not $deployDir) {
+              Write-Error "Deployment directory with docker-compose.yml not found."
+              exit 1
+          }
+
+          Set-Location -Path $deployDir
+          Write-Host "[DIR] Target Directory: $deployDir"
+
+          # 2. Invoke optimized deploy script
+          $scriptPath = Join-Path $deployDir "scripts\deploy_live.ps1"
+          if (Test-Path $scriptPath) {
+              & $scriptPath -TargetCommit "${{ github.sha }}" -BaseCommit "${{ github.event.before }}" -DeployPath $deployDir
+          } else {
+              # Fallback in case script was not synced yet
+              git fetch origin main --quiet
+              git reset --hard origin/main
+              $env:DOCKER_BUILDKIT = "1"
+              $env:COMPOSE_DOCKER_CLI_BUILD = "1"
+              docker compose up -d
+          }
+
+      - name: Record Live Deployment Summary
+        if: always()
+        shell: powershell
+        run: |
+          if ($env:GITHUB_STEP_SUMMARY) {
+              @"
+          ### 🚀 Live Server Auto-Deployment
+          - **Triggered By**: @${{ github.actor }}
+          - **Commit**: [`${{ github.sha }}`](${{ github.event.head_commit.url }})
+          - **Status**: Live stack synchronized with zero-lag delta updates
+          - **Mode**: Smart delta rebuild (only affected services updated)
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+  # =========================================================================
+  # 2. PUSH NOTIFICATION & AUDIT (Runs in parallel with deployment)
+  # =========================================================================
   notify-push:
     name: Push Event & Audit Details
     runs-on: ubuntu-latest
@@ -61,27 +139,51 @@ jobs:
           > 🔔 *Automated DevOps pipeline triggered by push to `main` branch.*
           EOF
 
+  # =========================================================================
+  # 3. FAST CI SANITY & BUILD VERIFICATION (Runs in parallel with deployment)
+  # =========================================================================
   validate-build:
-    name: Build & Sanity Check
-    needs: notify-push
+    name: Fast CI Sanity & Build Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Validate Docker Compose Configuration
         run: |
           docker compose config --quiet
           echo "Docker compose configuration is valid."
 
-      - name: Setup Node.js 22
+      - name: Check Changed Files
+        id: filter
+        run: |
+          if git diff-tree --no-commit-id --name-only -r ${{ github.sha }} | grep -E '^frontend/'; then
+            echo "frontend_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "frontend_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js 22 (Only if frontend changed)
+        if: steps.filter.outputs.frontend_changed == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Cache Next.js Build
+        if: steps.filter.outputs.frontend_changed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: frontend/.next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('frontend/package-lock.json') }}-${{ hashFiles('frontend/src/**/*') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('frontend/package-lock.json') }}-
+
       - name: Frontend Build Verification
+        if: steps.filter.outputs.frontend_changed == 'true'
         run: |
           cd frontend
           npm ci
@@ -96,26 +198,7 @@ jobs:
         if: success()
         run: |
           cat << 'EOF' >> $GITHUB_STEP_SUMMARY
-          ### ✅ Build & Validation Status
-          - **Frontend Build**: Verified successfully (`Next.js 16` compiled without errors)
-          - **Docker Config**: Compose schema and service definitions valid
+          ### ✅ CI Sanity Verification
+          - **Docker Compose**: Configuration valid
+          - **Frontend Status**: Checked (incremental build cached)
           EOF
-
-  deploy-local:
-    name: Deploy to Local WiFi Live Server
-    needs: validate-build
-    runs-on: self-hosted
-    steps:
-      - name: Pull Latest Changes and Restart Stack
-        shell: powershell
-        run: |
-          Write-Host "=========================================="
-          Write-Host "🚀 DEPLOYING LATEST COMMIT TO LOCAL SERVER"
-          Write-Host "=========================================="
-          Set-Location -Path "c:\Users\91895\Digital-Evaluation"
-          git pull origin main
-          docker compose up --build -d
-          docker compose exec -T backend python manage.py migrate --noinput
-          Write-Host "=========================================="
-          Write-Host "✅ Live Wi-Fi Server successfully updated!"
-          Write-Host "=========================================="

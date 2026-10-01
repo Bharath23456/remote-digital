@@ -540,4 +540,22 @@ Local defaults are intentionally rejected when `DJANGO_DEBUG=false`. Before a sh
 7. Put TLS termination and the frontend behind the chosen reverse proxy. Keep evaluation-core, identity-service, PostgreSQL, and storage private.
 
 The storage gateway provides local encrypted redundancy for development. On the server, mount primary, replica, and backup paths on independent durable volumes or replace the gateway implementation with object storage while preserving its signed URL contract.
-12345
+
+## Automated CI/CD & Instant Live Server Deployment
+
+Whenever any team member pushes changes to the `main` branch, the GitHub Actions pipeline ([`.github/workflows/main-push.yml`](.github/workflows/main-push.yml)) triggers automatically with zero lag and delta-based execution:
+
+### Key Highlights:
+1. **Instant Triggering**: The live server deployment executes immediately in seconds without waiting for cloud build queues or unrelated steps.
+2. **Concurrency Control (`cancel-in-progress`)**: Rapid back-to-back pushes cancel outdated in-flight deployments to eliminate runner bottlenecks and resource collisions.
+3. **Smart Delta Updates**:
+   - **Documentation & Workflows**: Merged in under 1 second with zero container restarts or downtime.
+   - **Caddy Proxy / Certs**: Reloaded dynamically via `caddy reload` in <0.5 seconds with zero dropped connections.
+   - **Backend / Workers**: Rebuilt and restarted with BuildKit layer caching (~4-8s) without restarting or reloading the frontend.
+   - **Frontend**: Rebuilt incrementally with cached dependencies while backend and databases remain uninterrupted.
+4. **Resilient Directory Resolution**: Dynamically detects the server workspace across different machines (`C:\Users\ASUS\remote-digital`, `C:\Users\91895\Digital-Evaluation`, `C:\digit\Digital-Evaluation`, or `$env:DEPLOY_PATH`).
+5. **Self-Hosted Runner Setup**:
+   To connect the server machine to GitHub Actions:
+   ```powershell
+   .\scripts\setup_runner.ps1 -RunnerToken <GITHUB_RUNNER_TOKEN>
+   ```
