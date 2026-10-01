@@ -140,10 +140,10 @@ jobs:
           EOF
 
   # =========================================================================
-  # 3. FAST CI SANITY & BUILD VERIFICATION (Runs in parallel with deployment)
+  # 3. DOCKER MAIN BUILD & TEST (Runs on GitHub Cloud in parallel)
   # =========================================================================
-  validate-build:
-    name: Fast CI Sanity & Build Check
+  docker-main-build-and-test:
+    name: Docker Main Build & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -156,17 +156,15 @@ jobs:
           docker compose config --quiet
           echo "Docker compose configuration is valid."
 
-      - name: Check Changed Files
-        id: filter
-        run: |
-          if git diff-tree --no-commit-id --name-only -r ${{ github.sha }} | grep -E '^frontend/'; then
-            echo "frontend_changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "frontend_changed=false" >> $GITHUB_OUTPUT
-          fi
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Setup Node.js 22 (Only if frontend changed)
-        if: steps.filter.outputs.frontend_changed == 'true'
+      - name: Build Core Docker Services (Main Release)
+        run: |
+          echo "Building production Docker images for main branch..."
+          docker compose build backend frontend storage-gateway identity-service
+
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -174,7 +172,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Cache Next.js Build
-        if: steps.filter.outputs.frontend_changed == 'true'
         uses: actions/cache@v4
         with:
           path: frontend/.next/cache
@@ -183,7 +180,6 @@ jobs:
             ${{ runner.os }}-nextjs-${{ hashFiles('frontend/package-lock.json') }}-
 
       - name: Frontend Build Verification
-        if: steps.filter.outputs.frontend_changed == 'true'
         run: |
           cd frontend
           npm ci
@@ -198,7 +194,9 @@ jobs:
         if: success()
         run: |
           cat << 'EOF' >> $GITHUB_STEP_SUMMARY
-          ### ✅ CI Sanity Verification
-          - **Docker Compose**: Configuration valid
-          - **Frontend Status**: Checked (incremental build cached)
+          ### ✅ Docker Main Build & Test Status
+          - **Docker Multi-Service Build**: All core containers built successfully from `main`
+          - **Docker Compose Schema**: Validated
+          - **Frontend Production Build**: Compiled without errors
           EOF
+
