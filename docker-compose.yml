@@ -256,6 +256,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  webhook:
+    build:
+      context: .
+      dockerfile: webhook/Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      REPO_DIR: /app
+      COMPOSE_PROJECT_NAME: remote-digital
+      WEBHOOK_PORT: 5000
+      RUN_TESTS: "true"
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   script_storage:

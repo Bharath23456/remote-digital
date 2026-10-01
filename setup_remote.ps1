@@ -53,14 +53,15 @@ Write-Host "Registering tenant subdomain in database..." -ForegroundColor Yellow
 Start-Sleep -Seconds 5
 docker compose exec -T backend python manage.py shell -c "from apps.tenancy.models import TenantAccount, TenantDomain; acc = TenantAccount.objects.filter(slug='northbridge').first(); (TenantDomain.objects.get_or_create(tenant_account=acc, hostname='northbridge.$TargetIP.sslip.io', defaults={'kind': 'managed', 'status': 'active', 'is_primary': True}) if acc else None)"
 
-# 7. Add Windows Firewall rule for ports 3000 and 7383
+# 7. Add Windows Firewall rule for ports 3000, 5000, and 7383
 Write-Host "To allow incoming LAN connections, run PowerShell as Administrator:" -ForegroundColor Magenta
-Write-Host "  netsh advfirewall firewall add rule name='ADMIEZO Ports' dir=in action=allow protocol=TCP localport=3000,7383" -ForegroundColor Cyan
+Write-Host "  netsh advfirewall firewall add rule name='ADMIEZO Ports' dir=in action=allow protocol=TCP localport=3000,5000,7383" -ForegroundColor Cyan
 
 Write-Host "`n=== ADMIEZO IS READY! ===" -ForegroundColor Green
 Write-Host "Platform Super Admin (HTTPS): https://${TargetIP}:7383" -ForegroundColor White
 Write-Host "University Subdomain (HTTPS): https://northbridge.${TargetIP}.sslip.io:7383" -ForegroundColor White
 Write-Host "University Subdomain (HTTP):  http://northbridge.${TargetIP}.sslip.io:3000" -ForegroundColor White
+Write-Host "CI/CD Webhook Listener:       http://${TargetIP}:5000/webhook" -ForegroundColor White
 Write-Host "`nSeed Logins:" -ForegroundColor Gray
 Write-Host "  Administrator: admin@admiezo.local / ChangeMe123!" -ForegroundColor Gray
 Write-Host "  Super Admin:   platform@admiezo.local / ChangeMe123!" -ForegroundColor Gray
