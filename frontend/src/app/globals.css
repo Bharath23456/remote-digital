@@ -113,9 +113,9 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
   width: 100%;
   height: 43px;
   margin-top: 23px;
-  background: #14532d !important;
-  background-color: #14532d !important;
-  border: 1px solid #0f3d21 !important;
+  background: #ea580c !important;
+  background-color: #ea580c !important;
+  border: 1px solid #c2410c !important;
   color: #ffffff !important;
   font-weight: 700;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
@@ -124,16 +124,16 @@ td { height: 52px; padding: 8px 16px; border-bottom: 1px solid #edf1ef; color: #
 .primary-button.signup-button:hover:not(:disabled),
 .login-submit:hover:not(:disabled),
 .signup-button:hover:not(:disabled) {
-  background: #0d361d !important;
-  background-color: #0d361d !important;
-  border-color: #0a2916 !important;
+  background: #c2410c !important;
+  background-color: #c2410c !important;
+  border-color: #9a3412 !important;
   color: #ffffff !important;
 }
 .primary-button.login-submit:focus-visible,
 .primary-button.signup-button:focus-visible,
 .login-submit:focus-visible,
 .signup-button:focus-visible {
-  outline: 2px solid #14532d !important;
+  outline: 2px solid #ea580c !important;
   outline-offset: 2px;
 }
 .login-submit:disabled,
